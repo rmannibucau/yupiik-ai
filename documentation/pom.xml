@@ -10,6 +10,12 @@
   <dependencies>
     <dependency>
       <groupId>io.yupiik.ia.agent</groupId>
+      <artifactId>acp</artifactId>
+      <version>${project.version}</version>
+      <scope>provided</scope>
+    </dependency>
+    <dependency>
+      <groupId>io.yupiik.ia.agent</groupId>
       <artifactId>core</artifactId>
       <version>${project.version}</version>
       <scope>provided</scope>

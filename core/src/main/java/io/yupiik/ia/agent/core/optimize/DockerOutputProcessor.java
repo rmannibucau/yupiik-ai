@@ -19,6 +19,7 @@ import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
+import java.util.regex.Pattern;
 import java.util.stream.Stream;
 
 /**
@@ -29,6 +30,8 @@ import java.util.stream.Stream;
  */
 @ApplicationScoped
 public class DockerOutputProcessor implements OutputProcessor {
+    private static final Pattern WHITESPACE = Pattern.compile("\\s+");
+    private static final Pattern COLUMN_SEPARATOR = Pattern.compile("\\s{2,}");
     private static final int MAX_PS_LINES = 20;
     private static final int MAX_LOG_LINES = 50;
     private final CommandOutputPostProcessor commandOutput;
@@ -88,7 +91,7 @@ public class DockerOutputProcessor implements OutputProcessor {
             if (line.isBlank()) {
                 continue;
             }
-            final var cols = line.split("\\s{2,}");
+            final var cols = COLUMN_SEPARATOR.split(line);
             if (header) {
                 header = false;
                 out.add(pickHeader(cols, keep));
@@ -131,7 +134,7 @@ public class DockerOutputProcessor implements OutputProcessor {
     }
 
     private static String subCommand(final String command) {
-        final var tokens = command.strip().split("\\s+");
+        final var tokens = WHITESPACE.split(command.strip());
         for (final var t : tokens) {
             if (!t.equals("docker") && !t.startsWith("-")) {
                 return t;

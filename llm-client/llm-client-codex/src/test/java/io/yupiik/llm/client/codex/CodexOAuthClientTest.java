@@ -42,6 +42,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.Base64;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.regex.Pattern;
@@ -52,6 +53,8 @@ import org.junit.jupiter.api.extension.ExtendWith;
 
 @ExtendWith(TestJsonMapper.class)
 class CodexOAuthClientTest {
+    private static final Pattern REDIRECT_PORT = Pattern.compile("redirect_uri=[^&]*127\\.0\\.0\\.1%3A(\\d+)[^&]*");
+    private static final Pattern STATE = Pattern.compile("state=([^&]+)");
     private HttpServer issuer;
     private String issuerUrl;
     private ExtendedHttpClient client;
@@ -239,8 +242,7 @@ class CodexOAuthClientTest {
     private static int portOf(final String authorizeUrl) {
         final var uri = URI.create(authorizeUrl);
         final var query = uri.getRawQuery();
-        final var m = Pattern.compile("redirect_uri=[^&]*127\\.0\\.0\\.1%3A(\\d+)[^&]*")
-                .matcher(query);
+        final var m = REDIRECT_PORT.matcher(query);
         assertTrue(m.find(), "cannot find the port in " + authorizeUrl);
         return Integer.parseInt(m.group(1));
     }
@@ -261,14 +263,14 @@ class CodexOAuthClientTest {
             assertEquals(500, response.statusCode());
             assertTrue(response.body().contains("Login failed"));
         }
-        assertThrows(java.util.concurrent.ExecutionException.class, () -> result.get(5, TimeUnit.SECONDS));
+        assertThrows(ExecutionException.class, () -> result.get(5, TimeUnit.SECONDS));
         final var probe = HttpServer.create(new InetSocketAddress("127.0.0.1", portOf(url)), 0);
         probe.stop(0);
     }
 
     private static String stateOf(final String authorizeUrl) {
         final var uri = URI.create(authorizeUrl);
-        final var m = Pattern.compile("state=([^&]+)").matcher(uri.getRawQuery());
+        final var m = STATE.matcher(uri.getRawQuery());
         assertTrue(m.find(), "cannot find the state in " + authorizeUrl);
         return URLDecoder.decode(m.group(1), StandardCharsets.UTF_8);
     }

@@ -52,7 +52,7 @@ public class ReadFileTool implements EmbeddedTool {
     }
 
     @Override
-    public String description() {
+    public String description(final Path workdir) {
         return "Read the contents of a file or directory. Each text line is prefixed by its 1-based line number "
                 + "as `<line>: <content>`. Directory entries are returned one per line (directories end with `/`). "
                 + "Use offset (1-based line/entry) and limit to read large files or directories in sections; prefer "
@@ -78,17 +78,12 @@ public class ReadFileTool implements EmbeddedTool {
     }
 
     @Override
-    public ToolResult execute(final Map<String, Object> args) {
-        return execute(args, ToolContext.empty());
-    }
-
-    @Override
     public ToolResult execute(final Map<String, Object> args, final ToolContext context) {
         final var raw = arg(args, "path");
         if (raw == null || raw.isEmpty()) {
             return ToolResult.error("path is required");
         }
-        final var path = context.resolvePath(raw, configuration == null ? null : configuration.resolveProjectDir());
+        final var path = context.resolvePath(raw);
         if (!Files.exists(path)) {
             final var suggestion = suggestPath(path);
             return ToolResult.error("File or directory not found: " + path

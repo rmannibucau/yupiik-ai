@@ -21,6 +21,7 @@ import io.yupiik.ia.agent.core.tools.Schemas;
 import io.yupiik.ia.agent.core.tools.ToolCategory;
 import io.yupiik.ia.agent.core.tools.ToolContext;
 import io.yupiik.ia.agent.core.tools.ToolResult;
+import java.nio.file.Path;
 import java.util.Locale;
 import java.util.Map;
 
@@ -42,7 +43,7 @@ public class CodeFindCodeTool implements EmbeddedTool {
     }
 
     @Override
-    public String description() {
+    public String description(final Path workdir) {
         return "Find symbols (types, interfaces, enums, methods, fields) by name in the structural code graph, "
                 + "returning their kind, fully-qualified name and file line span. Use it to locate a symbol before "
                 + "tracing its relations with code_trace_calls.";
@@ -72,11 +73,6 @@ public class CodeFindCodeTool implements EmbeddedTool {
     }
 
     @Override
-    public ToolResult execute(final Map<String, Object> args) {
-        return execute(args, ToolContext.empty());
-    }
-
-    @Override
     public ToolResult execute(final Map<String, Object> args, final ToolContext ctx) {
         final var query = arg(args, "query");
         if (query == null || query.isBlank()) {
@@ -85,7 +81,7 @@ public class CodeFindCodeTool implements EmbeddedTool {
         final var kind = arg(args, "kind");
         final var qKind = parseKind(kind);
         final var max = (int) Math.max(1, Math.min(200, optInt(args, "max", 40)));
-        final var idx = codeGraph.queryIndex(ctx == null ? null : ctx.projectDir());
+        final var idx = codeGraph.queryIndex(ctx.projectDir());
         if (idx == null) {
             return ToolResult.ok("Structural code graph is empty.");
         }

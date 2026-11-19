@@ -23,10 +23,12 @@ import io.yupiik.ia.agent.core.skills.SkillLocator;
 import io.yupiik.ia.agent.core.tools.EmbeddedTool;
 import io.yupiik.ia.agent.core.tools.Schemas;
 import io.yupiik.ia.agent.core.tools.ToolCategory;
+import io.yupiik.ia.agent.core.tools.ToolContext;
 import io.yupiik.ia.agent.core.tools.ToolResult;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.Map;
 
 @ApplicationScoped
@@ -43,17 +45,14 @@ public class SkillTool implements EmbeddedTool {
     }
 
     @Override
-    public String description() {
+    public String description(final Path workdir) {
         if (configuration == null
                 || configuration.skills() == null
                 || !configuration.skills().enabled()) {
             return "Load a skill by name and return its SKILL.md instructions. No skills are currently enabled.";
         }
-        final var catalog = SkillLocator.availableSkillsCatalog(configuration);
-        if (catalog.isEmpty()) {
-            return "Load a skill by name and return its SKILL.md instructions. No skills are currently available.";
-        }
-        return "Load a skill by name and return its SKILL.md instructions. Available skills:\n" + catalog;
+        return "Load a skill by name and return its SKILL.md instructions. "
+                + "Available skills are listed in the session's available_skills catalog.";
     }
 
     @Override
@@ -72,15 +71,21 @@ public class SkillTool implements EmbeddedTool {
     }
 
     @Override
-    public ToolResult execute(final Map<String, Object> args) {
+    public ToolResult execute(final Map<String, Object> args, final ToolContext context) {
+        if (configuration == null
+                || configuration.skills() == null
+                || !configuration.skills().enabled()) {
+            return ToolResult.error("Skills are disabled.");
+        }
         final var name = arg(args, "name");
         if (name == null || name.isBlank()) {
             return ToolResult.error("name is required");
         }
-        final var file = SkillLocator.find(configuration, name);
+        final var workingDir = context.projectDir();
+        final var file = SkillLocator.find(configuration, name, workingDir);
         if (file == null) {
             return ToolResult.error("Skill not found: " + name + ". Available: "
-                    + String.join(", ", SkillLocator.skillNames(configuration)));
+                    + String.join(", ", SkillLocator.skillNames(configuration, workingDir)));
         }
         try {
             return ToolResult.ok(Files.readString(file));

@@ -18,6 +18,7 @@ package io.yupiik.ia.agent.github.support;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.regex.Pattern;
 
 /**
  * Commands for short-lived test JVMs, never production launchers or inherited runtime arguments.
@@ -27,6 +28,7 @@ import java.util.List;
  * No processor cap is imposed: that could hide concurrency bugs.
  */
 public final class TestJava {
+    private static final Pattern WHITESPACE = Pattern.compile("\\s+");
     private static final String OPTIONS = "yca.test.childJvmOptions";
 
     private TestJava() {}
@@ -54,7 +56,7 @@ public final class TestJava {
         final var options =
                 System.getProperty(OPTIONS, "-XX:TieredStopAtLevel=1").strip();
         if (!options.isEmpty()) {
-            for (final var option : options.split("\\s+")) {
+            for (final var option : WHITESPACE.split(options)) {
                 command.add(prefix + option);
             }
         }

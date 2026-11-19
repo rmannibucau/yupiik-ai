@@ -21,6 +21,7 @@ import io.yupiik.ia.agent.core.question.FeedbackGate;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.CompletionStage;
+import java.util.function.BooleanSupplier;
 
 /**
  * Interaction side of a shell: the primitives commands use to get user input.
@@ -31,6 +32,11 @@ import java.util.concurrent.CompletionStage;
  * instead of joining it whenever possible.
  */
 public interface ShellIO {
+    /** Captures cancellation of the current command for a settings commit after blocking hooks. */
+    default BooleanSupplier settingsUpdateCancellation() {
+        return () -> false;
+    }
+
     /**
      * Reads a line entered by the user. The stage completes with the entered
      * line, with an empty optional on end of input (Ctrl-D) or exceptionally

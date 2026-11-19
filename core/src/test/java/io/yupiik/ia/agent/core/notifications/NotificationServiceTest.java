@@ -44,6 +44,32 @@ import org.junit.jupiter.api.io.TempDir;
 class NotificationServiceTest {
 
     @Test
+    void sanitizesAsciiControlsWithoutBroadeningUnicodeWhitespaceAndKeepsLabelLimits() {
+        final var deliveries = new ArrayList<Delivery>();
+        final var service = new NotificationService(
+                TestConfigs.codingAgent(
+                        Map.of("yca.notifications.enabled", "true", "yca.notifications.command", "custom")),
+                executor(),
+                (argv, env) -> {
+                    deliveries.add(new Delivery(argv, env));
+                    return new FakeProcess();
+                });
+        service.onApprovalRequired(
+                "s",
+                "\u2003alpha\u0000\t\n\u007fbeta\u00a0gamma\u2003delta\u2003",
+                "\ttool\r\n\u000b\f name\t",
+                "main");
+        final var first = deliveries.getFirst().env();
+        assertEquals("s - alpha beta\u00a0gamma\u2003delta", first.get(NotificationService.ENV_TITLE));
+        assertEquals("tool name", first.get(NotificationService.ENV_TOOL));
+
+        service.onApprovalRequired("s", "x".repeat(121), "y".repeat(65), "main");
+        final var last = deliveries.getLast().env();
+        assertEquals("s - " + "x".repeat(120), last.get(NotificationService.ENV_TITLE));
+        assertEquals("y".repeat(64), last.get(NotificationService.ENV_TOOL));
+    }
+
+    @Test
     void eventSwitchesAreIndependentAndMasterSwitchWins() {
         for (int mask = 0; mask < 32; mask++) {
             final var deliveries = new ArrayList<Delivery>();

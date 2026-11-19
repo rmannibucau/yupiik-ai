@@ -18,6 +18,7 @@ package io.yupiik.ia.agent.core.codegraph;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import io.yupiik.ia.agent.core.tools.ToolContext;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
@@ -45,8 +46,8 @@ class CodeTraceCallsToolTest {
     void defaultsToCallsRelationsForCallers() {
         // direction=callers on RowSet with the default (calls): no CALLS edge targets RowSet, so neither the
         // IMPLEMENTS (RowSetImpl) nor the USES (Producer) relation is followed.
-        final var result =
-                new CodeTraceCallsTool(fake(store())).execute(Map.of("symbol", "RowSet", "direction", "callers"));
+        final var result = new CodeTraceCallsTool(fake(store()))
+                .execute(Map.of("symbol", "RowSet", "direction", "callers"), ToolContext.empty(fakeRoot));
         assertTrue(result.success());
         final var out = result.output();
         assertFalse(out.contains("org.hop.RowSetImpl"), out);
@@ -57,7 +58,9 @@ class CodeTraceCallsToolTest {
     void implementsExplicitlyFindsImplementors() {
         // the default does not traverse implements, but an explicit edgeTypes=implements must.
         final var result = new CodeTraceCallsTool(fake(store()))
-                .execute(Map.of("symbol", "RowSet", "direction", "callers", "edgeTypes", "implements"));
+                .execute(
+                        Map.of("symbol", "RowSet", "direction", "callers", "edgeTypes", "implements"),
+                        ToolContext.empty(fakeRoot));
         assertTrue(result.success());
         final var out = result.output();
         assertTrue(out.contains("org.hop.RowSetImpl"), out);
@@ -66,7 +69,9 @@ class CodeTraceCallsToolTest {
     @Test
     void narrowsToImplementsForCallers() {
         final var result = new CodeTraceCallsTool(fake(store()))
-                .execute(Map.of("symbol", "org.hop.RowSet", "direction", "callers", "edgeTypes", "implements"));
+                .execute(
+                        Map.of("symbol", "org.hop.RowSet", "direction", "callers", "edgeTypes", "implements"),
+                        ToolContext.empty(fakeRoot));
         final var out = result.output();
         assertTrue(out.contains("org.hop.RowSetImpl"), out);
         assertFalse(out.contains("org.hop.Producer"), out);
@@ -77,14 +82,17 @@ class CodeTraceCallsToolTest {
         // direction=callers, edgeTypes=calls on RowSetImpl -> only Producer (CALLS->RowSetImpl), not RowSetImpl?-> by
         // implements
         final var result = new CodeTraceCallsTool(fake(store()))
-                .execute(Map.of("symbol", "RowSetImpl", "direction", "callers", "edgeTypes", "calls"));
+                .execute(
+                        Map.of("symbol", "RowSetImpl", "direction", "callers", "edgeTypes", "calls"),
+                        ToolContext.empty(fakeRoot));
         final var out = result.output();
         assertTrue(out.contains("org.hop.Producer"), out);
     }
 
     @Test
     void errorsWhenSymbolMissing() {
-        final var result = new CodeTraceCallsTool(fake(store())).execute(Map.of("symbol", "doesNotExist"));
+        final var result = new CodeTraceCallsTool(fake(store()))
+                .execute(Map.of("symbol", "doesNotExist"), ToolContext.empty(fakeRoot));
         assertFalse(result.success());
         assertTrue(result.output().contains("Symbol not found"));
     }
@@ -93,7 +101,9 @@ class CodeTraceCallsToolTest {
     void resolvesFoundSymbolsToKindAndFile() {
         // decision-grade output links each found symbol to its kind and file:start-end in an indented tree.
         final var result = new CodeTraceCallsTool(fake(store()))
-                .execute(Map.of("symbol", "org.hop.RowSet", "direction", "callers", "edgeTypes", "implements"));
+                .execute(
+                        Map.of("symbol", "org.hop.RowSet", "direction", "callers", "edgeTypes", "implements"),
+                        ToolContext.empty(fakeRoot));
         assertTrue(result.success());
         final var out = result.output();
         // Indented tree format: "- fqn (kind) [file:start-end]"
@@ -132,7 +142,9 @@ class CodeTraceCallsToolTest {
                 Map.of(),
                 System.currentTimeMillis());
         final var result = new CodeTraceCallsTool(fake(store))
-                .execute(Map.of("symbol", "org.hop.PipelineRunConfiguration", "edgeTypes", "implements"));
+                .execute(
+                        Map.of("symbol", "org.hop.PipelineRunConfiguration", "edgeTypes", "implements"),
+                        ToolContext.empty(fakeRoot));
         assertTrue(result.success());
         final var out = result.output();
         assertTrue(out.contains("is a type, not an interface"), out);
@@ -150,7 +162,9 @@ class CodeTraceCallsToolTest {
                 Map.of(),
                 System.currentTimeMillis());
         final var result = new CodeTraceCallsTool(fake(store))
-                .execute(Map.of("symbol", "org.hop.PipelineRunConfiguration", "edgeTypes", "implements"));
+                .execute(
+                        Map.of("symbol", "org.hop.PipelineRunConfiguration", "edgeTypes", "implements"),
+                        ToolContext.empty(fakeRoot));
         assertTrue(result.success());
         final var out = result.output();
         assertTrue(out.contains("is a type, not an interface"), out);
@@ -160,12 +174,12 @@ class CodeTraceCallsToolTest {
     private static StructuralCodeGraph fake(final GraphStore store) {
         return new StructuralCodeGraph() {
             @Override
-            public GraphStore graph() {
+            public GraphStore graph(final Path root) {
                 return store;
             }
 
             @Override
-            public Path storeRoot() {
+            public Path storeRoot(final Path root) {
                 return fakeRoot.resolve("fake-code-graph");
             }
         };

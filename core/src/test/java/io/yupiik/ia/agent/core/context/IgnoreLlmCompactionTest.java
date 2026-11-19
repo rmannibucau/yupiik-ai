@@ -22,6 +22,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
+import io.yupiik.ia.agent.core.configuration.TestConfigs;
 import io.yupiik.ia.agent.core.llm.ChatClient;
 import io.yupiik.ia.agent.core.llm.ChatCompletionRequest;
 import io.yupiik.ia.agent.core.llm.ChatResult;
@@ -78,7 +79,7 @@ class IgnoreLlmCompactionTest {
         entries.put("yca.compaction.tail.budgetTokens", "1");
         entries.put("yca.pruning.keepRecent", "1");
         entries.putAll(extra);
-        return io.yupiik.ia.agent.core.configuration.TestConfigs.codingAgent(entries);
+        return TestConfigs.codingAgent(entries);
     }
 
     private ProviderManager providerManager(final CodingAgentConfiguration cfg) {
@@ -118,7 +119,8 @@ class IgnoreLlmCompactionTest {
                 providerManager(cfg),
                 null,
                 "s1",
-                noOpSleeper());
+                noOpSleeper(),
+                (cfg).resolveWorkingDir());
     }
 
     /** Old part is heavy (long user/tool turns) and the tail is tiny: compaction must reclaim locally. */

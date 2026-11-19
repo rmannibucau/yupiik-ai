@@ -51,7 +51,8 @@ class ReadCoverageTest {
         final var tool = new ReadFileTool() {};
         final var coverage = new ReadCoverage();
         final var key = ReadCoverage.key(file);
-        final var output = tool.execute(Map.of("path", file.toString(), "offset", 2, "limit", 2000))
+        final var output = tool.execute(
+                        Map.of("path", file.toString(), "offset", 2, "limit", 2000), ToolContext.empty(root))
                 .output();
         assertTrue(coverage.record(key, output));
         assertFalse(coverage.record(key, lines(2, 3)));
@@ -97,11 +98,17 @@ class ReadCoverageTest {
         final var coverage = new ReadCoverage();
         final var key = ReadCoverage.key(root);
         assertTrue(coverage.record(
-                key, tool.execute(Map.of("path", root.toString(), "limit", 1)).output()));
+                key,
+                tool.execute(Map.of("path", root.toString(), "limit", 1), ToolContext.empty(root))
+                        .output()));
         assertTrue(coverage.record(
-                key, tool.execute(Map.of("path", root.toString(), "offset", 2)).output()));
+                key,
+                tool.execute(Map.of("path", root.toString(), "offset", 2), ToolContext.empty(root))
+                        .output()));
         assertFalse(coverage.record(
-                key, tool.execute(Map.of("path", root.toString())).output()));
+                key,
+                tool.execute(Map.of("path", root.toString()), ToolContext.empty(root))
+                        .output()));
         assertTrue(coverage.record(key, "Read directory " + root + ", entries 4-4\nnew\n"));
         assertTrue(coverage.record(key, lines(1, 4))); // separate coordinate space
     }
@@ -164,13 +171,48 @@ class ReadCoverageTest {
     void executionReadMarkerUsesSessionPathNotOffsetAndLeavesOtherKeysUnchanged(@TempDir final Path root)
             throws ReflectiveOperationException {
         final var execution = new ToolCallExecution(
-                null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null,
-                null, null, null);
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                () -> false);
         final var method =
                 ToolCallExecution.class.getDeclaredMethod("coverageKeys", String.class, Map.class, ToolContext.class);
         method.setAccessible(true);
         final var context = new ToolContext(
-                null, null, null, null, null, null, null, null, null, () -> false, null, null, root, -1, null, null);
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                () -> false,
+                null,
+                null,
+                root,
+                -1,
+                null,
+                null,
+                null);
         final var expected = List.of(ReadCoverage.key(root.resolve("a.txt")));
         assertEquals(
                 expected, method.invoke(execution, "read", Map.of("path", "./sub/../a.txt", "offset", 1), context));
@@ -181,7 +223,7 @@ class ReadCoverageTest {
                         execution, "read", Map.of("path", root.resolve("a.txt").toString()), context));
         assertEquals(List.of(), method.invoke(execution, "read", Map.of(), context));
         assertEquals(List.of("grep:needle"), method.invoke(execution, "grep", Map.of("pattern", "needle"), context));
-        final var normalized = Path.of("a.txt").toAbsolutePath().normalize().toString();
+        final var normalized = root.resolve("a.txt").normalize().toString();
         assertEquals(
                 List.of(normalized + "@1k"),
                 method.invoke(execution, "ls", Map.of("path", "a.txt", "offset", 2048), context));

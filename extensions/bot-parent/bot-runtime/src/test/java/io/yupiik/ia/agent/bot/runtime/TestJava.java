@@ -18,9 +18,12 @@ package io.yupiik.ia.agent.bot.runtime;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.regex.Pattern;
 
 /** Child-JVM fixture options, never inherited production runtime arguments. */
 public final class TestJava {
+    private static final Pattern WHITESPACE = Pattern.compile("\\s+");
+
     private TestJava() {}
 
     public static List<String> javaCommand(final String... arguments) {
@@ -29,7 +32,7 @@ public final class TestJava {
         final var options = System.getProperty("yca.test.childJvmOptions", "-XX:TieredStopAtLevel=1")
                 .strip();
         if (!options.isEmpty()) {
-            command.addAll(List.of(options.split("\\s+")));
+            command.addAll(List.of(WHITESPACE.split(options)));
         }
         final var configured = System.getProperty("yca.test.childJvmOptions");
         if (configured != null) {

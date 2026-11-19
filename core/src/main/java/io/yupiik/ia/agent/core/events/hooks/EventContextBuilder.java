@@ -16,32 +16,24 @@
 package io.yupiik.ia.agent.core.events.hooks;
 
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
-import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.events.EventContext;
 import io.yupiik.ia.agent.core.llm.ChatSettings;
 import io.yupiik.ia.agent.core.permissions.PermissionService;
+import java.nio.file.Path;
 import java.util.Locale;
+import java.util.Objects;
 
 /**
  * Assembles an {@link EventContext} from the live session state a producer holds at emission time.
  *
- * <p>An {@link ApplicationScoped} service: the process-scoped {@link CodingAgentConfiguration} (used for the
- * resolved project dir) is injected, so {@link #build} only takes the <em>session-scoped</em> state that cannot be
- * a bean — {@link PermissionService}, {@link ChatSettings} and the session coordinates. Any field whose source is
- * absent stays {@code null} on the wire.</p>
+ * <p>Project state is never obtained from process configuration; every producer supplies its root.</p>
  */
 @ApplicationScoped
 public class EventContextBuilder {
-    private final CodingAgentConfiguration configuration;
-
-    public EventContextBuilder(final CodingAgentConfiguration configuration) {
-        this.configuration = configuration;
-    }
-
     /**
      * @param permissions the session permission state; may be {@code null}.
      * @param settings    the session chat settings; may be {@code null}.
-     * @param cwdOverride explicit working directory, wins over the configured project dir (eg. a bash workdir arg).
+     * @param workdir required session root or explicitly resolved tool working directory.
      */
     public EventContext build(
             final PermissionService permissions,
@@ -49,16 +41,12 @@ public class EventContextBuilder {
             final String sessionId,
             final String subagentId,
             final String subagentName,
-            final String cwdOverride) {
+            final Path workdir) {
         return new EventContext(
                 sessionId,
                 subagentId,
                 subagentName,
-                cwdOverride != null && !cwdOverride.isBlank()
-                        ? cwdOverride
-                        : configuration == null
-                                ? null
-                                : configuration.resolveProjectDir().toString(),
+                Objects.requireNonNull(workdir, "workdir").toString(),
                 permissionMode(permissions),
                 agentMode(permissions),
                 settings == null ? null : settings.model(),

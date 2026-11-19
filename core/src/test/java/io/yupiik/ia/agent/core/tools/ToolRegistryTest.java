@@ -17,6 +17,8 @@ package io.yupiik.ia.agent.core.tools;
 
 import static java.util.stream.Collectors.toSet;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.ia.agent.core.codegraph.CodeResolveTool;
@@ -33,6 +35,8 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 class ToolRegistryTest {
+    @TempDir
+    private static Path testWorkdir;
 
     @TempDir
     static Path fakeRoot;
@@ -45,7 +49,7 @@ class ToolRegistryTest {
             }
 
             @Override
-            public String description() {
+            public String description(final Path workdir) {
                 return "stub " + name;
             }
 
@@ -60,7 +64,7 @@ class ToolRegistryTest {
             }
 
             @Override
-            public ToolResult execute(final Map<String, Object> args) {
+            public ToolResult execute(final Map<String, Object> args, final ToolContext context) {
                 return ToolResult.ok("ok");
             }
         };
@@ -75,12 +79,12 @@ class ToolRegistryTest {
             }
 
             @Override
-            public GraphStore graph() {
+            public GraphStore graph(final Path root) {
                 return GraphStore.empty();
             }
 
             @Override
-            public Path storeRoot() {
+            public Path storeRoot(final Path root) {
                 return fakeRoot.resolve("fake-tool-registry-graph");
             }
         };
@@ -90,17 +94,17 @@ class ToolRegistryTest {
         return new MavenRepositoryKnowledgeService() {
 
             @Override
-            public boolean knowledgeEnabled() {
+            public boolean knowledgeEnabled(final Path root) {
                 return enabled;
             }
 
             @Override
-            public List<String> indexedArtifacts() {
+            public List<String> indexedArtifacts(final Path root) {
                 return List.of();
             }
 
             @Override
-            public String knowledge(final String coordinate, final String shortName) {
+            public String knowledge(final Path root, final String coordinate, final String shortName) {
                 return "no knowledge indexed for " + coordinate;
             }
         };
@@ -132,7 +136,7 @@ class ToolRegistryTest {
                         stub("maven_knowledge_content"),
                         stub("grep")),
                 resolve);
-        final var wire = registry.toWireTools();
+        final var wire = registry.toWireTools(testWorkdir);
         final var names = wire.stream().map(t -> t.function().name()).collect(toSet());
         assertEquals(Set.of("code_resolve", "maven_knowledge_content", "grep"), names);
     }
@@ -148,7 +152,7 @@ class ToolRegistryTest {
                         stub("maven_knowledge_content"),
                         stub("grep")),
                 resolve);
-        final var wire = registry.toWireTools();
+        final var wire = registry.toWireTools(testWorkdir);
         final var names = wire.stream().map(t -> t.function().name()).collect(toSet());
         assertEquals(Set.of("maven_knowledge_content", "grep"), names);
     }
@@ -157,7 +161,7 @@ class ToolRegistryTest {
     void noResolveBeanLeavesToolsUntouched() {
         final var registry =
                 registry(List.of(stub("code_trace_calls"), stub("maven_knowledge_content"), stub("grep")), null);
-        final var wire = registry.toWireTools();
+        final var wire = registry.toWireTools(testWorkdir);
         final var names = wire.stream().map(t -> t.function().name()).collect(toSet());
         assertEquals(Set.of("code_trace_calls", "maven_knowledge_content", "grep"), names);
     }
@@ -165,12 +169,76 @@ class ToolRegistryTest {
     @Test
     void knowledgeOnlyResolveIsUsable() {
         final var resolve = new CodeResolveTool(null, graph(false), knowledge(true));
-        assertTrue(resolve.usable(), "knowledge-only code_resolve should be usable");
+        assertTrue(resolve.usable(testWorkdir), "knowledge-only code_resolve should be usable");
         final var registry = registry(
                 List.of(stub("code_trace_calls"), stub("maven_repository_knowledge"), stub("maven_knowledge_content")),
                 resolve);
-        final var names =
-                registry.toWireTools().stream().map(t -> t.function().name()).collect(toSet());
+        final var names = registry.toWireTools(testWorkdir).stream()
+                .map(t -> t.function().name())
+                .collect(toSet());
         assertEquals(Set.of("code_resolve", "maven_knowledge_content"), names);
+    }
+
+    @Test
+    void projectsSessionKnowledgeWithoutUsingOrChangingProcessRoot() {
+        final var mavenRoot = fakeRoot.resolve("maven-session");
+        final var plainRoot = fakeRoot.resolve("plain-session");
+        final var knowledge = new MavenRepositoryKnowledgeService() {
+
+            @Override
+            public boolean knowledgeEnabled(final Path root) {
+                return mavenRoot.equals(root);
+            }
+        };
+        final var resolve = new CodeResolveTool(null, graph(false), knowledge);
+        final var registry = registry(List.of(stub("code_trace_calls"), stub("grep")), resolve);
+        assertEquals(
+                Set.of("grep"),
+                registry.toWireTools(testWorkdir).stream()
+                        .map(t -> t.function().name())
+                        .collect(toSet()));
+        for (final var root : List.of(mavenRoot, plainRoot, mavenRoot)) {
+            final var wire = registry.toWireTools(root);
+            final var expected = root.equals(mavenRoot) ? Set.of("code_resolve", "grep") : Set.of("grep");
+            assertEquals(expected, wire.stream().map(t -> t.function().name()).collect(toSet()));
+            assertEquals(root.equals(mavenRoot), registry.describe(root).contains("Maven artifact knowledge"));
+            wire.stream()
+                    .filter(t -> t.function().name().equals("code_resolve"))
+                    .forEach(t -> assertTrue(t.function().description().contains("Maven artifact knowledge")));
+            assertTrue(registry.toWireTools(root, t -> !t.name().equals("code_resolve")).stream()
+                    .noneMatch(t -> t.function().name().equals("code_trace_calls")));
+        }
+        assertFalse(registry.describe(testWorkdir).contains("Maven artifact knowledge"));
+        assertFalse(resolve.usable(testWorkdir));
+    }
+
+    @Test
+    void processMavenDecoyDoesNotExposeResolveInPlainSession() {
+        final var knowledge = new MavenRepositoryKnowledgeService() {
+
+            @Override
+            public boolean knowledgeEnabled(final Path root) {
+                return testWorkdir.equals(root);
+            }
+        };
+        final var registry =
+                registry(List.of(stub("code_trace_calls")), new CodeResolveTool(null, graph(false), knowledge));
+        assertEquals(
+                Set.of("code_resolve"),
+                registry.toWireTools(testWorkdir).stream()
+                        .map(t -> t.function().name())
+                        .collect(toSet()));
+        assertTrue(registry.toWireTools(fakeRoot.resolve("plain-session")).isEmpty());
+        assertFalse(registry.describe(fakeRoot.resolve("plain-session")).contains("code_resolve"));
+        assertTrue(registry.describe(testWorkdir).contains("Maven artifact knowledge"));
+    }
+
+    @Test
+    void rejectsMissingOrUnresolvedRootBeforeProjectingTools() {
+        final var registry = registry(List.of(stub("grep")), null);
+        assertThrows(NullPointerException.class, () -> registry.toWireTools((Path) null));
+        assertThrows(NullPointerException.class, () -> registry.describe(null));
+        assertThrows(IllegalArgumentException.class, () -> registry.toWireTools(Path.of("relative")));
+        assertThrows(IllegalArgumentException.class, () -> registry.describe(testWorkdir.resolve("child/..")));
     }
 }

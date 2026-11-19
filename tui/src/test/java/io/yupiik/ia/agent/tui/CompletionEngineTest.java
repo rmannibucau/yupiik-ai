@@ -27,16 +27,22 @@ import io.yupiik.ia.agent.core.shell.slash.CompletionEngine;
 import io.yupiik.ia.agent.core.shell.slash.SlashCommand;
 import io.yupiik.ia.agent.core.shell.slash.SlashCommandSet;
 import io.yupiik.ia.agent.core.shell.slash.SlashRegistry;
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.List;
+import java.util.regex.Pattern;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 class CompletionEngineTest {
+    private static final Pattern WHITESPACE = Pattern.compile("\\s+");
     /** The same shape ConfigCommands registers for /model. */
     private static final ArgCompletion MODEL_COMPLETION = (arg, token, env) -> {
         if (arg == null || arg.isBlank()) {
             return ArgCompletion.fuzzyResult("model", env.models(), token);
         }
-        return ArgCompletion.fuzzyResult("variant", env.variants(arg.strip().split("\\s+")[0]), token);
+        return ArgCompletion.fuzzyResult("variant", env.variants(WHITESPACE.split(arg.strip())[0]), token);
     };
 
     /** The same shape ConfigCommands registers for /metrics. */
@@ -421,14 +427,17 @@ class CompletionEngineTest {
     }
 
     @Test
-    void pathCompletionLooksUpFilesystem() {
-        final var s = CompletionEngine.pathCandidates("src/m");
+    void pathCompletionLooksUpFilesystem(@TempDir final Path root) throws IOException {
+        Files.createDirectories(root.resolve("src/main"));
+        Files.createDirectories(root.resolve("src/test"));
+        final var s = CompletionEngine.pathCandidates("src/m", root);
         assertEquals(List.of("src/main/"), s);
     }
 
     @Test
-    void pathCompletionWithoutTokenListsDirectory() {
-        assertFalse(CompletionEngine.pathCandidates("").isEmpty());
+    void pathCompletionWithoutTokenListsDirectory(@TempDir final Path root) throws IOException {
+        Files.writeString(root.resolve("entry.txt"), "entry");
+        assertEquals(List.of("entry.txt"), CompletionEngine.pathCandidates("", root));
     }
 
     @Test

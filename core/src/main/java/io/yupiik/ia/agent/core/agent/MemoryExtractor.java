@@ -29,6 +29,7 @@ import io.yupiik.ia.agent.core.memory.MemoryStore;
 import io.yupiik.ia.agent.core.security.SecretRedactor;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import java.io.IOException;
+import java.nio.file.Path;
 import java.time.Clock;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -36,6 +37,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.locks.ReentrantLock;
@@ -73,6 +75,11 @@ import java.util.regex.Pattern;
  * is extracted at most once until new messages appear.</p>
  */
 public class MemoryExtractor {
+    private static final Pattern WHITESPACE = Pattern.compile("\\s+");
+    private static final Pattern MINIMAL_FACT =
+            Pattern.compile("\\{\\s*\"text\"\\s*:\\s*\"((?:[^\"\\\\]|\\\\.)*)\"\\s*,\\s*\"scope\"\\s*:\\s*\"([^\"]*)\""
+                    + "(?:\\s*,\\s*\"p\"\\s*:\\s*(\\d+))?(?:\\s*,\\s*\"path\"\\s*:\\s*\"((?:[^\"\\\\]|\\\\.)*)\")?"
+                    + "(?:\\s*,\\s*\"topic\"\\s*:\\s*\"((?:[^\"\\\\]|\\\\.)*)\")?\\s*}");
     private static final Logger LOGGER = Logger.getLogger(MemoryExtractor.class.getName());
 
     /** Max messages of the delta fed to the model (newest kept). */
@@ -162,7 +169,12 @@ public class MemoryExtractor {
     private final ReentrantLock extractionLock = new ReentrantLock();
 
     private List<Message> extractedMessages = List.of();
+    private final Path workdir;
 
+    /**
+     * Binds this session's project root once, before extraction is submitted (including close-time extraction).
+     * Null retains the configured default. The shared store and compactor are never rebound.
+     */
     public MemoryExtractor(
             final ChatClient chatClient,
             final CodingAgentConfiguration configuration,
@@ -176,7 +188,9 @@ public class MemoryExtractor {
             final String sessionId,
             final MemoryCompactor memoryCompactor,
             final MemoryProductionPolicy productionPolicy,
-            final SecretRedactor secretRedactor) {
+            final SecretRedactor secretRedactor,
+            final Path workdir) {
+        this.workdir = Objects.requireNonNull(workdir, "workdir");
         this.chatClient = chatClient;
         this.configuration = configuration;
         this.providerManager = providerManager;
@@ -192,7 +206,8 @@ public class MemoryExtractor {
         this.secretRedactor = secretRedactor;
     }
 
-    protected MemoryExtractor() {
+    protected MemoryExtractor(final Path workdir) {
+        this.workdir = Objects.requireNonNull(workdir, "workdir");
         this.chatClient = null;
         this.configuration = null;
         this.providerManager = null;
@@ -248,7 +263,7 @@ public class MemoryExtractor {
                 notifyFailure("memory extraction aborted: " + e.getMessage(), e);
             } finally {
                 if (memoryCompactor != null) {
-                    memoryCompactor.maybeCompact(effective);
+                    memoryCompactor.maybeCompact(effective, workdir);
                 }
             }
         });
@@ -396,10 +411,10 @@ public class MemoryExtractor {
                         }
                     }
                     if (!global.isEmpty()) {
-                        memoryStore.append(true, global);
+                        memoryStore.append(true, global, workdir);
                     }
                     if (!project.isEmpty()) {
-                        memoryStore.append(false, project);
+                        memoryStore.append(false, project, workdir);
                     }
                 }
                 resetFailures();
@@ -409,7 +424,7 @@ public class MemoryExtractor {
             // structured output unsupported or rejected: fall back to a plain compression snippet
             final var snippet = compressExcerpt(redactedExcerpt, settings);
             if (snippet != null && !snippet.isBlank()) {
-                memoryStore.appendText(false, snippet);
+                memoryStore.appendText(false, snippet, workdir);
             }
             // NOTE: do NOT resetFailures() here. A provider that persistently lacks structured output
             // returns structured=false on every pass; resetting the consecutive-failure counter would
@@ -432,7 +447,7 @@ public class MemoryExtractor {
                 if (snippet == null || snippet.isBlank()) {
                     notifyFailure("memory extraction (structured facts) failed: " + e.getMessage(), e);
                 } else {
-                    memoryStore.appendText(false, snippet);
+                    memoryStore.appendText(false, snippet, workdir);
                     // NOTE: like the `structured=false` path above, a wire-failure salvage that persists
                     // memory is a steady-state degraded condition: do NOT resetFailures() here, or the
                     // 'rejected by the provider' WARN re-fires on every pass for a persistently-throwing
@@ -568,8 +583,8 @@ public class MemoryExtractor {
     private void notifyFailure(final String message, final Throwable cause) {
         final int failures = consecutiveFailures.incrementAndGet();
         if (failures == 1 && emitter != null) {
-            emitter.emit(
-                    new AgentEvent.Notice(AgentEvent.Notice.Level.WARN, message, null, sessionId, null, null, cause));
+            emitter.emit(new AgentEvent.Notice(
+                    AgentEvent.Notice.Level.WARN, message, null, sessionId, null, null, cause, workdir));
         }
     }
 
@@ -665,7 +680,7 @@ public class MemoryExtractor {
         if (!(raw instanceof String s) || s.isBlank()) {
             return List.of();
         }
-        final var parts = s.trim().split("\\s+");
+        final var parts = WHITESPACE.split(s.trim());
         return parts.length == 0 ? List.of() : List.of(parts);
     }
 
@@ -679,11 +694,7 @@ public class MemoryExtractor {
             return Map.of();
         }
         final var facts = new ArrayList<Map<String, String>>();
-        final var matcher = Pattern.compile(
-                        "\\{\\s*\"text\"\\s*:\\s*\"((?:[^\"\\\\]|\\\\.)*)\"\\s*,\\s*\"scope\"\\s*:\\s*\"([^\"]*)\""
-                                + "(?:\\s*,\\s*\"p\"\\s*:\\s*(\\d+))?(?:\\s*,\\s*\"path\"\\s*:\\s*\"((?:[^\"\\\\]|\\\\.)*)\")?"
-                                + "(?:\\s*,\\s*\"topic\"\\s*:\\s*\"((?:[^\"\\\\]|\\\\.)*)\")?\\s*}")
-                .matcher(content);
+        final var matcher = MINIMAL_FACT.matcher(content);
         while (matcher.find()) {
             final var m = new LinkedHashMap<String, String>();
             m.put("text", matcher.group(1).replace("\\\"", "\""));

@@ -30,16 +30,24 @@ import io.yupiik.ia.agent.core.llm.Message;
 import io.yupiik.ia.agent.core.llm.ToolCall;
 import io.yupiik.ia.agent.core.llm.ToolCall.FunctionCall;
 import io.yupiik.ia.agent.core.llm.Usage;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.regex.Pattern;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 class ConversationTranscriptTest {
+    private static final Pattern USER_HEADER = Pattern.compile("\\*\\*You\\*\\*");
+
+    @TempDir
+    private static Path eventWorkdir;
 
     @Test
     void fullInputIsIndependentOfRawPromptAndResetsWithUsage() {
         final var transcript = new ConversationTranscript();
-        transcript.onEvent(new AgentEvent.UsageUpdated(new Usage(5, 2, 7, 100, 20, 0, 0, 125), 68, 14, "s1"));
+        transcript.onEvent(
+                new AgentEvent.UsageUpdated(new Usage(5, 2, 7, 100, 20, 0, 0, 125), 68, 14, "s1", eventWorkdir));
         assertEquals(5, transcript.promptTokens());
         assertEquals(125, transcript.contextInputTokens());
         assertEquals(100, transcript.cacheReadTokens());
@@ -50,9 +58,10 @@ class ConversationTranscriptTest {
         assertEquals(0, transcript.contextInputTokens());
         assertEquals(0, transcript.cacheReadTokens());
 
-        transcript.onEvent(new AgentEvent.UsageUpdated(new Usage(0, 2, 2, 100, 0, 0, 0, 100), 68, 14, "s1"));
+        transcript.onEvent(
+                new AgentEvent.UsageUpdated(new Usage(0, 2, 2, 100, 0, 0, 0, 100), 68, 14, "s1", eventWorkdir));
         assertEquals(100, transcript.contextInputTokens());
-        transcript.onEvent(new AgentEvent.UsageUpdated(null, 68, 14, "s1"));
+        transcript.onEvent(new AgentEvent.UsageUpdated(null, 68, 14, "s1", eventWorkdir));
         assertEquals(0, transcript.contextInputTokens());
     }
 
@@ -77,11 +86,11 @@ class ConversationTranscriptTest {
     void foldsTurnEventsIntoTranscript() {
         final var t = new ConversationTranscript();
         t.startUserTurn("hi");
-        t.onEvent(new AgentEvent.ThinkingDelta("let me", "s1"));
-        t.onEvent(new AgentEvent.ToolStarted("read", "{\"path\":\"a.txt\"}", "s1"));
-        t.onEvent(new AgentEvent.ToolStream("read", "body", "s1"));
-        t.onEvent(new AgentEvent.ToolFinished("read", "body", true, "s1"));
-        t.onEvent(new AgentEvent.TurnDone("answer", "s1"));
+        t.onEvent(new AgentEvent.ThinkingDelta("let me", "s1", eventWorkdir));
+        t.onEvent(new AgentEvent.ToolStarted("read", "{\"path\":\"a.txt\"}", "s1", eventWorkdir));
+        t.onEvent(new AgentEvent.ToolStream("read", "body", "s1", eventWorkdir));
+        t.onEvent(new AgentEvent.ToolFinished("read", "body", true, "s1", eventWorkdir));
+        t.onEvent(new AgentEvent.TurnDone("answer", "s1", eventWorkdir));
 
         final var md = t.transcript().toString();
         assertTrue(md.contains("**You**\n\nhi"));
@@ -98,8 +107,8 @@ class ConversationTranscriptTest {
     @Test
     void failedToolIsRecordedAsBlockquote() {
         final var t = new ConversationTranscript();
-        t.onEvent(new AgentEvent.ToolStarted("bash", "{}", "s1"));
-        t.onEvent(new AgentEvent.ToolFinished("bash", "boom\nsecond", false, "s1"));
+        t.onEvent(new AgentEvent.ToolStarted("bash", "{}", "s1", eventWorkdir));
+        t.onEvent(new AgentEvent.ToolFinished("bash", "boom\nsecond", false, "s1", eventWorkdir));
 
         final var md = t.transcript().toString();
         assertTrue(md.contains("> tool `bash` failed: boom"));
@@ -108,8 +117,8 @@ class ConversationTranscriptTest {
     @Test
     void textResetFlushesThinkingInsteadOfDroppingIt() {
         final var t = new ConversationTranscript();
-        t.onEvent(new AgentEvent.ThinkingDelta("reasoning deeply", "s1"));
-        t.onEvent(new AgentEvent.TextReset("s1"));
+        t.onEvent(new AgentEvent.ThinkingDelta("reasoning deeply", "s1", eventWorkdir));
+        t.onEvent(new AgentEvent.TextReset("s1", eventWorkdir));
         assertEquals("", t.thinking().toString());
         assertTrue(t.transcript()
                 .toString()
@@ -121,8 +130,8 @@ class ConversationTranscriptTest {
     void cancellationDoesNotWriteAnErrorLine() {
         final var t = new ConversationTranscript();
         t.startUserTurn("hi");
-        t.onEvent(new AgentEvent.TextDelta("partial answer", "s1"));
-        t.onEvent(new AgentEvent.TurnCancelled("s1"));
+        t.onEvent(new AgentEvent.TextDelta("partial answer", "s1", eventWorkdir));
+        t.onEvent(new AgentEvent.TurnCancelled("s1", eventWorkdir));
 
         final var md = t.transcript().toString();
         assertTrue(md.contains("partial answer"), "streamed content stays in the transcript");
@@ -134,7 +143,7 @@ class ConversationTranscriptTest {
     @Test
     void thinkTagAtTurnDoneBecomesThoughtRegion() {
         final var t = new ConversationTranscript();
-        t.onEvent(new AgentEvent.TurnDone("<think>\nstep one\nstep two\n</think>\n\nThe answer", "s1"));
+        t.onEvent(new AgentEvent.TurnDone("<think>\nstep one\nstep two\n</think>\n\nThe answer", "s1", eventWorkdir));
         final var transcript = t.transcript().toString();
         assertTrue(transcript.contains(ConversationTranscript.THOUGHT_BEGIN));
         assertTrue(transcript.contains("**Thinking**\n\nstep one\nstep two"));
@@ -150,7 +159,7 @@ class ConversationTranscriptTest {
     void thinkTagStreamsLiveOnThoughtPanel() {
         final var t = new ConversationTranscript();
         t.startUserTurn("go");
-        t.onEvent(new AgentEvent.TextDelta("<think>\nreasoning line\n</think>\n\ndrafting", "s1"));
+        t.onEvent(new AgentEvent.TextDelta("<think>\nreasoning line\n</think>\n\ndrafting", "s1", eventWorkdir));
         // live reasoning is classified into the thinking buffer, visible text into pending
         assertTrue(
                 t.thinking().toString().contains("reasoning line"), t.thinking().toString());
@@ -161,7 +170,7 @@ class ConversationTranscriptTest {
     @Test
     void fencedThinkTagUntouched() {
         final var t = new ConversationTranscript();
-        t.onEvent(new AgentEvent.TurnDone("```text\n<think>not a thought</think>\n```\n\nok", "s1"));
+        t.onEvent(new AgentEvent.TurnDone("```text\n<think>not a thought</think>\n```\n\nok", "s1", eventWorkdir));
         final var transcript = t.transcript().toString();
         assertFalse(transcript.contains(ConversationTranscript.THOUGHT_BEGIN), transcript);
         assertTrue(transcript.contains("<think>not a thought</think>"));
@@ -180,8 +189,8 @@ class ConversationTranscriptTest {
     @Test
     void firstAnswerDeltaFlushesThinkingAboveAnswer() {
         final var t = new ConversationTranscript();
-        t.onEvent(new AgentEvent.ThinkingDelta("reasoning deeply", "s1"));
-        t.onEvent(new AgentEvent.TextDelta("answer part", "s1"));
+        t.onEvent(new AgentEvent.ThinkingDelta("reasoning deeply", "s1", eventWorkdir));
+        t.onEvent(new AgentEvent.TextDelta("answer part", "s1", eventWorkdir));
         assertEquals("", t.thinking().toString());
         assertEquals("answer part", t.pending().toString());
         assertTrue(t.transcript()
@@ -193,8 +202,8 @@ class ConversationTranscriptTest {
     @Test
     void errorKeepsThinkingVisibleAboveTheErrorLine() {
         final var t = new ConversationTranscript();
-        t.onEvent(new AgentEvent.ThinkingDelta("why it broke", "s1"));
-        t.onEvent(new AgentEvent.Error("kaput", "s1"));
+        t.onEvent(new AgentEvent.ThinkingDelta("why it broke", "s1", eventWorkdir));
+        t.onEvent(new AgentEvent.Error("kaput", "s1", eventWorkdir));
         assertEquals("", t.thinking().toString());
         assertFalse(t.busy());
         final var transcript = t.transcript().toString();
@@ -209,8 +218,9 @@ class ConversationTranscriptTest {
     void runningToolBlockIsWrappedInToolMarkers() {
         final var t = new ConversationTranscript();
         t.startUserTurn("hi");
-        t.onEvent(new AgentEvent.ToolStarted("bash", "{\"command\":\"tail -f log\"}", 3, "s1", null, null));
-        t.onEvent(new AgentEvent.ToolStream("bash", "streamed line", "s1"));
+        t.onEvent(
+                new AgentEvent.ToolStarted("bash", "{\"command\":\"tail -f log\"}", 3, "s1", null, null, eventWorkdir));
+        t.onEvent(new AgentEvent.ToolStream("bash", "streamed line", "s1", eventWorkdir));
 
         final var md = t.markdown("|", "welcome");
         assertTrue(md.contains(ConversationTranscript.TOOL_BEGIN));
@@ -226,7 +236,7 @@ class ConversationTranscriptTest {
     void runningToolBlockOmitsOrdinalWhenUnknown() {
         final var t = new ConversationTranscript();
         t.startUserTurn("hi");
-        t.onEvent(new AgentEvent.ToolStarted("read", "{}", 0, "s1", null, null));
+        t.onEvent(new AgentEvent.ToolStarted("read", "{}", 0, "s1", null, null, eventWorkdir));
 
         final var md = t.markdown("|", "welcome");
         assertTrue(md.contains("`| running read`"), md);
@@ -237,10 +247,11 @@ class ConversationTranscriptTest {
     void parallelRunningToolsEachCarryTheirOrdinal() {
         final var t = new ConversationTranscript();
         t.startUserTurn("hi");
-        t.onEvent(new AgentEvent.ToolStarted("bash", "{\"command\":\"mvn test\"}", 1, "s1", null, null));
-        t.onEvent(new AgentEvent.ToolStarted("bash", "{\"command\":\"tail -f log\"}", 2, "s1", null, null));
+        t.onEvent(new AgentEvent.ToolStarted("bash", "{\"command\":\"mvn test\"}", 1, "s1", null, null, eventWorkdir));
+        t.onEvent(
+                new AgentEvent.ToolStarted("bash", "{\"command\":\"tail -f log\"}", 2, "s1", null, null, eventWorkdir));
         // stream events must land on the matching (last-started) in-flight call
-        t.onEvent(new AgentEvent.ToolStream("bash", "line 1", "s1"));
+        t.onEvent(new AgentEvent.ToolStream("bash", "line 1", "s1", eventWorkdir));
 
         final var md = t.markdown("|", "welcome");
         assertTrue(md.contains("`| running mvn test (#1)`"), md);
@@ -271,7 +282,7 @@ class ConversationTranscriptTest {
         final var a = t.markdown("|", "");
         final var b = t.markdown("*", "");
         assertNotSame(a, b, "a different spinner marker must rebuild the running-tool header");
-        t.onEvent(new AgentEvent.ThinkingDelta("hm", "s1"));
+        t.onEvent(new AgentEvent.ThinkingDelta("hm", "s1", eventWorkdir));
         final var c = t.markdown("*", "");
         assertSame(b, c, "live thinking is not part of markdown until it is flushed");
         t.flushThinking();
@@ -284,7 +295,7 @@ class ConversationTranscriptTest {
         final var t = new ConversationTranscript(new ThinkTagSplitter(), false, compression);
         t.startUserTurn("go");
         final var md = t.markdown("|", "welcome");
-        t.onEvent(new AgentEvent.ThinkingDelta("reason\n@123", "s1"));
+        t.onEvent(new AgentEvent.ThinkingDelta("reason\n@123", "s1", eventWorkdir));
         final var thought = t.thinkingText();
         assertEquals("reason", thought);
         for (var i = 0; i < 1000; i++) {
@@ -292,7 +303,7 @@ class ConversationTranscriptTest {
             assertSame(md, t.markdown("|", "different fallback"));
         }
 
-        t.onEvent(new AgentEvent.ThinkingDelta("@\nmore", "s1"));
+        t.onEvent(new AgentEvent.ThinkingDelta("@\nmore", "s1", eventWorkdir));
         assertEquals("reason\nmore", t.thinkingText());
         final var beforeReplay = t.thinkingText();
         t.replay(List.of());
@@ -305,15 +316,15 @@ class ConversationTranscriptTest {
         t.flushThinking();
         assertEquals("", t.thinkingText());
         assertTrue(t.markdown("|", "").contains("reason\nmore"));
-        t.onEvent(new AgentEvent.ThinkingDelta("old", "s1"));
+        t.onEvent(new AgentEvent.ThinkingDelta("old", "s1", eventWorkdir));
         assertEquals("old", t.thinkingText());
         t.startUserTurn("next");
         assertEquals("", t.thinkingText());
-        t.onEvent(new AgentEvent.ThinkingDelta("clear me", "s1"));
+        t.onEvent(new AgentEvent.ThinkingDelta("clear me", "s1", eventWorkdir));
         assertEquals("clear me", t.thinkingText());
         t.clearConversation();
         assertEquals("", t.thinkingText());
-        t.onEvent(new AgentEvent.ThinkingDelta("reset me", "s1"));
+        t.onEvent(new AgentEvent.ThinkingDelta("reset me", "s1", eventWorkdir));
         assertEquals("reset me", t.thinkingText());
         t.reset();
         assertEquals("", t.thinkingText());
@@ -322,7 +333,7 @@ class ConversationTranscriptTest {
     @Test
     void exposedThinkingBuilderNeverLeavesAStaleSnapshot() {
         final var t = new ConversationTranscript();
-        t.onEvent(new AgentEvent.ThinkingDelta("first", "s1"));
+        t.onEvent(new AgentEvent.ThinkingDelta("first", "s1", eventWorkdir));
         assertEquals("first", t.thinkingText());
         final var builder = t.thinking();
         builder.replace(0, builder.length(), "other");
@@ -338,14 +349,14 @@ class ConversationTranscriptTest {
         final var t = new ConversationTranscript();
         t.startUserTurn("go");
         final var md = t.markdown("|", "");
-        t.onEvent(new AgentEvent.TextDelta("<think>reasoning", "s1"));
+        t.onEvent(new AgentEvent.TextDelta("<think>reasoning", "s1", eventWorkdir));
         assertEquals("reasoning", t.thinkingText());
         assertSame(md, t.markdown("|", ""), "inline thinking alone does not change markdown");
-        t.onEvent(new AgentEvent.TextReset("s1"));
+        t.onEvent(new AgentEvent.TextReset("s1", eventWorkdir));
         assertEquals("", t.thinkingText());
         assertTrue(t.markdown("|", "").contains("reasoning"));
 
-        t.onEvent(new AgentEvent.TextDelta("answer`", "s1"));
+        t.onEvent(new AgentEvent.TextDelta("answer`", "s1", eventWorkdir));
         final var beforeDrain = t.markdown("|", "");
         t.flushThinking();
         assertNotSame(beforeDrain, t.markdown("|", ""), "draining visible splitter carry changes markdown");
@@ -360,7 +371,7 @@ class ConversationTranscriptTest {
         assertEquals("second", t.markdown("*", "second"));
         t.appendTranscript(" \n body \n ");
         assertEquals("body", t.markdown("*", "second"));
-        t.onEvent(new AgentEvent.TextDelta("hidden", "s1"));
+        t.onEvent(new AgentEvent.TextDelta("hidden", "s1", eventWorkdir));
         assertEquals("body", t.markdown("*", "second"), "pending is hidden when not busy");
         t.busy(true);
         assertEquals("body \n \n\n**Assistant**\n\nhidden", t.markdown("*", "second"));
@@ -370,7 +381,7 @@ class ConversationTranscriptTest {
     void oversizedThinkingBypassesSnapshotRetention() {
         final var transcript = new ConversationTranscript();
         final var source = "x".repeat(64 * 1024 + 1);
-        transcript.onEvent(new AgentEvent.ThinkingDelta(source, "session"));
+        transcript.onEvent(new AgentEvent.ThinkingDelta(source, "session", eventWorkdir));
         final var first = transcript.thinkingText();
         assertEquals(source, first);
         assertNotSame(first, transcript.thinkingText());
@@ -452,7 +463,7 @@ class ConversationTranscriptTest {
         // a streaming turn only mutates the pending tail: the durable head must be REUSED, so a
         // seam that shows up in the tail is scrubbed but the head is not re-derived each frame
         t.startUserTurn("go");
-        t.onEvent(new AgentEvent.TextDelta("streaming @7@ answer", "s1"));
+        t.onEvent(new AgentEvent.TextDelta("streaming @7@ answer", "s1", eventWorkdir));
         final var streaming = t.markdown("|", "");
         assertTrue(
                 streaming.contains("streaming @7@ answer"),
@@ -477,7 +488,7 @@ class ConversationTranscriptTest {
 
         // a streaming delta alone is NOT a durable mutation: same head, new pending tail rendered
         t.startUserTurn("go");
-        t.onEvent(new AgentEvent.TextDelta("streaming tail", "s1"));
+        t.onEvent(new AgentEvent.TextDelta("streaming tail", "s1", eventWorkdir));
         final var third = t.markdown("|", "");
         assertTrue(third.contains("second"), "durable head must still render after a stream delta");
         assertTrue(third.contains("streaming tail"), "streaming pending tail must render");
@@ -524,10 +535,10 @@ class ConversationTranscriptTest {
     @Test
     void turnMetricsKeepDurationAndResetClearsIt() {
         final var t = new ConversationTranscript();
-        t.onEvent(new AgentEvent.TurnMetrics(3, 120, 400, 500, 2, 1500, "s1"));
+        t.onEvent(new AgentEvent.TurnMetrics(3, 120, 400, 500, 2, 1500, "s1", eventWorkdir));
         assertEquals(3, t.turnLlmCalls());
         assertEquals(1500, t.turnDurationMs());
-        t.onEvent(new AgentEvent.ThinkingDelta("thought", "s1"));
+        t.onEvent(new AgentEvent.ThinkingDelta("thought", "s1", eventWorkdir));
         assertEquals("thought", t.thinkingText());
         assertEquals(7, t.thinkingLength());
 
@@ -540,7 +551,15 @@ class ConversationTranscriptTest {
     void turnThroughputIsExposedAndResetClearsIt() {
         final var t = new ConversationTranscript();
         t.onEvent(new AgentEvent.TurnMetrics(
-                1, 0, 0, 0, 0, 900, new AgentEvent.Throughput(150, 0, 3000, 4000, 150, 1, 1, false), "s1"));
+                1,
+                0,
+                0,
+                0,
+                0,
+                900,
+                new AgentEvent.Throughput(150, 0, 3000, 4000, 150, 1, 1, false),
+                "s1",
+                eventWorkdir));
         assertEquals(150, t.turnThroughput().outputTokens());
         assertEquals(50d, t.turnOutputTokensPerSecond(), 0.001d, "150 tokens over 3s of request time");
         assertEquals(37.5d, t.turnThroughput().reportedTokensPerSecond(), 0.001d, "the server view stays available");
@@ -554,7 +573,7 @@ class ConversationTranscriptTest {
     void turnThroughputPreservesEstimatesAndMatchedPartialServerTotals() {
         final var t = new ConversationTranscript();
         final var throughput = new AgentEvent.Throughput(200, 20, 4_000, 2_000, 80, 3, 1, true);
-        t.onEvent(new AgentEvent.TurnMetrics(3, 0, 0, 0, 0, 5_000, throughput, "s1"));
+        t.onEvent(new AgentEvent.TurnMetrics(3, 0, 0, 0, 0, 5_000, throughput, "s1", eventWorkdir));
         assertEquals(throughput, t.turnThroughput());
         assertEquals(50d, t.turnOutputTokensPerSecond(), 0.001d);
         assertEquals(40d, t.turnThroughput().reportedTokensPerSecond(), 0.001d);
@@ -568,13 +587,13 @@ class ConversationTranscriptTest {
         final var t = new ConversationTranscript();
         t.startUserTurn("hi");
         // round 1: think, say something, call a tool
-        t.onEvent(new AgentEvent.ThinkingDelta("first I read the file", "s1"));
-        t.onEvent(new AgentEvent.TextDelta("let me look", "s1"));
-        t.onEvent(new AgentEvent.ToolStarted("read", "{\"path\":\"a.txt\"}", "s1"));
-        t.onEvent(new AgentEvent.ToolFinished("read", "body", true, "s1"));
+        t.onEvent(new AgentEvent.ThinkingDelta("first I read the file", "s1", eventWorkdir));
+        t.onEvent(new AgentEvent.TextDelta("let me look", "s1", eventWorkdir));
+        t.onEvent(new AgentEvent.ToolStarted("read", "{\"path\":\"a.txt\"}", "s1", eventWorkdir));
+        t.onEvent(new AgentEvent.ToolFinished("read", "body", true, "s1", eventWorkdir));
         // round 2: think again, then the real answer (TurnDone carries it in full)
-        t.onEvent(new AgentEvent.ThinkingDelta("now I answer", "s1"));
-        t.onEvent(new AgentEvent.TurnDone("here is the answer", "s1"));
+        t.onEvent(new AgentEvent.ThinkingDelta("now I answer", "s1", eventWorkdir));
+        t.onEvent(new AgentEvent.TurnDone("here is the answer", "s1", eventWorkdir));
 
         final var md = t.transcript().toString();
         // chronological: thought, what it said before the call, the tool, the final thought, the answer
@@ -590,11 +609,11 @@ class ConversationTranscriptTest {
     void liveAnswerRendersAfterTheToolItFollowed() {
         final var t = new ConversationTranscript();
         t.startUserTurn("hi");
-        t.onEvent(new AgentEvent.TextDelta("first part", "s1"));
-        t.onEvent(new AgentEvent.ToolStarted("bash", "{\"command\":\"ls\"}", "s1"));
-        t.onEvent(new AgentEvent.ToolFinished("bash", "a.txt", true, "s1"));
-        t.onEvent(new AgentEvent.ThinkingDelta("hmm", "s1"));
-        t.onEvent(new AgentEvent.TextDelta(" second part", "s1"));
+        t.onEvent(new AgentEvent.TextDelta("first part", "s1", eventWorkdir));
+        t.onEvent(new AgentEvent.ToolStarted("bash", "{\"command\":\"ls\"}", "s1", eventWorkdir));
+        t.onEvent(new AgentEvent.ToolFinished("bash", "a.txt", true, "s1", eventWorkdir));
+        t.onEvent(new AgentEvent.ThinkingDelta("hmm", "s1", eventWorkdir));
+        t.onEvent(new AgentEvent.TextDelta(" second part", "s1", eventWorkdir));
 
         // the finished tool is part of the transcript, the streaming tail is not
         final var md = t.markdown("|", "welcome");
@@ -610,13 +629,13 @@ class ConversationTranscriptTest {
         // round 1: the message ends with an inline-code backtick + " :" - the splitter
         // holds that tail back (waiting for a possible fence continuation) and the tool
         // call in the same round must flush it with THIS message, not the next one
-        t.onEvent(new AgentEvent.TextDelta("je commence par le code de `AgentLoop.java` :", "s1"));
-        t.onEvent(new AgentEvent.ToolStarted("edit_file", "{}", "s1"));
-        t.onEvent(new AgentEvent.ToolFinished("edit_file", "oldString not found", false, "s1"));
+        t.onEvent(new AgentEvent.TextDelta("je commence par le code de `AgentLoop.java` :", "s1", eventWorkdir));
+        t.onEvent(new AgentEvent.ToolStarted("edit_file", "{}", "s1", eventWorkdir));
+        t.onEvent(new AgentEvent.ToolFinished("edit_file", "oldString not found", false, "s1", eventWorkdir));
         // round 2: the next message must start clean, without the leaked "` :" prefix
-        t.onEvent(new AgentEvent.TextDelta("Le fichier a peut-être bougé depuis.", "s1"));
-        t.onEvent(new AgentEvent.ToolStarted("read", "{\"path\":\"a.txt\"}", "s1"));
-        t.onEvent(new AgentEvent.ToolFinished("read", "body", true, "s1"));
+        t.onEvent(new AgentEvent.TextDelta("Le fichier a peut-être bougé depuis.", "s1", eventWorkdir));
+        t.onEvent(new AgentEvent.ToolStarted("read", "{\"path\":\"a.txt\"}", "s1", eventWorkdir));
+        t.onEvent(new AgentEvent.ToolFinished("read", "body", true, "s1", eventWorkdir));
 
         final var md = t.transcript().toString();
         // round 1 keeps its full tail (backtick + " :") attached to the message that produced it
@@ -646,8 +665,8 @@ class ConversationTranscriptTest {
     void integratedPromptRendersBelowTheAnswerItInterrupted() {
         final var t = new ConversationTranscript();
         t.startUserTurn("hi");
-        t.onEvent(new AgentEvent.TextDelta("I was saying something", "s1"));
-        t.onEvent(new AgentEvent.PromptIntegrated("actually, do this instead", "s1"));
+        t.onEvent(new AgentEvent.TextDelta("I was saying something", "s1", eventWorkdir));
+        t.onEvent(new AgentEvent.PromptIntegrated("actually, do this instead", "s1", eventWorkdir));
 
         final var md = t.transcript().toString();
         assertOrdered(md, "I was saying something", "**You**\n\nactually, do this instead");
@@ -661,9 +680,9 @@ class ConversationTranscriptTest {
         // segment instead of gluing onto the **You** block and inheriting the user rail colour
         final var t = new ConversationTranscript();
         t.startUserTurn("hi");
-        t.onEvent(new AgentEvent.TextDelta("I was saying something", "s1"));
-        t.onEvent(new AgentEvent.PromptIntegrated("actually, do this instead", "s1"));
-        t.onEvent(new AgentEvent.TextDelta("continued output", "s1"));
+        t.onEvent(new AgentEvent.TextDelta("I was saying something", "s1", eventWorkdir));
+        t.onEvent(new AgentEvent.PromptIntegrated("actually, do this instead", "s1", eventWorkdir));
+        t.onEvent(new AgentEvent.TextDelta("continued output", "s1", eventWorkdir));
 
         final var md = t.markdown("|", "welcome");
         assertOrdered(
@@ -680,8 +699,8 @@ class ConversationTranscriptTest {
     void errorKeepsTheStreamedAnswerAboveTheErrorLine() {
         final var t = new ConversationTranscript();
         t.startUserTurn("hi");
-        t.onEvent(new AgentEvent.TextDelta("partial answer", "s1"));
-        t.onEvent(new AgentEvent.Error("kaput", "s1"));
+        t.onEvent(new AgentEvent.TextDelta("partial answer", "s1", eventWorkdir));
+        t.onEvent(new AgentEvent.Error("kaput", "s1", eventWorkdir));
 
         final var md = t.transcript().toString();
         assertOrdered(md, "partial answer", "> error: kaput");
@@ -691,10 +710,10 @@ class ConversationTranscriptTest {
     void aRetryResetDropsThePartialAnswerInsteadOfDuplicatingIt() {
         final var t = new ConversationTranscript();
         t.startUserTurn("hi");
-        t.onEvent(new AgentEvent.TextDelta("half an ans", "s1"));
-        t.onEvent(new AgentEvent.TextReset("s1"));
-        t.onEvent(new AgentEvent.TextDelta("half an answer", "s1"));
-        t.onEvent(new AgentEvent.TurnDone("half an answer", "s1"));
+        t.onEvent(new AgentEvent.TextDelta("half an ans", "s1", eventWorkdir));
+        t.onEvent(new AgentEvent.TextReset("s1", eventWorkdir));
+        t.onEvent(new AgentEvent.TextDelta("half an answer", "s1", eventWorkdir));
+        t.onEvent(new AgentEvent.TurnDone("half an answer", "s1", eventWorkdir));
 
         final var md = t.transcript().toString();
         // the provider re-sends the whole text after a reset: the partial must not survive
@@ -709,8 +728,10 @@ class ConversationTranscriptTest {
         // the stream delivered the full answer, but the final message TurnDone carries is
         // truncated (a clipped provider reply): the fuller streamed text must survive
         t.onEvent(new AgentEvent.TextDelta(
-                "the file is present. Let me look at the git diff of `TuiCommand.java` specifically", "s1"));
-        t.onEvent(new AgentEvent.TurnDone("the file is present. Let me look at the git diff of ", "s1"));
+                "the file is present. Let me look at the git diff of `TuiCommand.java` specifically",
+                "s1",
+                eventWorkdir));
+        t.onEvent(new AgentEvent.TurnDone("the file is present. Let me look at the git diff of ", "s1", eventWorkdir));
 
         final var md = t.transcript().toString();
         assertTrue(
@@ -728,8 +749,8 @@ class ConversationTranscriptTest {
         t.startUserTurn("hi");
         // the stream ended early but the final message is complete (longer): only the
         // un-streamed remainder must be appended, without duplicating the prefix
-        t.onEvent(new AgentEvent.TextDelta("let me look at the git diff of ", "s1"));
-        t.onEvent(new AgentEvent.TurnDone("let me look at the git diff of `TuiCommand.java`", "s1"));
+        t.onEvent(new AgentEvent.TextDelta("let me look at the git diff of ", "s1", eventWorkdir));
+        t.onEvent(new AgentEvent.TurnDone("let me look at the git diff of `TuiCommand.java`", "s1", eventWorkdir));
 
         final var md = t.transcript().toString();
         assertEquals(1, countOccurrences(md, "let me look at the git diff of"), md);
@@ -740,8 +761,8 @@ class ConversationTranscriptTest {
     void identicalStreamedAndFinalTextDoesNotDuplicate() {
         final var t = new ConversationTranscript();
         t.startUserTurn("hi");
-        t.onEvent(new AgentEvent.TextDelta("the answer", "s1"));
-        t.onEvent(new AgentEvent.TurnDone("the answer", "s1"));
+        t.onEvent(new AgentEvent.TextDelta("the answer", "s1", eventWorkdir));
+        t.onEvent(new AgentEvent.TurnDone("the answer", "s1", eventWorkdir));
 
         final var md = t.transcript().toString();
         assertEquals(1, countOccurrences(md, "the answer"), md);
@@ -768,17 +789,17 @@ class ConversationTranscriptTest {
     @Test
     void statusNoticeAndUsageAreTracked() {
         final var t = new ConversationTranscript();
-        t.onEvent(AgentEvent.Notice.warn("careful", "s1"));
+        t.onEvent(AgentEvent.Notice.warn("careful", "s1", eventWorkdir));
         // WARN notices are durable transcript lines only: the leading status slot stays empty
         // (it is reserved for the busy/ready state, errors and the dedicated Status channel)
         assertEquals("", t.status());
         assertTrue(t.transcript().toString().contains("> ⚠ warning: careful"));
 
-        t.onEvent(new AgentEvent.Status("working", "s1"));
+        t.onEvent(new AgentEvent.Status("working", "s1", eventWorkdir));
         assertEquals("working", t.status());
 
         t.onEvent(new AgentEvent.UsageUpdated(
-                null, 42, 12.4, 40, 1.25, null, "s1", null, null, AgentEvent.UsageUpdated.Quota.NONE));
+                null, 42, 12.4, 40, 1.25, null, "s1", null, null, AgentEvent.UsageUpdated.Quota.NONE, eventWorkdir));
         assertEquals(42, t.estimatedContext());
         assertEquals(12, t.contextPercent());
         assertEquals(40, t.lastRealPromptTokens());
@@ -795,7 +816,8 @@ class ConversationTranscriptTest {
                 "s1",
                 null,
                 null,
-                AgentEvent.UsageUpdated.Quota.NONE));
+                AgentEvent.UsageUpdated.Quota.NONE,
+                eventWorkdir));
         assertEquals(1500, t.cacheReadTokens(), "usage cache-read must be captured");
     }
 
@@ -804,13 +826,13 @@ class ConversationTranscriptTest {
         final var t = new ConversationTranscript();
         // no quota -> not visible
         t.onEvent(new AgentEvent.UsageUpdated(
-                null, 42, 12.4, 40, 1.25, null, "s1", null, null, AgentEvent.UsageUpdated.Quota.NONE));
+                null, 42, 12.4, 40, 1.25, null, "s1", null, null, AgentEvent.UsageUpdated.Quota.NONE, eventWorkdir));
         assertFalse(t.quotaVisible());
 
         // a real quota -> persisted fields
         final var quota =
                 new AgentEvent.UsageUpdated.Quota(true, true, "plus", 42.5, 18000, 1700000000L, "primary", "10", false);
-        t.onEvent(new AgentEvent.UsageUpdated(null, 42, 12.4, 40, 1.25, null, "s1", null, null, quota));
+        t.onEvent(new AgentEvent.UsageUpdated(null, 42, 12.4, 40, 1.25, null, "s1", null, null, quota, eventWorkdir));
         assertTrue(t.quotaVisible());
         assertEquals("plus", t.quotaPlanType());
         assertEquals(42.5, t.quotaUsedPercent(), 0.0001);
@@ -886,7 +908,7 @@ class ConversationTranscriptTest {
             final var md = transcript.replay(List.of(Message.user("review it"), message));
 
             assertTrue(md.contains("**You**\n\nreview it"), md);
-            assertEquals(1, md.split("\\*\\*You\\*\\*", -1).length - 1, md);
+            assertEquals(1, USER_HEADER.split(md, -1).length - 1, md);
             assertTrue(md.contains("**Assistant**\n\n\n\n> subagent `review` " + state), md);
             assertTrue(md.contains(summary), md);
             assertTrue(md.endsWith("> full report: /subagents child-1\n"), md);
@@ -1076,8 +1098,8 @@ class ConversationTranscriptTest {
     void resetClearsEverything() {
         final var t = new ConversationTranscript();
         t.startUserTurn("hi");
-        t.onEvent(new AgentEvent.TextDelta("streaming", "s1"));
-        t.onEvent(new AgentEvent.UsageUpdated(null, 10, 5.0, "s1"));
+        t.onEvent(new AgentEvent.TextDelta("streaming", "s1", eventWorkdir));
+        t.onEvent(new AgentEvent.UsageUpdated(null, 10, 5.0, "s1", eventWorkdir));
         t.reset();
 
         assertEquals("", t.transcript().toString());
@@ -1092,8 +1114,8 @@ class ConversationTranscriptTest {
     void queuedPromptIntegratesIntoRunningTurn() {
         final var t = new ConversationTranscript();
         t.startUserTurn("hi");
-        t.onEvent(new AgentEvent.ThinkingDelta("thought", "s1"));
-        t.onEvent(new AgentEvent.PromptIntegrated("follow up", "s1"));
+        t.onEvent(new AgentEvent.ThinkingDelta("thought", "s1", eventWorkdir));
+        t.onEvent(new AgentEvent.PromptIntegrated("follow up", "s1", eventWorkdir));
 
         assertTrue(t.busy(), "the turn must stay busy while a queued prompt runs");
         assertEquals("queued prompt integrated", t.status());
@@ -1103,7 +1125,7 @@ class ConversationTranscriptTest {
         assertTrue(md.contains("**You**\n\nfollow up"), "queued prompt must be folded under a You block: " + md);
         assertTrue(md.indexOf("thought") < md.indexOf("**You**\n\nfollow up"));
 
-        t.onEvent(new AgentEvent.TurnDone("answer", "s1"));
+        t.onEvent(new AgentEvent.TurnDone("answer", "s1", eventWorkdir));
         assertFalse(t.busy());
     }
 
@@ -1111,18 +1133,18 @@ class ConversationTranscriptTest {
     void parallelToolsEachKeepTheirOwnStreamAndCommand() {
         final var t = new ConversationTranscript();
         // two parallel read-only tools interleave their starts and streams
-        t.onEvent(new AgentEvent.ToolStarted("read", "{\"path\":\"a.txt\"}", "s1"));
-        t.onEvent(new AgentEvent.ToolStream("read", "content-of-a", "s1"));
-        t.onEvent(new AgentEvent.ToolStarted("grep", "{\"command\":\"grep -r x\"}", "s1"));
-        t.onEvent(new AgentEvent.ToolStream("grep", "match-line", "s1"));
+        t.onEvent(new AgentEvent.ToolStarted("read", "{\"path\":\"a.txt\"}", "s1", eventWorkdir));
+        t.onEvent(new AgentEvent.ToolStream("read", "content-of-a", "s1", eventWorkdir));
+        t.onEvent(new AgentEvent.ToolStarted("grep", "{\"command\":\"grep -r x\"}", "s1", eventWorkdir));
+        t.onEvent(new AgentEvent.ToolStream("grep", "match-line", "s1", eventWorkdir));
         // A finishes first: its card must carry A's command and A's stream only
-        t.onEvent(new AgentEvent.ToolFinished("read", "content-of-a", true, "s1"));
+        t.onEvent(new AgentEvent.ToolFinished("read", "content-of-a", true, "s1", eventWorkdir));
         final var mdAfterA = t.transcript().toString();
         assertTrue(mdAfterA.contains("*streaming `read`: a.txt*"), mdAfterA);
         assertTrue(mdAfterA.contains("content-of-a"), mdAfterA);
         assertFalse(mdAfterA.contains("match-line"), "B's stream must not leak into A's card: " + mdAfterA);
         // B finishes: its own card with its own content, ordinal strictly after A's
-        t.onEvent(new AgentEvent.ToolFinished("grep", "match-line", true, "s1"));
+        t.onEvent(new AgentEvent.ToolFinished("grep", "match-line", true, "s1", eventWorkdir));
         final var md = t.transcript().toString();
         assertTrue(md.contains("*streaming `grep`: grep -r x*"), md);
         assertTrue(md.contains("match-line"), md);
@@ -1136,16 +1158,16 @@ class ConversationTranscriptTest {
     void subagentStreamsNeverPolluteTheParentTranscript() {
         final var t = new ConversationTranscript();
         // subagent-tagged events are dropped from a parent transcript...
-        t.onEvent(new AgentEvent.ThinkingDelta("child reasoning", "s1", "sub-1", "child"));
-        t.onEvent(new AgentEvent.TextDelta("child answer", "s1", "sub-1", "child"));
-        t.onEvent(new AgentEvent.ToolStarted("bash", "{}", -1, "s1", "sub-1", "child"));
-        t.onEvent(new AgentEvent.ToolFinished("bash", "out", true, "s1", "sub-1", "child"));
+        t.onEvent(new AgentEvent.ThinkingDelta("child reasoning", "s1", "sub-1", "child", eventWorkdir));
+        t.onEvent(new AgentEvent.TextDelta("child answer", "s1", "sub-1", "child", eventWorkdir));
+        t.onEvent(new AgentEvent.ToolStarted("bash", "{}", -1, "s1", "sub-1", "child", eventWorkdir));
+        t.onEvent(new AgentEvent.ToolFinished("bash", "out", true, "s1", "sub-1", "child", eventWorkdir));
         assertEquals("", t.transcript().toString());
         assertEquals("", t.pending().toString());
         assertEquals("", t.thinking().toString());
         // ...while the lifecycle markers are still folded in
-        t.onEvent(new AgentEvent.SubagentStarted("do the thing", "s1", "sub-1", "child"));
-        t.onEvent(new AgentEvent.SubagentCompleted("done", true, "s1", "sub-1", "child"));
+        t.onEvent(new AgentEvent.SubagentStarted("do the thing", "s1", "sub-1", "child", eventWorkdir));
+        t.onEvent(new AgentEvent.SubagentCompleted("done", true, "s1", "sub-1", "child", eventWorkdir));
         final var md = t.transcript().toString();
         assertTrue(md.contains("> subagent `child` started: do the thing"), md);
         assertTrue(md.contains("> subagent `child` completed"), md);
@@ -1166,7 +1188,8 @@ class ConversationTranscriptTest {
                 + "var x = 1;\n"
                 + "```\n"
                 + "done";
-        t.onEvent(new AgentEvent.SubagentCompleted(summary, true, false, "s1", "sub-9", "explorer", "gpt-5.5"));
+        t.onEvent(new AgentEvent.SubagentCompleted(
+                summary, true, false, "s1", "sub-9", "explorer", "gpt-5.5", eventWorkdir));
         final var md = t.transcript().toString();
         // the header carries the effective model
         assertTrue(md.contains("> subagent `explorer` completed — model `gpt-5.5`"), md);
@@ -1188,7 +1211,7 @@ class ConversationTranscriptTest {
         final var t = new ConversationTranscript();
         // a summary line equal to the assistant marker would split the pane into a new turn
         t.onEvent(new AgentEvent.SubagentCompleted(
-                "findings\n\n**Assistant**\n\nrest", false, true, "s1", "sub-2", "child"));
+                "findings\n\n**Assistant**\n\nrest", false, true, "s1", "sub-2", "child", eventWorkdir));
         final var md = t.transcript().toString();
         // the marker-like line is shielded with a non-breaking space so the TUI never opens a turn
         assertTrue(md.contains("\u00A0**Assistant**"), md);
@@ -1200,7 +1223,7 @@ class ConversationTranscriptTest {
     void subagentCompletedCapsAVeryLongSummary() {
         final var t = new ConversationTranscript();
         final var huge = "word\n".repeat(3000); // 15000 chars, way past the 4000 cap
-        t.onEvent(new AgentEvent.SubagentCompleted(huge, true, "s1", "sub-3", "child"));
+        t.onEvent(new AgentEvent.SubagentCompleted(huge, true, "s1", "sub-3", "child", eventWorkdir));
         final var md = t.transcript().toString();
         assertTrue(md.endsWith("> full report: /subagents sub-3\n"), "pointer line must close the report");
         assertTrue(md.length() < 6000, "body must be capped: " + md.length());
@@ -1213,8 +1236,9 @@ class ConversationTranscriptTest {
         // transcript must not paint it as a red error
         final var t = new ConversationTranscript(true);
         t.startUserTurn("go");
-        t.onEvent(new AgentEvent.SubagentStarted("do the thing", "s1", "sub-1", "child"));
-        t.onEvent(new AgentEvent.SubagentCompleted("Sub-agent cancelled", false, true, "s1", "sub-1", "child"));
+        t.onEvent(new AgentEvent.SubagentStarted("do the thing", "s1", "sub-1", "child", eventWorkdir));
+        t.onEvent(new AgentEvent.SubagentCompleted(
+                "Sub-agent cancelled", false, true, "s1", "sub-1", "child", eventWorkdir));
         final var md = t.transcript().toString();
         assertTrue(md.contains("> subagent `child` cancelled"), md);
         assertFalse(md.contains("failed"), md);
@@ -1224,10 +1248,10 @@ class ConversationTranscriptTest {
     void captureTranscriptFoldsSubagentStreams() {
         final var t = new ConversationTranscript(true);
         t.startUserTurn("go");
-        t.onEvent(new AgentEvent.ThinkingDelta("child reasoning", "s1", "sub-1", "child"));
-        t.onEvent(new AgentEvent.TextDelta("child answer", "s1", "sub-1", "child"));
-        t.onEvent(new AgentEvent.ToolStarted("bash", "{}", -1, "s1", "sub-1", "child"));
-        t.onEvent(new AgentEvent.ToolFinished("bash", "out", true, "s1", "sub-1", "child"));
+        t.onEvent(new AgentEvent.ThinkingDelta("child reasoning", "s1", "sub-1", "child", eventWorkdir));
+        t.onEvent(new AgentEvent.TextDelta("child answer", "s1", "sub-1", "child", eventWorkdir));
+        t.onEvent(new AgentEvent.ToolStarted("bash", "{}", -1, "s1", "sub-1", "child", eventWorkdir));
+        t.onEvent(new AgentEvent.ToolFinished("bash", "out", true, "s1", "sub-1", "child", eventWorkdir));
         final var md = t.markdown("|", "");
         assertTrue(md.contains("child reasoning"), md);
         assertTrue(md.contains("child answer"), md);
@@ -1237,9 +1261,10 @@ class ConversationTranscriptTest {
     @Test
     void retryableErrorClearsFromStatusOnNextProgress() {
         final var t = new ConversationTranscript();
-        t.onEvent(new AgentEvent.Notice(AgentEvent.Notice.Level.ERROR, "LLM request failed (429) retry-after=1", "s1"));
+        t.onEvent(new AgentEvent.Notice(
+                AgentEvent.Notice.Level.ERROR, "LLM request failed (429) retry-after=1", "s1", eventWorkdir));
         assertTrue(t.status().startsWith("error:"), t.status());
-        t.onEvent(new AgentEvent.TextDelta("recovered", "s1"));
+        t.onEvent(new AgentEvent.TextDelta("recovered", "s1", eventWorkdir));
         assertFalse(t.status().startsWith("error:"), "a successful retry must clear the stale error: " + t.status());
     }
 
@@ -1249,7 +1274,7 @@ class ConversationTranscriptTest {
         // they must never write a durable transcript line nor replace the leading status
         final var t = new ConversationTranscript();
         t.onEvent(new AgentEvent.Pause(
-                AgentEvent.Pause.Kind.RETRY, "LLM call failed, retrying in ~0s (attempt 2/3)", 0, "s1"));
+                AgentEvent.Pause.Kind.RETRY, "LLM call failed, retrying in ~0s (attempt 2/3)", 0, "s1", eventWorkdir));
         assertFalse(t.status().startsWith("error:"), t.status());
         assertFalse(t.status().startsWith("LLM"), "a pause must not leak into the leading status: " + t.status());
         final var md = t.transcript().toString();
@@ -1259,8 +1284,8 @@ class ConversationTranscriptTest {
     @Test
     void fatalErrorSurvivesTurnProgress() {
         final var t = new ConversationTranscript();
-        t.onEvent(new AgentEvent.Error("kaput", "s1"));
-        t.onEvent(new AgentEvent.TextDelta("still streaming", "s1"));
+        t.onEvent(new AgentEvent.Error("kaput", "s1", eventWorkdir));
+        t.onEvent(new AgentEvent.TextDelta("still streaming", "s1", eventWorkdir));
         assertEquals("error: kaput", t.status(), "non-retryable errors stay until acknowledged");
     }
 
@@ -1277,8 +1302,8 @@ class ConversationTranscriptTest {
         final var t = new ConversationTranscript();
         t.bindCompression(compression);
         t.startUserTurn("hi");
-        t.onEvent(new AgentEvent.TextDelta("Let me run the proper typecheck.\n\n@1", "s1"));
-        t.onEvent(new AgentEvent.ToolStarted("bash", "{\"command\":\"git status\"}", "s1"));
+        t.onEvent(new AgentEvent.TextDelta("Let me run the proper typecheck.\n\n@1", "s1", eventWorkdir));
+        t.onEvent(new AgentEvent.ToolStarted("bash", "{\"command\":\"git status\"}", "s1", eventWorkdir));
 
         final var md = t.markdown("|", "welcome");
         assertTrue(md.contains("Let me run the proper typecheck."), md);
@@ -1296,8 +1321,8 @@ class ConversationTranscriptTest {
         final var t = new ConversationTranscript();
         t.bindCompression(compression);
         t.startUserTurn("hi");
-        t.onEvent(new AgentEvent.TextDelta("Good picture forming.\n\n@1290\n\n@1291", "s1"));
-        t.onEvent(new AgentEvent.ToolStarted("bash", "{\"command\":\"ls\"}", "s1"));
+        t.onEvent(new AgentEvent.TextDelta("Good picture forming.\n\n@1290\n\n@1291", "s1", eventWorkdir));
+        t.onEvent(new AgentEvent.ToolStarted("bash", "{\"command\":\"ls\"}", "s1", eventWorkdir));
 
         final var md = t.markdown("|", "welcome");
         assertTrue(md.contains("Good picture forming."), md);
@@ -1315,17 +1340,17 @@ class ConversationTranscriptTest {
         t.bindCompression(compression);
 
         t.startUserTurn("hi");
-        t.onEvent(new AgentEvent.TextDelta("answer @1250", "s1"));
+        t.onEvent(new AgentEvent.TextDelta("answer @1250", "s1", eventWorkdir));
         // a tool call flushes the pending tail mid-stream (the seam is still incomplete)
-        t.onEvent(new AgentEvent.ToolStarted("bash", "{\"command\":\"ls\"}", "s1"));
+        t.onEvent(new AgentEvent.ToolStarted("bash", "{\"command\":\"ls\"}", "s1", eventWorkdir));
         var md = t.markdown("|", "welcome");
         assertTrue(md.contains("answer"), md);
         assertFalse(md.contains("@1250"), "partial seam half must not freeze: " + md);
 
         // the closing half arrives after the tool block and the turn ends
-        t.onEvent(new AgentEvent.ToolFinished("bash", "ok", true, "s1"));
-        t.onEvent(new AgentEvent.TextDelta("4@ done", "s1"));
-        t.onEvent(new AgentEvent.TurnDone("answer @12504@ done", "s1"));
+        t.onEvent(new AgentEvent.ToolFinished("bash", "ok", true, "s1", eventWorkdir));
+        t.onEvent(new AgentEvent.TextDelta("4@ done", "s1", eventWorkdir));
+        t.onEvent(new AgentEvent.TurnDone("answer @12504@ done", "s1", eventWorkdir));
         md = t.markdown("|", "welcome");
         // the re-queued first half + the second half re-form the complete tag, but it is glued to
         // prose ("answer ... done"), so under the content-preservation policy the intended content
@@ -1348,11 +1373,11 @@ class ConversationTranscriptTest {
         t.bindCompression(compression);
 
         t.startUserTurn("hi");
-        t.onEvent(new AgentEvent.TextDelta("answer @1250", "s1"));
-        t.onEvent(new AgentEvent.ToolStarted("bash", "{\"command\":\"ls\"}", "s1"));
-        t.onEvent(new AgentEvent.ToolFinished("bash", "ok", true, "s1"));
+        t.onEvent(new AgentEvent.TextDelta("answer @1250", "s1", eventWorkdir));
+        t.onEvent(new AgentEvent.ToolStarted("bash", "{\"command\":\"ls\"}", "s1", eventWorkdir));
+        t.onEvent(new AgentEvent.ToolFinished("bash", "ok", true, "s1", eventWorkdir));
         // the authoritative final content supersedes the streamed tail (no second half)
-        t.onEvent(new AgentEvent.TurnDone("answer done", "s1"));
+        t.onEvent(new AgentEvent.TurnDone("answer done", "s1", eventWorkdir));
 
         final var md = t.markdown("|", "welcome");
         assertFalse(md.contains("@1250"), "never-completed seam must not persist: " + md);
@@ -1382,9 +1407,9 @@ class ConversationTranscriptTest {
         final var t = new ConversationTranscript();
         t.bindCompression(compression);
         t.startUserTurn("hi");
-        t.onEvent(new AgentEvent.TextDelta("Let me commit.\n\n", "s1"));
+        t.onEvent(new AgentEvent.TextDelta("Let me commit.\n\n", "s1", eventWorkdir));
         for (final var frame : new String[] {"@", "1", "@"}) {
-            t.onEvent(new AgentEvent.TextDelta(frame, "s1"));
+            t.onEvent(new AgentEvent.TextDelta(frame, "s1", eventWorkdir));
             final var md = t.markdown("|", "welcome");
             assertTrue(md.contains("Let me commit."), md);
             assertFalse(md.contains("@1"), "frame must not render the seam: " + md);
@@ -1403,7 +1428,7 @@ class ConversationTranscriptTest {
         final var t = new ConversationTranscript();
         t.bindCompression(compression);
         t.startUserTurn("hi");
-        t.onEvent(new AgentEvent.TextDelta("Let me commit.\n\n@1\n@", "s1"));
+        t.onEvent(new AgentEvent.TextDelta("Let me commit.\n\n@1\n@", "s1", eventWorkdir));
 
         final var md = t.markdown("|", "welcome");
         assertTrue(md.contains("Let me commit."), md);
@@ -1416,8 +1441,8 @@ class ConversationTranscriptTest {
         // the whole line is scrubbed from the live display
         final var t = new ConversationTranscript();
         t.startUserTurn("hi");
-        t.onEvent(new AgentEvent.TextDelta("Let me run the proper typecheck.\n\n", "s1"));
-        t.onEvent(new AgentEvent.TextDelta("@535@\n\n", "s1"));
+        t.onEvent(new AgentEvent.TextDelta("Let me run the proper typecheck.\n\n", "s1", eventWorkdir));
+        t.onEvent(new AgentEvent.TextDelta("@535@\n\n", "s1", eventWorkdir));
 
         final var md = t.markdown("|", "welcome");
         assertTrue(md.contains("Let me run the proper typecheck."), md);
@@ -1431,8 +1456,8 @@ class ConversationTranscriptTest {
         // STANDALONE line
         final var t = new ConversationTranscript();
         t.startUserTurn("hi");
-        t.onEvent(new AgentEvent.TextDelta("answer\n@5", "s1"));
-        t.onEvent(new AgentEvent.TextDelta("35@\n", "s1"));
+        t.onEvent(new AgentEvent.TextDelta("answer\n@5", "s1", eventWorkdir));
+        t.onEvent(new AgentEvent.TextDelta("35@\n", "s1", eventWorkdir));
 
         final var md = t.markdown("|", "welcome");
         assertTrue(md.contains("answer"), md);
@@ -1445,8 +1470,8 @@ class ConversationTranscriptTest {
         // durable transcript: markdown() must scrub a STANDALONE seam line either way
         final var t = new ConversationTranscript();
         t.startUserTurn("hi");
-        t.onEvent(new AgentEvent.TextDelta("let me check\n@12@\n", "s1"));
-        t.onEvent(new AgentEvent.ToolStarted("bash", "{\"command\":\"ls\"}", "s1"));
+        t.onEvent(new AgentEvent.TextDelta("let me check\n@12@\n", "s1", eventWorkdir));
+        t.onEvent(new AgentEvent.ToolStarted("bash", "{\"command\":\"ls\"}", "s1", eventWorkdir));
 
         final var md = t.markdown("|", "welcome");
         assertTrue(md.contains("let me check"), md);
@@ -1461,8 +1486,8 @@ class ConversationTranscriptTest {
         // intended content and survives
         final var t = new ConversationTranscript();
         t.startUserTurn("hi");
-        t.onEvent(new AgentEvent.ThinkingDelta("reasoning about\n@12@\n", "s1"));
-        t.onEvent(new AgentEvent.ThinkingDelta("then @b21@ [high] step", "s1"));
+        t.onEvent(new AgentEvent.ThinkingDelta("reasoning about\n@12@\n", "s1", eventWorkdir));
+        t.onEvent(new AgentEvent.ThinkingDelta("then @b21@ [high] step", "s1", eventWorkdir));
 
         assertTrue(t.thinkingText().contains("reasoning about"), t.thinkingText());
         assertTrue(t.thinkingText().contains("then"), t.thinkingText());

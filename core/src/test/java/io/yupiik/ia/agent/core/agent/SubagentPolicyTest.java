@@ -70,8 +70,8 @@ class SubagentPolicyTest {
     void childPermissionForkCopiesModesButIsolatesSessionGrants() {
         final CodingAgentConfiguration configuration =
                 TestConfigs.codingAgent(Map.of("yca.storageHome", storageHome.toString()));
-        final var parent = new PermissionService(configuration);
-        parent.projectDir(storageHome);
+        final var parent = new PermissionService(configuration, storageHome);
+
         parent.setMode(AgentMode.BUILD);
         parent.setPermissionMode(PermissionMode.AUTO_EDIT);
         parent.grantSession(

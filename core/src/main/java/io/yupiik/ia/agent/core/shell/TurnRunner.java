@@ -124,7 +124,9 @@ public class TurnRunner {
      * still in flight; the caller owns the wording of that notice.
      */
     public CompletionStage<Boolean> submit(final TurnRequest request) {
-        final var run = mavenKnowledgeService.currentIndex();
+        final var runtime = request.env().session().runtime();
+        final var root = runtime.workdir();
+        final var run = mavenKnowledgeService.currentIndex(root);
         if (run == null || !run.inFlight()) {
             return execute(request);
         }

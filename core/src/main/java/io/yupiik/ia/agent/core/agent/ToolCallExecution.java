@@ -53,6 +53,7 @@ import java.util.function.BooleanSupplier;
 import java.util.function.Supplier;
 import java.util.logging.Level;
 import java.util.logging.Logger;
+import java.util.stream.Collectors;
 
 /**
  * Executes a single tool call (lookup, argument parsing, pre-tool gate, execution and diagnostic
@@ -84,6 +85,7 @@ public class ToolCallExecution {
     private final Supplier<Set<String>> effectiveAllowedTools;
     private final Supplier<Set<String>> servedToolNames;
     private final Supplier<ChatSettings> chatSettings;
+    private final BooleanSupplier sessionClosed;
 
     private final ConcurrentHashMap<Long, AtomicBoolean> runningToolCancels = new ConcurrentHashMap<>();
     private final AtomicLong toolCallOrdinal = new AtomicLong();
@@ -108,7 +110,8 @@ public class ToolCallExecution {
             final Supplier<SubagentBudget> subagentBudget,
             final Supplier<Set<String>> effectiveAllowedTools,
             final Supplier<Set<String>> servedToolNames,
-            final Supplier<ChatSettings> chatSettings) {
+            final Supplier<ChatSettings> chatSettings,
+            final BooleanSupplier sessionClosed) {
         this.toolRegistry = toolRegistry;
         this.toolExecutionService = toolExecutionService;
         this.permissionService = permissionService;
@@ -129,6 +132,7 @@ public class ToolCallExecution {
         this.effectiveAllowedTools = effectiveAllowedTools;
         this.servedToolNames = servedToolNames;
         this.chatSettings = chatSettings;
+        this.sessionClosed = sessionClosed;
     }
 
     /**
@@ -220,7 +224,8 @@ public class ToolCallExecution {
                     ordinal,
                     currentSessionId.get(),
                     subagentId.get(),
-                    subagentName.get()));
+                    subagentName.get(),
+                    sessionWorkdir.get()));
             return new ToolOutcome(call.id(), name, diagnostic, false, false);
         }
         final var childToolCeiling = effectiveAllowedTools.get();
@@ -235,7 +240,8 @@ public class ToolCallExecution {
                     ordinal,
                     currentSessionId.get(),
                     subagentId.get(),
-                    subagentName.get()));
+                    subagentName.get(),
+                    sessionWorkdir.get()));
             return new ToolOutcome(call.id(), name, diagnostic, false, false);
         }
         // a tool that is served but was NOT offered in the current request's wire list must not be executed:
@@ -259,7 +265,8 @@ public class ToolCallExecution {
                     ordinal,
                     currentSessionId.get(),
                     subagentId.get(),
-                    subagentName.get()));
+                    subagentName.get(),
+                    sessionWorkdir.get()));
             return new ToolOutcome(call.id(), name, modeDenial, false, false);
         }
         final Map<String, Object> args;
@@ -277,11 +284,18 @@ public class ToolCallExecution {
                     ordinal,
                     currentSessionId.get(),
                     subagentId.get(),
-                    subagentName.get()));
+                    subagentName.get(),
+                    sessionWorkdir.get()));
             return new ToolOutcome(call.id(), name, diagnostic, false, false);
         }
         emit(new AgentEvent.ToolStarted(
-                name, argsJson, ordinal, currentSessionId.get(), subagentId.get(), subagentName.get()));
+                name,
+                argsJson,
+                ordinal,
+                currentSessionId.get(),
+                subagentId.get(),
+                subagentName.get(),
+                sessionWorkdir.get()));
         final var gateDenial = gateTool(name, tool, args, call.id());
         if (gateDenial != null) {
             unregisterRunningTool(ordinal);
@@ -293,7 +307,8 @@ public class ToolCallExecution {
                     ordinal,
                     currentSessionId.get(),
                     subagentId.get(),
-                    subagentName.get()));
+                    subagentName.get(),
+                    sessionWorkdir.get()));
             return new ToolOutcome(call.id(), name, gateDenial, false, false);
         }
         final var toolStartNanos = precisionDurationMarker.now();
@@ -324,7 +339,8 @@ public class ToolCallExecution {
                 ordinal,
                 currentSessionId.get(),
                 subagentId.get(),
-                subagentName.get()));
+                subagentName.get(),
+                sessionWorkdir.get()));
         return new ToolOutcome(
                 call.id(),
                 name,
@@ -355,13 +371,30 @@ public class ToolCallExecution {
                 statusReporter,
                 usageTracker,
                 contextView,
-                cancelled,
+                () -> sessionClosed.getAsBoolean() || cancelled.getAsBoolean(),
                 settings,
-                callCancelled,
+                () -> sessionClosed.getAsBoolean() || callCancelled.getAsBoolean(),
                 sessionWorkdir.get(),
                 ordinal,
-                effectiveAllowedTools.get(),
-                subagentBudget.get());
+                delegationTools(),
+                subagentBudget.get(),
+                toolRegistry);
+    }
+
+    private Set<String> delegationTools() {
+        if (toolRegistry == null) {
+            return Set.of();
+        }
+        final var ceiling = effectiveAllowedTools.get();
+        final var plan = permissionService != null && permissionService.mode() == AgentMode.PLAN;
+        return toolRegistry
+                .toWireTools(
+                        sessionWorkdir.get(),
+                        tool -> (ceiling == null || ceiling.contains(tool.name()))
+                                && (!plan || tool.category() != ToolCategory.EDIT))
+                .stream()
+                .map(tool -> tool.function().name())
+                .collect(Collectors.toUnmodifiableSet());
     }
 
     /**
@@ -375,14 +408,18 @@ public class ToolCallExecution {
             final String name, final EmbeddedTool tool, final Map<String, Object> args, final String toolUseId) {
         final var result = new HookResult();
         final var workdir = args.get("workdir") instanceof final String w && !w.isBlank() ? w : null;
-        final var context = new EventContextBuilder(configuration)
+        final var root = sessionWorkdir.get();
+        final var cwd = workdir == null
+                ? root
+                : ToolContext.empty(root).resolvePath(workdir).toAbsolutePath().normalize();
+        final var context = new EventContextBuilder()
                 .build(
                         permissionService,
                         chatSettings.get(),
                         currentSessionId.get(),
                         subagentId.get(),
                         subagentName.get(),
-                        workdir);
+                        cwd);
         emitter.emit(new ToolUsePreEvent(
                 context, name, args, toolUseId, result, permissionService, tool.category(), tool.readonly()));
         if (!result.forbidden()) {
@@ -429,8 +466,7 @@ public class ToolCallExecution {
             if (!(args.get("path") instanceof final String path) || path.isBlank()) {
                 return List.of();
             }
-            return List.of(ReadCoverage.key(
-                    context.resolvePath(path, configuration == null ? null : configuration.resolveProjectDir())));
+            return List.of(ReadCoverage.key(context.resolvePath(path)));
         }
         if (FILE_READ_TOOLS.contains(name)) {
             final var path = args.get("path") instanceof final String p && !p.isBlank() ? p : "";
@@ -440,7 +476,7 @@ public class ToolCallExecution {
             // page-aware key: re-reading the same 2k window is redundant, advancing through the file
             // (offset buckets) is novel - so legitimate paging never trips the plateau detector
             final var offset = args.get("offset") instanceof final Number n ? n.intValue() : 0;
-            return List.of(normalizeCoveragePath(path) + "@" + (offset / 2048) + "k");
+            return List.of(context.resolvePath(path).normalize().toString() + "@" + (offset / 2048) + "k");
         }
         if ("bash".equals(name) && args.get("command") instanceof final String command && !command.isBlank()) {
             return permissionService == null ? List.of() : permissionService.bashCoverage(command);
@@ -452,28 +488,17 @@ public class ToolCallExecution {
             // same root is redundant
             return path.isBlank()
                     ? (pattern.isBlank() ? List.of() : List.of("grep:" + pattern))
-                    : List.of("grep:" + pattern + ":" + normalizeCoveragePath(path));
+                    : List.of("grep:" + pattern + ":"
+                            + context.resolvePath(path).normalize().toString());
         }
         if ("glob".equals(name) && args.get("path") instanceof final String path && !path.isBlank()) {
-            return List.of(normalizeCoveragePath(path));
+            return List.of(context.resolvePath(path).normalize().toString());
         }
         return List.of();
     }
 
     private static final Set<String> FILE_READ_TOOLS =
             Set.of("read", "edit_file", "write_file", "apply_patch", "ls", "find", "tree", "du");
-
-    private static String normalizeCoveragePath(final String raw) {
-        final var trimmed = raw.strip();
-        if (trimmed.isEmpty()) {
-            return trimmed;
-        }
-        try {
-            return Path.of(trimmed).toAbsolutePath().normalize().toString();
-        } catch (final RuntimeException e) {
-            return trimmed;
-        }
-    }
 
     static String unknownToolDiagnostic(final String name) {
         return "Unknown tool \"" + name + "\": not in this session's toolset (built-in or enabled MCP)."

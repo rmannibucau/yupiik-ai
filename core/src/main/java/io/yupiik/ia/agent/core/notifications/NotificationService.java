@@ -32,6 +32,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.logging.Level;
 import java.util.logging.Logger;
+import java.util.regex.Pattern;
 
 /**
  * Fires an OS notification when a turn ends or needs input, opt-in via {@code yca.notifications.enabled} (disabled by
@@ -53,6 +54,7 @@ import java.util.logging.Logger;
  */
 @ApplicationScoped
 public class NotificationService {
+    private static final Pattern CONTROL_OR_WHITESPACE = Pattern.compile("[\\p{Cntrl}\\s]+");
     private static final Logger LOGGER = Logger.getLogger(NotificationService.class.getName());
 
     /** Bundled app-icon resource, materialized to a temp file so notify-send {@code -n} can reference it. */
@@ -206,7 +208,8 @@ public class NotificationService {
         if (value == null) {
             return "";
         }
-        final var normalized = value.replaceAll("[\\p{Cntrl}\\s]+", " ").strip();
+        final var normalized =
+                CONTROL_OR_WHITESPACE.matcher(value).replaceAll(" ").strip();
         return normalized.substring(0, Math.min(limit, normalized.length()));
     }
 

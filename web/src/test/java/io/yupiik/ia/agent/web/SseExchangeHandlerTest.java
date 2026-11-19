@@ -29,6 +29,7 @@ import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
@@ -46,10 +47,13 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.api.io.TempDir;
 
 /** End-to-end tests of the SSE session stream: snapshot seeding and per-session fan-out. */
 @ExtendWith(TestWebJsonMapper.class)
 class SseExchangeHandlerTest {
+    @TempDir
+    private static Path eventWorkdir;
 
     private static HttpClient client;
 
@@ -270,8 +274,8 @@ class SseExchangeHandlerTest {
                 TimeUnit.SECONDS);
 
         // push one agent event to each session after the consumer is subscribed
-        broker.pushAgentEvent("A", new AgentEvent.Status("running", "A", null, null));
-        broker.pushAgentEvent("B", new AgentEvent.Status("boosted", "B", null, null));
+        broker.pushAgentEvent("A", new AgentEvent.Status("running", "A", null, null, eventWorkdir));
+        broker.pushAgentEvent("B", new AgentEvent.Status("boosted", "B", null, null, eventWorkdir));
 
         await(() -> framesPeek(sessionA).stream().anyMatch(l -> l.contains("running")), 3, TimeUnit.SECONDS);
         await(() -> framesPeek(sessionB).stream().anyMatch(l -> l.contains("boosted")), 3, TimeUnit.SECONDS);
@@ -325,7 +329,8 @@ class SseExchangeHandlerTest {
                                 broker.broadcastAll(SseBroker.pingFrame());
                             } else {
                                 broker.pushAgentEvent(
-                                        "c1", new AgentEvent.Status("evt-" + ft + "-" + i, "c1", null, null));
+                                        "c1",
+                                        new AgentEvent.Status("evt-" + ft + "-" + i, "c1", null, null, eventWorkdir));
                             }
                         }
                     },
@@ -364,7 +369,7 @@ class SseExchangeHandlerTest {
         // block the emit thread (the bug class where a slow browser froze the whole turn).
         final var burstStart = System.nanoTime();
         for (int i = 0; i < 1100; i++) {
-            broker.pushAgentEvent("slow", new AgentEvent.Status("fill-" + i, "slow", null, null));
+            broker.pushAgentEvent("slow", new AgentEvent.Status("fill-" + i, "slow", null, null, eventWorkdir));
         }
         final var burstNanos = System.nanoTime() - burstStart;
         // each push is a plain enqueue: 1100 pushes must complete far faster than any socket write
@@ -375,8 +380,9 @@ class SseExchangeHandlerTest {
 
         // a structural pair pushed AFTER the burst must always be delivered (never dropped):
         // the finished frame is what flips a tool card out of "working", so losing it is the bug.
-        broker.pushAgentEvent("slow", new AgentEvent.ToolStarted("read", "{}", 1, "slow", null, null));
-        broker.pushAgentEvent("slow", new AgentEvent.ToolFinished("read", "done", true, "slow", null, null));
+        broker.pushAgentEvent("slow", new AgentEvent.ToolStarted("read", "{}", 1, "slow", null, null, eventWorkdir));
+        broker.pushAgentEvent(
+                "slow", new AgentEvent.ToolFinished("read", "done", true, "slow", null, null, eventWorkdir));
 
         await(() -> framesPeek(tab).stream().anyMatch(l -> l.contains("read")), 5, TimeUnit.SECONDS);
         assertTrue(

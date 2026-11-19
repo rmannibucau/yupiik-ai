@@ -44,6 +44,7 @@ import java.util.regex.Pattern;
 
 @ApplicationScoped
 public class GrepTool implements EmbeddedTool {
+    private static final Pattern WHITESPACE = Pattern.compile("\\s+");
 
     private static final List<String> SKIP_PARTS = List.of("/target/", "/.git/", "/node_modules/", "/build/", "/.yca/");
 
@@ -63,7 +64,7 @@ public class GrepTool implements EmbeddedTool {
     }
 
     @Override
-    public String description() {
+    public String description(final Path workdir) {
         return "Search file contents using a regular expression or exact text matching; locate specific code, "
                 + "symbols, or text patterns, and narrow searches with `include`. Returns matching file paths, line "
                 + "numbers, and line previews, skipping build output, VCS directories and ignored paths.";
@@ -96,11 +97,6 @@ public class GrepTool implements EmbeddedTool {
                         "limit", Schemas.intProp("Maximum number of matching lines to return, default 100."),
                         "maxResults", Schemas.intProp("Maximum number of matching lines to return, default 100.")),
                 "pattern");
-    }
-
-    @Override
-    public ToolResult execute(final Map<String, Object> args) {
-        return execute(args, ToolContext.empty());
     }
 
     @Override
@@ -206,7 +202,7 @@ public class GrepTool implements EmbeddedTool {
      * each of its elements is one explicit path (never split). Blank/absent falls back to {@code "."}.
      */
     private List<Path> resolveRoots(final Object raw, final ToolContext context) {
-        final var fallback = configuration == null ? null : configuration.resolveProjectDir();
+        final var fallback = context.projectDir();
         final var tokens = new ArrayList<String>();
         if (raw instanceof List<?> list) {
             // explicit boundaries: each element is a single path, spaces preserved
@@ -219,21 +215,21 @@ public class GrepTool implements EmbeddedTool {
         } else {
             final var rawPath = raw == null ? "." : raw.toString().strip();
             if (!rawPath.isEmpty() && !rawPath.equals(".")) {
-                final var whole = context.resolvePath(rawPath, fallback);
+                final var whole = context.resolvePath(rawPath);
                 if (Files.exists(whole)) {
                     // an existing path (file or directory) may legitimately contain spaces: verbatim
                     tokens.add(rawPath);
                 } else {
-                    tokens.addAll(List.of(rawPath.split("\\s+")));
+                    tokens.addAll(List.of(WHITESPACE.split(rawPath)));
                 }
             }
         }
         if (tokens.isEmpty()) {
-            return List.of(context.resolvePath(".", fallback));
+            return List.of(context.resolvePath("."));
         }
         final var roots = new ArrayList<Path>();
         for (final var token : tokens) {
-            final var root = context.resolvePath(token, fallback);
+            final var root = context.resolvePath(token);
             if (!roots.contains(root)) {
                 roots.add(root);
             }

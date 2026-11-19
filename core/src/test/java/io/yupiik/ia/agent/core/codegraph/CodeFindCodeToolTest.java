@@ -18,6 +18,7 @@ package io.yupiik.ia.agent.core.codegraph;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import io.yupiik.ia.agent.core.tools.ToolContext;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
@@ -39,14 +40,14 @@ class CodeFindCodeToolTest {
                 List.of(),
                 Map.of(),
                 1L)));
-        final var simple = tool.execute(Map.of("query", "RowSet"));
+        final var simple = tool.execute(Map.of("query", "RowSet"), ToolContext.empty(fakeRoot));
         assertTrue(simple.success());
         final var simpleText = simple.output();
         assertTrue(simpleText.contains("INTERFACE  org.hop.RowSet"), simpleText);
         assertTrue(simpleText.contains("TYPE  org.hop.RowSetImpl"), simpleText);
         assertFalse(simpleText.contains("Pipeline"), simpleText);
 
-        final var byKind = tool.execute(Map.of("query", "rowset", "kind", "interface"));
+        final var byKind = tool.execute(Map.of("query", "rowset", "kind", "interface"), ToolContext.empty(fakeRoot));
         final var kindText = byKind.output();
         assertTrue(kindText.contains("INTERFACE  org.hop.RowSet"), kindText);
         assertFalse(kindText.contains("RowSetImpl"), kindText);
@@ -55,7 +56,7 @@ class CodeFindCodeToolTest {
     @Test
     void reportsNoSymbolWhenMissing() {
         final var tool = new CodeFindCodeTool(fake(GraphStore.empty()));
-        final var result = tool.execute(Map.of("query", "doesNotExist"));
+        final var result = tool.execute(Map.of("query", "doesNotExist"), ToolContext.empty(fakeRoot));
         assertTrue(result.success());
         assertTrue(result.output().contains("No symbol matching 'doesNotExist'."));
     }
@@ -63,7 +64,7 @@ class CodeFindCodeToolTest {
     @Test
     void requiresQuery() {
         final var tool = new CodeFindCodeTool(fake(GraphStore.empty()));
-        final var result = tool.execute(Map.of());
+        final var result = tool.execute(Map.of(), ToolContext.empty(fakeRoot));
         assertFalse(result.success());
     }
 
@@ -77,19 +78,19 @@ class CodeFindCodeToolTest {
                 List.of(),
                 Map.of(),
                 1L)));
-        final var result = tool.execute(Map.of("query", "a", "max", "1"));
+        final var result = tool.execute(Map.of("query", "a", "max", "1"), ToolContext.empty(fakeRoot));
         assertTrue(result.output().contains("capped at 1"));
     }
 
     private static StructuralCodeGraph fake(final GraphStore store) {
         return new StructuralCodeGraph() {
             @Override
-            public GraphStore graph() {
+            public GraphStore graph(final Path root) {
                 return store;
             }
 
             @Override
-            public Path storeRoot() {
+            public Path storeRoot(final Path root) {
                 return fakeRoot.resolve("fake-code-graph");
             }
         };

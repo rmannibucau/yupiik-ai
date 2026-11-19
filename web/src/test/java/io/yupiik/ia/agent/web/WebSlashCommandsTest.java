@@ -204,6 +204,67 @@ class WebSlashCommandsTest {
     }
 
     @Test
+    void resumePickerPreservesAsciiWhitespaceAndDoesNotBroadenItToUnicode() {
+        for (final var selected : List.of(
+                "saved",
+                "saved ",
+                "saved\tTitle with spaces",
+                "saved\r\nTitle",
+                "saved\fTitle",
+                "saved\u000bTitle",
+                "saved\u00a0Title",
+                "saved\u2003Title",
+                " saved",
+                "")) {
+            events.clear();
+            final var io = new ShellIO() {
+                @Override
+                public CompletionStage<Optional<String>> readLine(final String prompt) {
+                    throw new UnsupportedOperationException();
+                }
+
+                @Override
+                public CompletionStage<Boolean> confirm(final String prompt) {
+                    throw new UnsupportedOperationException();
+                }
+
+                @Override
+                public CompletionStage<Optional<String>> pick(final String title, final List<String> options) {
+                    assertEquals("resume session", title);
+                    assertEquals(1, options.size());
+                    assertTrue(options.getFirst().startsWith("saved  "));
+                    return CompletableFuture.completedStage(Optional.of(selected));
+                }
+
+                @Override
+                public ApprovalGate approvalGate() {
+                    throw new UnsupportedOperationException();
+                }
+
+                @Override
+                public FeedbackGate feedbackGate() {
+                    throw new UnsupportedOperationException();
+                }
+            };
+            final var outcome = commands.registry()
+                    .find("resume")
+                    .orElseThrow()
+                    .action()
+                    .apply("", new ShellEnv(env.frontend(), io, env.session(), env.transcript()))
+                    .toCompletableFuture()
+                    .join();
+            if (List.of("saved\u00a0Title", "saved\u2003Title", " saved", "").contains(selected)) {
+                assertInstanceOf(ShellOutcome.Error.class, outcome);
+                assertTrue(events.isEmpty());
+            } else {
+                assertInstanceOf(ShellOutcome.None.class, outcome);
+                assertEquals("saved", events.getFirst().data().get("id"));
+            }
+            assertEquals("parent", env.session().sessionId());
+        }
+    }
+
+    @Test
     void subagentsEmptyStateIsAModalEventNotATuiCallbackOrTranscript() {
         assertInstanceOf(ShellOutcome.None.class, dispatch("/subagents"));
         final var event = events.getFirst();

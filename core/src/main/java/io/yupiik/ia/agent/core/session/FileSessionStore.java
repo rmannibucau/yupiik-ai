@@ -30,6 +30,7 @@ import java.io.RandomAccessFile;
 import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.AtomicMoveNotSupportedException;
+import java.nio.file.FileAlreadyExistsException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
@@ -42,6 +43,7 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Objects;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.stream.Stream;
@@ -275,23 +277,24 @@ public class FileSessionStore implements SessionStore {
 
     private String doCreate() {
         writableDir();
-        // Session ids are s + creation-time(seconds, hex) + random(hex) and must stay <= 16 chars so they
-        // remain UI-friendly to display and paste. We deliberately use second (not millisecond) granularity
-        // to keep the prefix short and the id within that budget: within a single second the 7 random hex
-        // chars (28 bits) still make ids collision-free without scanning the store, and the coarser timestamp
-        // only means two sessions created in the same wall-clock second are not strictly ordered - which is
-        // functionally acceptable for a local session id.
-        final var now = clock.instant(); // injectable, deterministic in tests
-        final var seconds = now.getEpochSecond(); // up to 8 hex chars for ~7000 years
-        final var random = ThreadLocalRandom.current().nextInt() & 0x0FFFFFFF; // 28 bits => 7 hex chars
-        final String id = "s" + Long.toHexString(seconds) + String.format("%07x", random);
-        try {
-            Files.createDirectories(path(id).getParent());
-            Files.writeString(path(id), "");
-        } catch (final IOException e) {
-            throw new UncheckedIOException(e);
+        // Reserve a fresh folder atomically: a collision must never overwrite a stored session.
+        while (true) {
+            final var seconds = clock.instant().getEpochSecond();
+            final var random = ThreadLocalRandom.current().nextInt() & 0x0FFFFFFF;
+            final var id = "s" + Long.toHexString(seconds) + String.format("%07x", random);
+            if (Files.exists(legacyPath(id)) || Files.exists(legacyGz(id))) {
+                continue;
+            }
+            try {
+                Files.createDirectory(sessionDir(id));
+                Files.writeString(path(id), "", StandardOpenOption.CREATE_NEW);
+                return id;
+            } catch (final FileAlreadyExistsException collision) {
+                // Retry without touching the existing folder or legacy history.
+            } catch (final IOException e) {
+                throw new UncheckedIOException(e);
+            }
         }
-        return id;
     }
 
     public Path path(final String id) {
@@ -317,6 +320,32 @@ public class FileSessionStore implements SessionStore {
             final var target = path(id);
             try {
                 Files.createDirectories(target.getParent());
+                if (!Files.isRegularFile(target)) {
+                    final var source = resolveLoadSource(id);
+                    if (source != null) {
+                        // A resumed compressed/legacy session must not lose its prefix on the next append.
+                        final var tmp = target.resolveSibling(target.getFileName() + ".tmp-"
+                                + ThreadLocalRandom.current().nextLong());
+                        try {
+                            try (final var in = source.gz()
+                                    ? new GZIPInputStream(Files.newInputStream(source.path()))
+                                    : Files.newInputStream(source.path())) {
+                                Files.copy(in, tmp);
+                            }
+                            try {
+                                Files.move(
+                                        tmp,
+                                        target,
+                                        StandardCopyOption.ATOMIC_MOVE,
+                                        StandardCopyOption.REPLACE_EXISTING);
+                            } catch (final AtomicMoveNotSupportedException unsupported) {
+                                Files.move(tmp, target, StandardCopyOption.REPLACE_EXISTING);
+                            }
+                        } finally {
+                            Files.deleteIfExists(tmp);
+                        }
+                    }
+                }
                 Files.writeString(
                         target, mapper.toString(entry) + "\n", StandardOpenOption.CREATE, StandardOpenOption.APPEND);
             } catch (final IOException e) {
@@ -561,6 +590,12 @@ public class FileSessionStore implements SessionStore {
                                 + "has content and the in-memory copy may be incomplete"));
             }
             final var sb = new StringBuilder();
+            // Compaction/flush may replace only conversation messages. Project identity is store metadata.
+            final var project = projectDirOf(id);
+            if (!project.isBlank() && messages.stream().noneMatch(Message::isProjectMarker)) {
+                sb.append(mapper.toString(SessionEntry.of(now(), "system", project, null, null, "project", null)))
+                        .append('\n');
+            }
             for (final var m : messages) {
                 // persist the original entry timestamp when known: the message carries its
                 // persisted "at" in others so a flush/compact/prune does not rewrite history
@@ -661,6 +696,66 @@ public class FileSessionStore implements SessionStore {
         }
     }
 
+    @Override
+    public SessionMetadata metadata(final String id) {
+        fileLock.lock();
+        try {
+            final var target = sessionDir(id).resolve("preset.json");
+            if (resolveLoadSource(id) == null || !Files.isRegularFile(target)) {
+                return null;
+            }
+            try {
+                if (Files.size(target) > 65536) {
+                    throw new IllegalArgumentException("Invalid stored session preset");
+                }
+                final var metadata = mapper.fromString(SessionMetadata.class, Files.readString(target));
+                if (metadata == null) {
+                    throw new IllegalArgumentException("Invalid stored session preset");
+                }
+                return metadata;
+            } catch (final IOException | RuntimeException invalid) {
+                // Stored text and decoder diagnostics can contain arbitrary private data.
+                throw new IllegalArgumentException("Invalid stored session preset");
+            }
+        } finally {
+            fileLock.unlock();
+        }
+    }
+
+    @Override
+    public boolean metadata(final String id, final SessionMetadata metadata) {
+        fileLock.lock();
+        try {
+            if (resolveLoadSource(id) == null) {
+                return false; // In particular, a late config callback must not resurrect a deleted session.
+            }
+            final var target = sessionDir(id).resolve("preset.json");
+            final var tmp = target.resolveSibling(
+                    "preset.tmp-" + ThreadLocalRandom.current().nextLong());
+            try {
+                final var json = mapper.toString(Objects.requireNonNull(metadata, "metadata"));
+                if (json.getBytes(StandardCharsets.UTF_8).length > 65536) {
+                    throw new IllegalArgumentException("Session preset exceeds storage limit");
+                }
+                Files.createDirectories(target.getParent());
+                Files.writeString(tmp, json);
+                // Fail safely on filesystems without atomic replacement; never publish a partial preset.
+                Files.move(tmp, target, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+                return true;
+            } catch (final IOException failure) {
+                throw new UncheckedIOException("Cannot persist session preset", failure);
+            } finally {
+                try {
+                    Files.deleteIfExists(tmp);
+                } catch (final IOException ignored) {
+                    // Best effort; session deletion also removes incomplete writes.
+                }
+            }
+        } finally {
+            fileLock.unlock();
+        }
+    }
+
     private static void deleteRecursively(final Path dir) throws IOException {
         if (!Files.isDirectory(dir)) {
             Files.deleteIfExists(dir);
@@ -672,6 +767,26 @@ public class FileSessionStore implements SessionStore {
             }
         }
         Files.deleteIfExists(dir);
+    }
+
+    @Override
+    public void markProject(final String id, final String dir) {
+        fileLock.lock();
+        try {
+            SessionStore.super.markProject(id, dir);
+        } finally {
+            fileLock.unlock();
+        }
+    }
+
+    @Override
+    public void replaceProject(final String id, final String dir) {
+        fileLock.lock();
+        try {
+            SessionStore.super.replaceProject(id, dir);
+        } finally {
+            fileLock.unlock();
+        }
     }
 
     @Override

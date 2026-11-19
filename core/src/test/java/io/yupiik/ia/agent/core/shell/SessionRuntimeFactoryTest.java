@@ -16,7 +16,7 @@
 package io.yupiik.ia.agent.core.shell;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.TestConfigs;
@@ -29,7 +29,7 @@ import org.junit.jupiter.api.io.TempDir;
 
 /**
  * Regression coverage for the stale session-project-marker fallback: {@link
- * SessionRuntimeFactory#resolveSessionWorkdir} must never hand a dead directory (project moved or
+ * SessionRuntimeFactory#resolveWorkdir} must never hand a dead directory (project moved or
  * deleted since the session was recorded) to the tools, but fall back to the configured working
  * directory so the session still gets a live cwd.
  */
@@ -48,7 +48,7 @@ class SessionRuntimeFactoryTest {
 
         assertEquals(
                 configDir.toAbsolutePath().normalize(),
-                factory.resolveSessionWorkdir("s1"),
+                factory.resolveWorkdir(null, "s1"),
                 "a recorded marker that no longer exists must fall back to the configured working dir");
     }
 
@@ -65,7 +65,7 @@ class SessionRuntimeFactoryTest {
 
         assertEquals(
                 live.toAbsolutePath().normalize(),
-                factory.resolveSessionWorkdir("s1"),
+                factory.resolveWorkdir(null, "s1"),
                 "a recorded marker that still exists must keep precedence over the configured dir");
     }
 
@@ -78,19 +78,15 @@ class SessionRuntimeFactoryTest {
 
         assertEquals(
                 configDir.toAbsolutePath().normalize(),
-                factory.resolveSessionWorkdir("s1"),
+                factory.resolveWorkdir(null, "s1"),
                 "without a marker the configured working dir must be used");
     }
 
     @Test
-    void noStoreNorConfigReturnsNull() {
-        final var factory = new SessionRuntimeFactory(
-                null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null,
-                null, // backoff sleeper
-                null, null, // memory production policy
-                null, // quota store
-                null, null, null);
-        assertNull(factory.resolveSessionWorkdir("s1"), "with no session store nothing can be resolved");
+    void invalidExplicitRootNeverFallsBackToAConfiguredDirectory(@TempDir final Path tmp) {
+        final var factory = factory(
+                TestConfigs.codingAgent(Map.of("yca.workingDir", tmp.toString())), storeRecording(tmp.toString()));
+        assertThrows(IllegalArgumentException.class, () -> factory.resolveWorkdir(tmp.resolve("missing"), "s1"));
     }
 
     private static SessionStore storeRecording(final String marker) {

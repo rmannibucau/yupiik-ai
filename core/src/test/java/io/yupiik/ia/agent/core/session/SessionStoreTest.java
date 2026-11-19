@@ -24,6 +24,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.configuration.SessionConfiguration;
+import io.yupiik.ia.agent.core.configuration.TestConfigs;
 import io.yupiik.ia.agent.core.llm.Message;
 import io.yupiik.ia.agent.core.llm.ToolCall;
 import io.yupiik.ia.agent.core.llm.ToolCall.FunctionCall;
@@ -33,8 +34,10 @@ import java.nio.file.Path;
 import java.nio.file.attribute.FileTime;
 import java.time.Clock;
 import java.time.Instant;
+import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Map;
+import java.util.regex.Pattern;
 import java.util.zip.GZIPOutputStream;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -43,6 +46,9 @@ import org.junit.jupiter.api.io.TempDir;
 
 @ExtendWith(TestJsonMapper.class)
 class SessionStoreTest {
+    private static final Pattern SESSION_ID = Pattern.compile("s[0-9a-f]+");
+    private static final Pattern EPOCH_SESSION_ID = Pattern.compile("s0[0-9a-f]{7}");
+
     @TempDir
     Path dir;
 
@@ -63,7 +69,7 @@ class SessionStoreTest {
 
     private FileSessionStore newStore(final SessionConfiguration sessions, final Clock clock) {
         return new FileSessionStore(
-                io.yupiik.ia.agent.core.configuration.TestConfigs.codingAgent(Map.of(
+                TestConfigs.codingAgent(Map.of(
                         "yca.storageHome", dir.toString(),
                         "yca.sessions.retentionDays", String.valueOf(sessions.retentionDays()),
                         "yca.sessions.compressDays", String.valueOf(sessions.compressDays()),
@@ -81,7 +87,7 @@ class SessionStoreTest {
     void disabledStartupDoesNotAccessStorage() {
         // Resolving any storage path, including for the last-session scan, would fail.
         final var store = new FileSessionStore(
-                io.yupiik.ia.agent.core.configuration.TestConfigs.codingAgent(
+                TestConfigs.codingAgent(
                         Map.of("yca.storageHome", dir + "\u0000", "yca.sessions.startupCleanup", "false")),
                 mapper,
                 Clock.systemUTC());
@@ -113,8 +119,7 @@ class SessionStoreTest {
 
     @Test
     void defaultStartupStillPerformsHousekeeping() throws Exception {
-        final var configuration = io.yupiik.ia.agent.core.configuration.TestConfigs.codingAgent(
-                Map.of("yca.storageHome", dir.toString()));
+        final var configuration = TestConfigs.codingAgent(Map.of("yca.storageHome", dir.toString()));
         assertTrue(configuration.sessions().startupCleanup());
         final var store = new FileSessionStore(configuration, mapper, Clock.systemUTC());
         final var expired = store.create();
@@ -260,10 +265,10 @@ class SessionStoreTest {
         // generated shape: s + creation-seconds(hex) + random(hex), kept <= 16 chars for the UI
         // generated shape: s + creation-seconds(hex, variable length) + random(hex), kept <= 16 chars for the UI
         assertTrue(
-                first.matches("s[0-9a-f]+") && first.length() <= 16,
+                SESSION_ID.matcher(first).matches() && first.length() <= 16,
                 "id must match the generated hex shape and stay within 16 chars: " + first);
         assertTrue(
-                second.matches("s[0-9a-f]+") && second.length() <= 16,
+                SESSION_ID.matcher(second).matches() && second.length() <= 16,
                 "id must match the generated hex shape and stay within 16 chars: " + second);
         assertNotEquals(first, second, "two sessions must never share an id");
     }
@@ -272,14 +277,14 @@ class SessionStoreTest {
     void createdIdsWithSameSecondStillDiffer() {
         // pin the clock so two creates land in the same wall-clock second: only the random suffix differs,
         // which is what makes the id collision-free without having to scan the store
-        final var fixed = Clock.fixed(Instant.EPOCH, java.time.ZoneOffset.UTC);
+        final var fixed = Clock.fixed(Instant.EPOCH, ZoneOffset.UTC);
         final var store = newStore(new SessionConfiguration(30, 15, true), fixed);
         final var first = store.create();
         final var second = store.create();
 
         // epoch seconds (0) renders as "s0" + 7 random hex chars => exactly 9 chars
-        assertTrue(first.matches("s0[0-9a-f]{7}"), "expected s0 + 7 random hex chars: " + first);
-        assertTrue(second.matches("s0[0-9a-f]{7}"), "expected s0 + 7 random hex chars: " + second);
+        assertTrue(EPOCH_SESSION_ID.matcher(first).matches(), "expected s0 + 7 random hex chars: " + first);
+        assertTrue(EPOCH_SESSION_ID.matcher(second).matches(), "expected s0 + 7 random hex chars: " + second);
         assertNotEquals(first, second, "same-second ids must still differ via the random suffix");
     }
 
@@ -440,7 +445,11 @@ class SessionStoreTest {
         // a write goes to the session folder and leaves the legacy file untouched
         store.append(id, SessionEntry.of(2, "assistant", "hello", null, null));
         assertTrue(Files.exists(flat), "no migration: the legacy flat file is left as-is");
-        assertEquals(1, store.load(id).size(), "only the legacy file exists: the folder write is separate");
+        assertEquals(
+                List.of("hi", "hello"),
+                store.load(id).stream().map(Message::content).toList(),
+                "the folder append preserves the legacy prefix without rewriting the flat file");
+        assertEquals("{\"role\":\"user\",\"content\":\"hi\"}\n", Files.readString(flat));
     }
 
     @Test

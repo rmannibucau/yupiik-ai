@@ -19,6 +19,7 @@ import io.yupiik.fusion.framework.api.event.Emitter;
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.codegraph.StructuralCodeGraph;
+import io.yupiik.ia.agent.core.configuration.AgentMode;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.context.BackoffSleeper;
 import io.yupiik.ia.agent.core.context.CompactionCoordinator;
@@ -40,6 +41,7 @@ import io.yupiik.ia.agent.core.snapshot.SnapshotStore;
 import io.yupiik.ia.agent.core.todo.InMemoryTodoStore;
 import io.yupiik.ia.agent.core.todo.TodoStore;
 import io.yupiik.ia.agent.core.tools.EmbeddedTool;
+import io.yupiik.ia.agent.core.tools.ToolCategory;
 import io.yupiik.ia.agent.core.tools.ToolContext;
 import io.yupiik.ia.agent.core.tools.ToolExecutionService;
 import io.yupiik.ia.agent.core.tools.ToolRegistry;
@@ -151,18 +153,9 @@ public class SubagentRunner {
         this.quotaStore = null;
     }
 
-    public void runAsync(
-            final SubagentRegistry.SubagentState state,
-            final SessionStore parentSessionStore,
-            final SnapshotStore parentSnapshotStore,
-            final TodoStore parentTodoStore,
-            final BooleanSupplier cancelled) {
-        runAsync(state, parentSessionStore, parentSnapshotStore, parentTodoStore, null, cancelled);
-    }
-
     /**
      * @param parentContext the spawning session's tool context: the sub-agent
-     *                      inherits the parent's effective permission ceiling and feedback gate
+     *                      inherits the parent's project directory, effective permission ceiling and feedback gate
      *                      (so a question raised by a sub-agent answers in the
      *                      spawning tab) and its events carry the parent session
      *                      id so they route back to that tab.
@@ -174,12 +167,20 @@ public class SubagentRunner {
             final TodoStore parentTodoStore,
             final ToolContext parentContext,
             final BooleanSupplier cancelled) {
+        final var workdir =
+                Objects.requireNonNull(parentContext, "parentContext").projectDir();
+        final BooleanSupplier parentCancelled =
+                () -> cancelled.getAsBoolean() || parentContext.isCancelled() || parentContext.isCallCancelled();
+        if (parentCancelled.getAsBoolean() || state.isCancelled()) {
+            subagentRegistry.complete(state.id(), SubagentRegistry.SubagentResult.cancelled(""));
+            return;
+        }
         final var name = state.name() != null ? state.name() : state.id();
-        emitter.emit(new AgentEvent.SubagentStarted(state.task(), state.parentSessionId(), state.id(), name));
+        emitter.emit(new AgentEvent.SubagentStarted(state.task(), state.parentSessionId(), state.id(), name, workdir));
         try {
             executor.execute(() -> {
                 try {
-                    final var result = runSubagent(state, parentSnapshotStore, parentContext, cancelled);
+                    final var result = runSubagent(state, parentSnapshotStore, parentContext, parentCancelled);
                     subagentRegistry.complete(state.id(), result);
                     emitter.emit(new AgentEvent.SubagentCompleted(
                             result.summary() != null ? result.summary() : result.error(),
@@ -188,18 +189,26 @@ public class SubagentRunner {
                             state.parentSessionId(),
                             state.id(),
                             name,
-                            modelOf(state)));
+                            modelOf(state),
+                            workdir));
                     deliverToParent(state, result.summary(), result.success(), result.cancelled());
                 } catch (final Exception e) {
                     final var message = "Subagent failed: " + e.getMessage();
-                    final var wasCancelled = state.isCancelled() || cancelled.getAsBoolean();
+                    final var wasCancelled = state.isCancelled() || parentCancelled.getAsBoolean();
                     subagentRegistry.complete(
                             state.id(),
                             wasCancelled
                                     ? SubagentRegistry.SubagentResult.cancelled("")
                                     : SubagentRegistry.SubagentResult.error(message, ""));
                     emitter.emit(new AgentEvent.SubagentCompleted(
-                            message, false, wasCancelled, state.parentSessionId(), state.id(), name, modelOf(state)));
+                            message,
+                            false,
+                            wasCancelled,
+                            state.parentSessionId(),
+                            state.id(),
+                            name,
+                            modelOf(state),
+                            workdir));
                     deliverToParent(state, message, false, wasCancelled);
                 }
             });
@@ -208,7 +217,7 @@ public class SubagentRunner {
             final var result = SubagentRegistry.SubagentResult.error(message, "");
             subagentRegistry.complete(state.id(), result);
             emitter.emit(new AgentEvent.SubagentCompleted(
-                    message, false, false, state.parentSessionId(), state.id(), name, modelOf(state)));
+                    message, false, false, state.parentSessionId(), state.id(), name, modelOf(state), workdir));
             deliverToParent(state, message, false, false);
         }
     }
@@ -247,6 +256,13 @@ public class SubagentRunner {
             final BooleanSupplier cancelled) {
         final var subagentSessionId = state.parentSessionId() + "-subagent-" + state.id();
         final var subagentName = state.name() != null ? state.name() : state.id();
+        final var parentWorkdir =
+                Objects.requireNonNull(parentContext, "parentContext").projectDir();
+        if (cancelled.getAsBoolean() || state.isCancelled()) {
+            return SubagentRegistry.SubagentResult.cancelled("");
+        }
+        final var effectiveToolRegistry =
+                parentContext.toolRegistry() == null ? toolRegistry : parentContext.toolRegistry();
         final var profile =
                 state.profile() == null || state.profile().isBlank() ? null : agentProvider.byName(state.profile());
         if (state.profile() != null && profile == null) {
@@ -255,10 +271,10 @@ public class SubagentRunner {
         final Set<String> profileTools = profile == null ? null : agentProvider.allowedTools(profile.name());
         Set<String> requestedTools = state.allowedTools();
         if (state.parentAllowedTools() != null || profileTools != null || state.allowedTools() != null) {
-            final var tools = toolRegistry.tools();
+            final var tools = effectiveToolRegistry == null ? List.<EmbeddedTool>of() : effectiveToolRegistry.tools();
             final var registered = tools.stream().map(EmbeddedTool::name).collect(Collectors.toSet());
             final var available = tools.stream()
-                    .filter(EmbeddedTool::usable)
+                    .filter(tool -> tool.usable(parentWorkdir))
                     .map(EmbeddedTool::name)
                     .collect(Collectors.toSet());
             requestedTools = normalizeRequestedTools(requestedTools, registered, available);
@@ -278,21 +294,37 @@ public class SubagentRunner {
                         "Requested tools are not available: " + String.join(", ", unknown), "");
             }
         }
-        final var effectiveAllowedTools =
-                intersectToolCeilings(state.parentAllowedTools(), profileTools, requestedTools);
+        final var parentProjection = effectiveToolRegistry == null
+                ? Set.<String>of()
+                : effectiveToolRegistry
+                        .toWireTools(
+                                parentWorkdir,
+                                tool -> parentContext.permissions() == null
+                                        || parentContext.permissions().mode() != AgentMode.PLAN
+                                        || tool.category() != ToolCategory.EDIT)
+                        .stream()
+                        .map(tool -> tool.function().name())
+                        .collect(Collectors.toUnmodifiableSet());
+        final var effectiveAllowedTools = intersectToolCeilings(
+                parentProjection,
+                parentContext.allowedTools(),
+                state.parentAllowedTools(),
+                profileTools,
+                requestedTools);
 
         // Create isolated services for this subagent: explicit instances built from shared infrastructure and
         // child-owned policy/history/todo state. The parent approval UI and usage aggregation are reused.
         final var subagentSessionStore = new InMemorySessionStore(clock);
         final var subagentTodoStore = new InMemoryTodoStore();
-        final var parentUsage = parentContext != null && parentContext.usage() != null
+        final var parentUsage = parentContext.usage() != null
                 ? parentContext.usage()
                 : new UsageTracker(providerManager, chatClient, contextWindowCache, clock);
         final var subagentUsageTracker = new SubagentUsageTracker(parentUsage, state.id());
         final var subagentStatusReporter = new StatusReporter();
-        final var subagentPermissions = parentContext != null && parentContext.permissions() != null
+        final var subagentPermissions = parentContext.permissions() != null
                 ? parentContext.permissions().forkForChild()
-                : new PermissionService(configuration, emitter);
+                : new PermissionService(configuration, emitter, parentWorkdir);
+
         final var subagentSystemPromptBuilder = new SystemPromptBuilder(
                 configuration,
                 memoryStore,
@@ -302,7 +334,9 @@ public class SubagentRunner {
                 providerManager,
                 todoPromptResolver,
                 mavenRepositoryKnowledge,
-                secretRedactor);
+                secretRedactor,
+                parentWorkdir);
+
         final var subagentContextView = new ContextView(configuration.compression());
         final var subagentCompactionCoordinator = new CompactionCoordinator(
                 configuration,
@@ -311,13 +345,14 @@ public class SubagentRunner {
                 providerManager,
                 emitter,
                 state.parentSessionId(),
-                backoffSleeper);
+                backoffSleeper,
+                parentWorkdir);
         final var subagentContextManager =
                 new ContextManager(configuration, subagentUsageTracker, subagentCompactionCoordinator);
 
         final var agentLoop = new AgentLoop(
                 chatClient,
-                toolRegistry,
+                effectiveToolRegistry,
                 toolExecutionService,
                 configuration,
                 subagentPermissions,
@@ -343,88 +378,86 @@ public class SubagentRunner {
                 state.parentSessionId(),
                 state.id(),
                 subagentName,
-                parentContext == null ? null : parentContext.feedback(),
+                parentContext.feedback(),
                 precisionDurationMarker,
                 null,
                 null,
                 null,
                 null,
-                null);
-        // Tool-admitted children use exactly the approved settings, even if the parent changes model
-        // while they queue. The fallback is for standalone registry callers without tool admission.
-        final var requested = state.model();
-        final var baseSettings =
-                agentLoop.chatSettings().inheritFrom(parentContext == null ? null : parentContext.settings());
-        final var resolver = agentModelResolver == null ? new AgentModelResolver(providerManager) : agentModelResolver;
-        final var effectiveModel = state.admittedModel() != null
-                ? state.admittedModel()
-                : resolver.resolve(
-                        baseSettings,
-                        profile,
-                        requested,
-                        parentContext == null || parentContext.settings() == null || providerManager == null
-                                ? null
-                                : providerManager.provider(
-                                                        parentContext.settings().providerId())
-                                                == null
-                                        ? null
-                                        : providerManager.effectiveSubagentDefault(parentContext.settings()));
-        final var subagentSettings = effectiveModel.settings();
-        agentLoop.updateChatSettings(subagentSettings);
-        // the transcript's default speaker labels must reflect this child's effective provider/model
-        // (a $provider/model spawn may target a provider other than the process-wide current one);
-        // the transcript may already have been created lazily by the UI, so the identity is stored
-        // and read back at creation time, not pushed into an existing transcript
-        subagentRegistry.setTranscriptIdentity(
-                state.id(),
-                effectiveModel.resolved() != null && effectiveModel.resolved().provider() != null
-                        ? effectiveModel.resolved().provider().id()
-                        : subagentSettings.providerId(),
-                effectiveModel.reference());
-        agentLoop.agentModelTuning(profile == null ? null : profile.model());
-        agentLoop.skipConfiguredAgentModel(true);
-        agentLoop.allowedTools(effectiveAllowedTools);
-        final var configuredCap = configuration.subagents() == null
-                ? null
-                : configuration.subagents().maxIterations();
-        final var maxIterationsCap =
-                resolveMaxIterationsCap(configuredCap, configuration.llm().maxIterations(), state.maxTurns());
-        agentLoop.maxIterationsCap(maxIterationsCap);
+                null,
+                parentWorkdir);
+        try {
+            // Tool-admitted children use exactly the approved settings, even if the parent changes model
+            // while they queue. The fallback is for standalone registry callers without tool admission.
+            final var requested = state.model();
+            final var baseSettings = agentLoop.chatSettings().inheritFrom(parentContext.settings());
+            final var resolver =
+                    agentModelResolver == null ? new AgentModelResolver(providerManager) : agentModelResolver;
+            final var effectiveModel = state.admittedModel() != null
+                    ? state.admittedModel()
+                    : resolver.resolve(
+                            baseSettings,
+                            profile,
+                            requested,
+                            parentContext.settings() == null || providerManager == null
+                                    ? null
+                                    : providerManager.provider(parentContext
+                                                            .settings()
+                                                            .providerId())
+                                                    == null
+                                            ? null
+                                            : providerManager.effectiveSubagentDefault(parentContext.settings()));
+            final var subagentSettings = effectiveModel.settings();
+            agentLoop.updateChatSettings(subagentSettings);
+            // The transcript identity must reflect this child's effective provider/model, even when
+            // the UI created the transcript before model resolution finished.
+            subagentRegistry.setTranscriptIdentity(
+                    state.id(),
+                    effectiveModel.resolved() != null
+                                    && effectiveModel.resolved().provider() != null
+                            ? effectiveModel.resolved().provider().id()
+                            : subagentSettings.providerId(),
+                    effectiveModel.reference());
+            agentLoop.agentModelTuning(profile == null ? null : profile.model());
+            agentLoop.skipConfiguredAgentModel(true);
+            agentLoop.allowedTools(effectiveAllowedTools);
+            final var configuredCap = configuration.subagents() == null
+                    ? null
+                    : configuration.subagents().maxIterations();
+            final var maxIterationsCap =
+                    resolveMaxIterationsCap(configuredCap, configuration.llm().maxIterations(), state.maxTurns());
+            agentLoop.maxIterationsCap(maxIterationsCap);
 
-        final var fullConversation = new StringBuilder();
-        fullConversation
-                .append("System: ")
-                .append(subagentSystemPromptBuilder.build(state.task(), profile))
-                .append("\n\n");
-        fullConversation.append("User: ").append(state.task()).append("\n\n");
+            final var fullConversation = new StringBuilder();
+            fullConversation
+                    .append("System: ")
+                    .append(subagentSystemPromptBuilder.build(state.task(), profile))
+                    .append("\n\n");
+            fullConversation.append("User: ").append(state.task()).append("\n\n");
 
-        final BooleanSupplier subagentCancelled = () -> cancelled.getAsBoolean() || state.isCancelled();
-        final var result =
-                agentLoop.run(state.task(), state.profile(), subagentSessionId, List.of(), subagentCancelled);
+            final BooleanSupplier subagentCancelled = () -> cancelled.getAsBoolean() || state.isCancelled();
+            final var result =
+                    agentLoop.run(state.task(), state.profile(), subagentSessionId, List.of(), subagentCancelled);
 
-        fullConversation
-                .append("Assistant: ")
-                .append(result != null ? result : "[no result]")
-                .append("\n");
+            fullConversation
+                    .append("Assistant: ")
+                    .append(result != null ? result : "[no result]")
+                    .append("\n");
 
-        // Extract artifacts from subagent's session (file paths from write/edit/apply_patch tools)
-        final var artifacts = extractArtifacts(subagentSessionStore, subagentSessionId);
+            // Extract artifacts from subagent's session (file paths from write/edit/apply_patch tools).
+            final var artifacts = extractArtifacts(subagentSessionStore, subagentSessionId);
+            subagentUsageTracker.mergeToParent();
 
-        // Merge subagent usage into parent's auxiliary counters
-        subagentUsageTracker.mergeToParent();
-
-        // a null result on a cancelled turn is a cancellation, not a failure: the loop returns null
-        // when the interrupt unwound it, and the parent transcript must render it as such
-        if (result == null) {
-            return nullRunResult(
-                    fullConversation.toString(),
-                    state.isCancelled() || cancelled.getAsBoolean(),
-                    agentLoop.iterationLimitReached());
+            if (result == null) {
+                return nullRunResult(
+                        fullConversation.toString(),
+                        state.isCancelled() || cancelled.getAsBoolean(),
+                        agentLoop.iterationLimitReached());
+            }
+            return SubagentRegistry.SubagentResult.success(result, fullConversation.toString(), artifacts);
+        } finally {
+            agentLoop.close();
         }
-        return result != null
-                ? SubagentRegistry.SubagentResult.success(result, fullConversation.toString(), artifacts)
-                : SubagentRegistry.SubagentResult.error(
-                        "Subagent completed without result", fullConversation.toString());
     }
 
     private Set<String> normalizeRequestedTools(

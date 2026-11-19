@@ -39,6 +39,7 @@ import io.yupiik.ia.agent.core.shell.ShellRegistry;
 import io.yupiik.ia.agent.core.shell.TurnRunner;
 import io.yupiik.ia.agent.core.shell.btw.BtwAnswerer;
 import io.yupiik.ia.agent.core.shell.slash.SlashRegistry;
+import io.yupiik.ia.agent.core.tools.ToolRegistry;
 import io.yupiik.ia.agent.core.wiring.PrecisionDurationMarkerProvider;
 import java.io.StringReader;
 import java.net.URI;
@@ -53,6 +54,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.ConcurrentLinkedQueue;
@@ -61,6 +63,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
+import java.util.regex.Pattern;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -83,12 +86,14 @@ import org.junit.jupiter.api.io.TempDir;
 @ExtendWith(TestWebJsonMapper.class)
 @Timeout(30)
 class WebSessionResolveNullResultTest {
+    private static final Pattern LINE_BREAK = Pattern.compile("\\R");
 
     @TempDir
     Path storageHome;
 
     private JsonMapper mapper;
     private WebSessionManager manager;
+    private SessionRuntimeFactory runtimeFactory;
     private FakeSseBroker broker;
     private FakeBtwAnswerer answerer;
 
@@ -103,7 +108,7 @@ class WebSessionResolveNullResultTest {
                 .storageHome(storageHome.toString())
                 .build();
         final var sessionStore = new SessionStore() {};
-        final var runtimeFactory = new SessionRuntimeFactory(
+        runtimeFactory = new SessionRuntimeFactory(
                 null,
                 null,
                 null,
@@ -187,7 +192,7 @@ class WebSessionResolveNullResultTest {
             // capture the request id the frame carries so the resolve targets the actual pending request
             final long requestId = frames.stream()
                     .filter(f -> f.contains("session.ask"))
-                    .flatMap(f -> Arrays.stream(f.split("\\R")))
+                    .flatMap(f -> Arrays.stream(LINE_BREAK.split(f)))
                     .filter(l -> l.startsWith("data:") && l.contains("\"id\""))
                     .map(l -> l.substring("data:".length()))
                     .map(l -> (Map<?, ?>) mapper.read(Map.class, new StringReader(l)))
@@ -198,8 +203,8 @@ class WebSessionResolveNullResultTest {
             // the frontend's cancel: session.resolve with result:null. This goes through the real
             // fusion-generated param mapping for resolveRequest - the exact path that used to throw
             // "Missing 'result' parameter." because result was marked required.
-            final var webJsonRpc =
-                    new WebJsonRpc(null, null, manager, null, null, null, null, null, null, null, null, null);
+            final var webJsonRpc = new WebJsonRpc(
+                    null, null, manager, null, null, null, null, null, null, null, null, null, runtimeFactory);
             final var generated = new WebJsonRpc$resolveRequest$FusionJsonRpcMethod(webJsonRpc, mapper);
             final Map<String, Object> params = new HashMap<>();
             params.put("id", "s1");
@@ -504,7 +509,8 @@ class WebSessionResolveNullResultTest {
                 final UsageTracker usage,
                 final BooleanSupplier cancelled,
                 final ApprovalGate sessionGate,
-                final ChatSettings sessionSettings) {
+                final ChatSettings sessionSettings,
+                final Path workdir) {
             return CompletableFuture.completedFuture(new BtwAnswerer.BtwAnswer("unused", false));
         }
 
@@ -517,8 +523,12 @@ class WebSessionResolveNullResultTest {
                 final ApprovalGate sessionGate,
                 final ChatSettings sessionSettings,
                 final SystemPromptBuilder systemPromptBuilder,
-                final UserFeedbackService feedback) {
-            return ask(question, sessionId, usage, cancelled, sessionGate, sessionSettings);
+                final UserFeedbackService feedback,
+                final Path workdir,
+                final ToolRegistry registry,
+                final Set<String> ceiling) {
+            assertNotNull(ceiling);
+            return ask(question, sessionId, usage, cancelled, sessionGate, sessionSettings, workdir);
         }
     }
 }

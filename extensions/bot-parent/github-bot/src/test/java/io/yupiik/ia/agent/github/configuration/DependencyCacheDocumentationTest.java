@@ -30,6 +30,8 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 class DependencyCacheDocumentationTest {
+    private static final Pattern JSON_EXAMPLE = Pattern.compile("(?ms)^\\[source,json]\\R----\\R(.*?)\\R----");
+
     @TempDir
     Path temporary;
 
@@ -39,8 +41,7 @@ class DependencyCacheDocumentationTest {
                 .toAbsolutePath()
                 .normalize();
         final var source = Files.readString(document);
-        final var matcher =
-                Pattern.compile("(?ms)^\\[source,json]\\R----\\R(.*?)\\R----").matcher(source);
+        final var matcher = JSON_EXAMPLE.matcher(source);
         var examples = 0;
         while (matcher.find()) {
             final var example = matcher.group(1);

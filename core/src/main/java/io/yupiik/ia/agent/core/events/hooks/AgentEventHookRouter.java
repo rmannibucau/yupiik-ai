@@ -25,6 +25,7 @@ import io.yupiik.ia.agent.core.events.SubagentStartedEvent;
 import io.yupiik.ia.agent.core.events.SubagentStoppedEvent;
 import io.yupiik.ia.agent.core.events.ToolUsePostEvent;
 import io.yupiik.ia.agent.core.optimize.AfterToolExecutionEvent;
+import java.nio.file.Path;
 import java.util.Locale;
 
 /**
@@ -33,7 +34,7 @@ import java.util.Locale;
  * wrapped events (post-tool, subagent start/stop, compaction done, notification) cannot be vetoed — {@code
  * yca.hooks.<Id>} callbacks that print a {@code HookResponse} ack only get a cosmetic {@code context}.
  *
- * <p>The {@link EventContext} is built from the bus record's session coordinates plus the configured project dir
+ * <p>The {@link EventContext} is built from the bus record's session coordinates plus their explicit session root
  * ({@code cwd}); {@code permissionMode}/{@code agentMode}/{@code model} stay {@code null} because those require the
  * per-session state a bus record does not carry.</p>
  */
@@ -47,11 +48,19 @@ public class AgentEventHookRouter {
         this.contextBuilder = contextBuilder;
     }
 
-    public void onToolUsePost(@OnEvent final AfterToolExecutionEvent event) {
-        final var context = context(event.sessionId(), event.subagentId(), event.subagentName());
-        if (context == null) {
-            return;
+    public void onEvent(@OnEvent final AgentEvent incoming) {
+        switch (incoming) {
+            case AgentEvent.SubagentStarted event -> onSubagentStarted(event);
+            case AgentEvent.SubagentCompleted event -> onSubagentStopped(event);
+            case AgentEvent.Compacted event -> onCompactionDone(event);
+            case AgentEvent.Notice event -> onNotice(event);
+            default -> {}
         }
+    }
+
+    public void onToolUsePost(@OnEvent final AfterToolExecutionEvent event) {
+        final var workdir = event.workdir();
+        final var context = context(event.sessionId(), event.subagentId(), event.subagentName(), workdir);
         runner.run(
                 "ToolUsePostEvent",
                 new ToolUsePostEvent(
@@ -63,25 +72,23 @@ public class AgentEventHookRouter {
                                 event.output(),
                                 event.success() ? null : event.output())
                         .payload(),
-                0);
+                0,
+                workdir);
     }
 
-    public void onSubagentStarted(@OnEvent final AgentEvent.SubagentStarted event) {
-        final var context = context(event.sessionId(), event.subagentId(), event.subagentName());
-        if (context == null) {
-            return;
-        }
+    private void onSubagentStarted(final AgentEvent.SubagentStarted event) {
+        final var workdir = event.workdir();
+        final var context = context(event.sessionId(), event.subagentId(), event.subagentName(), workdir);
         runner.run(
                 "SubagentStarted",
                 new SubagentStartedEvent(context, event.task(), event.subagentId(), event.subagentName()).payload(),
-                0);
+                0,
+                workdir);
     }
 
-    public void onSubagentStopped(@OnEvent final AgentEvent.SubagentCompleted event) {
-        final var context = context(event.sessionId(), event.subagentId(), event.subagentName());
-        if (context == null) {
-            return;
-        }
+    private void onSubagentStopped(final AgentEvent.SubagentCompleted event) {
+        final var workdir = event.workdir();
+        final var context = context(event.sessionId(), event.subagentId(), event.subagentName(), workdir);
         runner.run(
                 "SubagentStopped",
                 new SubagentStoppedEvent(
@@ -92,22 +99,20 @@ public class AgentEventHookRouter {
                                 event.subagentId(),
                                 event.subagentName())
                         .payload(),
-                0);
+                0,
+                workdir);
     }
 
-    public void onCompactionDone(@OnEvent final AgentEvent.Compacted event) {
-        final var context = context(event.sessionId(), event.subagentId(), event.subagentName());
-        if (context == null) {
-            return;
-        }
-        runner.run("CompactionDone", new CompactionDoneEvent(context, event.kinds(), event.mode()).payload(), 0);
+    private void onCompactionDone(final AgentEvent.Compacted event) {
+        final var workdir = event.workdir();
+        final var context = context(event.sessionId(), event.subagentId(), event.subagentName(), workdir);
+        runner.run(
+                "CompactionDone", new CompactionDoneEvent(context, event.kinds(), event.mode()).payload(), 0, workdir);
     }
 
-    public void onNotice(@OnEvent final AgentEvent.Notice event) {
-        final var context = context(event.sessionId(), event.subagentId(), event.subagentName());
-        if (context == null) {
-            return;
-        }
+    private void onNotice(final AgentEvent.Notice event) {
+        final var workdir = event.workdir();
+        final var context = context(event.sessionId(), event.subagentId(), event.subagentName(), workdir);
         runner.run(
                 "Notification",
                 new NotificationEvent(
@@ -116,13 +121,15 @@ public class AgentEventHookRouter {
                                 event.message(),
                                 event.finishReason())
                         .payload(),
-                0);
+                0,
+                workdir);
     }
 
-    private EventContext context(final String sessionId, final String subagentId, final String subagentName) {
+    private EventContext context(
+            final String sessionId, final String subagentId, final String subagentName, final Path workdir) {
         if (contextBuilder == null) {
-            return new EventContext(sessionId, subagentId, subagentName, null, null, null, null, null);
+            return new EventContext(sessionId, subagentId, subagentName, workdir.toString(), null, null, null, null);
         }
-        return contextBuilder.build(null, null, sessionId, subagentId, subagentName, null);
+        return contextBuilder.build(null, null, sessionId, subagentId, subagentName, workdir);
     }
 }

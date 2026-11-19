@@ -20,6 +20,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.ia.agent.core.maven.MavenRepositoryKnowledgeService;
+import io.yupiik.ia.agent.core.tools.ToolContext;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
@@ -28,6 +29,8 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 class CodeResolveToolTest {
+    @TempDir
+    private static Path testWorkdir;
 
     private static GraphStore store() {
         return new GraphStore(
@@ -53,7 +56,7 @@ class CodeResolveToolTest {
             }
 
             @Override
-            public GraphStore graph() {
+            public GraphStore graph(final Path root) {
                 if (store == null) {
                     return GraphStore.empty();
                 }
@@ -61,7 +64,7 @@ class CodeResolveToolTest {
             }
 
             @Override
-            public Path storeRoot() {
+            public Path storeRoot(final Path root) {
                 return fakeRoot.resolve("fake-code-resolve-graph");
             }
         };
@@ -76,12 +79,12 @@ class CodeResolveToolTest {
             }
 
             @Override
-            public GraphStore graph() {
+            public GraphStore graph(final Path root) {
                 return GraphStore.empty();
             }
 
             @Override
-            public Path storeRoot() {
+            public Path storeRoot(final Path root) {
                 return fakeRoot.resolve("fake-code-resolve-graph");
             }
         };
@@ -95,17 +98,17 @@ class CodeResolveToolTest {
         return new MavenRepositoryKnowledgeService() {
 
             @Override
-            public boolean knowledgeEnabled() {
+            public boolean knowledgeEnabled(final Path root) {
                 return enabled;
             }
 
             @Override
-            public List<String> indexedArtifacts() {
+            public List<String> indexedArtifacts(final Path root) {
                 return gavs;
             }
 
             @Override
-            public String knowledge(final String coordinate, final String shortName) {
+            public String knowledge(final Path root, final String coordinate, final String shortName) {
                 final var content = contentByGav.get(coordinate);
                 return content == null ? "no knowledge indexed for " + coordinate : content;
             }
@@ -138,7 +141,8 @@ class CodeResolveToolTest {
                 System.currentTimeMillis());
         final var tool = tool(graph(store), knowledge(false, List.of()));
         final var out = tool.execute(
-                        Map.of("op", "resolve", "symbol", "org.hop.PipelineRunConfiguration", "relation", "implements"))
+                        Map.of("op", "resolve", "symbol", "org.hop.PipelineRunConfiguration", "relation", "implements"),
+                        ToolContext.empty(testWorkdir))
                 .output();
         assertTrue(out.contains("is a type, not an interface"), out);
         assertFalse(out.contains("CfgImpl"), "concrete class must have no implements results");
@@ -160,7 +164,9 @@ class CodeResolveToolTest {
                 Map.of(),
                 System.currentTimeMillis());
         final var tool = tool(graph(store), knowledge(false, List.of()));
-        final var out = tool.execute(Map.of("op", "resolve", "symbol", "org.hop.RowSet", "relation", "implements"))
+        final var out = tool.execute(
+                        Map.of("op", "resolve", "symbol", "org.hop.RowSet", "relation", "implements"),
+                        ToolContext.empty(testWorkdir))
                 .output();
         assertTrue(out.contains("type org.hop.RowSetImpl (RowSetImpl.java:1-5)"), out);
         assertFalse(
@@ -171,7 +177,9 @@ class CodeResolveToolTest {
     @Test
     void graphBackedResolveReturnsImplementors() {
         final var tool = tool(graph(store()), knowledge(false, List.of()));
-        final var out = tool.execute(Map.of("op", "resolve", "symbol", "org.hop.RowSet", "relation", "implements"))
+        final var out = tool.execute(
+                        Map.of("op", "resolve", "symbol", "org.hop.RowSet", "relation", "implements"),
+                        ToolContext.empty(testWorkdir))
                 .output();
         assertTrue(out.contains("code graph: resolved org.hop.RowSet (implements)"));
         assertTrue(out.contains("type org.hop.RowSetImpl (RowSetImpl.java:1-5)"));
@@ -182,7 +190,9 @@ class CodeResolveToolTest {
     void graphHitSkipsKnowledgeScanWithoutArtifactHint() {
         final var knowledge = knowledge(true, List.of("g.com:artifact-a:1.0"));
         final var tool = tool(graph(store()), knowledge);
-        final var out = tool.execute(Map.of("op", "resolve", "symbol", "org.hop.RowSet", "relation", "implements"))
+        final var out = tool.execute(
+                        Map.of("op", "resolve", "symbol", "org.hop.RowSet", "relation", "implements"),
+                        ToolContext.empty(testWorkdir))
                 .output();
         assertTrue(out.contains("code graph: resolved org.hop.RowSet (implements)"));
         assertTrue(out.contains("type org.hop.RowSetImpl (RowSetImpl.java:1-5)"));
@@ -195,15 +205,17 @@ class CodeResolveToolTest {
     void artifactHintNarrowsKnowledgeWhenGraphHits() {
         final var knowledge = knowledge(true, List.of("g.com:artifact-a:1.0"));
         final var tool = tool(graph(store()), knowledge);
-        final var out = tool.execute(Map.of(
-                        "op",
-                        "resolve",
-                        "symbol",
-                        "org.hop.RowSet",
-                        "relation",
-                        "implements",
-                        "artifact",
-                        "artifact-a"))
+        final var out = tool.execute(
+                        Map.of(
+                                "op",
+                                "resolve",
+                                "symbol",
+                                "org.hop.RowSet",
+                                "relation",
+                                "implements",
+                                "artifact",
+                                "artifact-a"),
+                        ToolContext.empty(testWorkdir))
                 .output();
         assertTrue(out.contains("code graph: resolved org.hop.RowSet (implements)"));
         assertTrue(out.contains("artifact knowledge: org.hop.RowSet is provided/listed by g.com:artifact-a:1.0"));
@@ -213,7 +225,9 @@ class CodeResolveToolTest {
     void knowledgeProviderNoteIsAppendedWhenGraphHasNoHit() {
         final var knowledge = knowledge(true, List.of("g.com:artifact-a:1.0"));
         final var tool = tool(graph(store()), knowledge);
-        final var out = tool.execute(Map.of("op", "resolve", "symbol", "org.hop.RowSet", "relation", "callees"))
+        final var out = tool.execute(
+                        Map.of("op", "resolve", "symbol", "org.hop.RowSet", "relation", "callees"),
+                        ToolContext.empty(testWorkdir))
                 .output();
         assertTrue(out.contains("artifact knowledge: org.hop.RowSet is provided/listed by g.com:artifact-a:1.0"));
     }
@@ -255,7 +269,8 @@ class CodeResolveToolTest {
                 System.currentTimeMillis());
         final var tool = tool(graph(store), knowledge(false, List.of()));
         final var out = tool.execute(
-                        Map.of("op", "resolve", "symbol", "org.hop.PipelineRunConfiguration", "relation", "implements"))
+                        Map.of("op", "resolve", "symbol", "org.hop.PipelineRunConfiguration", "relation", "implements"),
+                        ToolContext.empty(testWorkdir))
                 .output();
         assertTrue(out.contains("is a type, not an interface"), out);
         assertTrue(
@@ -268,7 +283,8 @@ class CodeResolveToolTest {
     void listEnumeratesIndexedArtifacts() {
         final var tool =
                 tool(disabledGraph(), knowledge(true, List.of("g.com:artifact-a:1.0", "g.com:artifact-b:2.0")));
-        final var out = tool.execute(Map.of("op", "list")).output();
+        final var out = tool.execute(Map.of("op", "list"), ToolContext.empty(testWorkdir))
+                .output();
         assertTrue(out.contains("2 indexed artifact(s)"));
         assertTrue(out.contains("- g.com:artifact-a:1.0"));
         assertTrue(out.contains("- g.com:artifact-b:2.0"));
@@ -277,14 +293,16 @@ class CodeResolveToolTest {
     @Test
     void listReportsNoKnowledgeIndexedYet() {
         final var tool = tool(disabledGraph(), knowledge(true, List.of()));
-        final var out = tool.execute(Map.of("op", "list")).output();
+        final var out = tool.execute(Map.of("op", "list"), ToolContext.empty(testWorkdir))
+                .output();
         assertTrue(out.contains("No Maven artifact knowledge is indexed yet"));
     }
 
     @Test
     void listInactiveSourcesAreRejected() {
         final var tool = tool(disabledGraph(), knowledge(false, List.of()));
-        final var out = tool.execute(Map.of("op", "list")).output();
+        final var out = tool.execute(Map.of("op", "list"), ToolContext.empty(testWorkdir))
+                .output();
         assertTrue(out.contains("No structural data source is active"));
     }
 
@@ -292,7 +310,8 @@ class CodeResolveToolTest {
     void unknownLocalSymbolStillMatchesKnowledgeProvider() {
         final var knowledge = knowledge(true, List.of("g.com:artifact-a:1.0"), gavContent("org.hop.External"));
         final var tool = tool(graph(store()), knowledge);
-        final var out = tool.execute(Map.of("op", "resolve", "symbol", "org.hop.External"))
+        final var out = tool.execute(
+                        Map.of("op", "resolve", "symbol", "org.hop.External"), ToolContext.empty(testWorkdir))
                 .output();
         assertTrue(out.contains("code graph: symbol not found locally: org.hop.External"));
         assertTrue(out.contains("artifact knowledge: org.hop.External is provided/listed by g.com:artifact-a:1.0"));
@@ -302,7 +321,8 @@ class CodeResolveToolTest {
     void unknownSymbolWithNoKnowledgeSuggestsList() {
         final var knowledge = knowledge(true, List.of("g.com:artifact-a:1.0"), gavContent("org.hop.RowSet"));
         final var tool = tool(graph(store()), knowledge);
-        final var out = tool.execute(Map.of("op", "resolve", "symbol", "org.hop.Unknown"))
+        final var out = tool.execute(
+                        Map.of("op", "resolve", "symbol", "org.hop.Unknown"), ToolContext.empty(testWorkdir))
                 .output();
         assertTrue(out.contains("code graph: symbol not found locally: org.hop.Unknown"));
         assertTrue(out.contains("Use op=list"));
@@ -311,7 +331,8 @@ class CodeResolveToolTest {
     @Test
     void emptyGraphReportsNothingIndexed() {
         final var tool = tool(graph(GraphStore.empty()), knowledge(false, List.of()));
-        final var out = tool.execute(Map.of("op", "resolve", "symbol", "org.hop.RowSet"))
+        final var out = tool.execute(
+                        Map.of("op", "resolve", "symbol", "org.hop.RowSet"), ToolContext.empty(testWorkdir))
                 .output();
         assertTrue(out.contains("code graph: empty"));
     }
@@ -319,7 +340,8 @@ class CodeResolveToolTest {
     @Test
     void symbolIsRequiredOnResolve() {
         final var tool = tool(disabledGraph(), knowledge(false, List.of()));
-        final var result = tool.execute(Map.of("op", "resolve", "symbol", "", "relation", "implements"));
+        final var result = tool.execute(
+                Map.of("op", "resolve", "symbol", "", "relation", "implements"), ToolContext.empty(testWorkdir));
         assertFalse(result.success());
         assertTrue(result.output().contains("symbol is required"));
     }
@@ -328,8 +350,8 @@ class CodeResolveToolTest {
     void descriptionReflectsLiveSources() {
         assertEquals(
                 "Resolve a symbol's relations. No structural data source is active in this session.",
-                tool(disabledGraph(), knowledge(false, List.of())).description());
-        final var both = tool(graph(store()), knowledge(true, List.of())).description();
+                tool(disabledGraph(), knowledge(false, List.of())).description(testWorkdir));
+        final var both = tool(graph(store()), knowledge(true, List.of())).description(testWorkdir);
         assertTrue(both.contains("local code graph"));
         assertTrue(both.contains("Maven artifact knowledge"));
     }
@@ -339,5 +361,55 @@ class CodeResolveToolTest {
         assertEquals(
                 Set.of("code_check_graph", "code_find_code", "code_trace_calls", "maven_repository_knowledge"),
                 CodeResolveTool.prunedRichToolNames());
+    }
+
+    @Test
+    void sessionRootsIsolateArtifactListAndBothProviderLookupPaths() {
+        final var first = fakeRoot.resolve("first");
+        final var second = fakeRoot.resolve("second");
+        final var service = new MavenRepositoryKnowledgeService() {
+            @Override
+            public boolean knowledgeEnabled(final Path root) {
+                return first.equals(root) || second.equals(root);
+            }
+
+            @Override
+            public List<String> indexedArtifacts(final Path root) {
+                return List.of("session:" + root.getFileName() + ":1");
+            }
+
+            @Override
+            public String codeGraphProvider(final Path root, final String symbol, final String hint) {
+                return "external.Fast".equals(symbol) ? indexedArtifacts(root).getFirst() : null;
+            }
+
+            @Override
+            public String knowledge(final Path root, final String coordinate, final String shortName) {
+                assertEquals(indexedArtifacts(root).getFirst(), coordinate);
+                return "external.Fallback";
+            }
+        };
+        final var tool = tool(disabledGraph(), service);
+        assertFalse(tool.usable(testWorkdir));
+        for (final var root : List.of(first, second, first)) {
+            final var context = ToolContext.empty(root);
+            final var expected = "session:" + root.getFileName() + ":1";
+            final var other = root.equals(first) ? "session:second:1" : "session:first:1";
+            assertTrue(tool.usable(root));
+            assertTrue(tool.description(root).contains("Maven artifact knowledge"));
+            final var listed = tool.execute(Map.of("op", "list"), context).output();
+            assertTrue(listed.contains(expected), listed);
+            assertFalse(listed.contains(other), listed);
+            assertFalse(listed.contains("decoy"), listed);
+            for (final var symbol : List.of("external.Fast", "external.Fallback")) {
+                final var resolved = tool.execute(Map.of("op", "resolve", "symbol", symbol), context)
+                        .output();
+                assertTrue(resolved.contains("is provided/listed by " + expected), resolved);
+                assertFalse(resolved.contains(other), resolved);
+                assertFalse(resolved.contains("decoy"), resolved);
+            }
+        }
+        assertFalse(tool.usable(testWorkdir));
+        assertTrue(tool.description(testWorkdir).contains("No structural data source"));
     }
 }

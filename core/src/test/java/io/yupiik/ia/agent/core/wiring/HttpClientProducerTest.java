@@ -24,13 +24,16 @@ import com.sun.net.httpserver.HttpsConfigurator;
 import com.sun.net.httpserver.HttpsServer;
 import io.yupiik.ia.agent.core.configuration.NativeProviderConfiguration;
 import io.yupiik.ia.agent.core.configuration.TestConfigs;
+import io.yupiik.ia.agent.core.mcp.SessionMcpHttpClient;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.Proxy;
 import java.net.ProxySelector;
 import java.net.URI;
+import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -40,8 +43,11 @@ import java.util.Arrays;
 import java.util.Base64;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.logging.Handler;
 import java.util.logging.LogRecord;
@@ -108,6 +114,303 @@ class HttpClientProducerTest {
         logger.setUseParentHandlers(disabled);
         server.stop(0);
         executor.shutdownNow();
+    }
+
+    @Test
+    void sessionHeadersOverrideGlobalsWithoutChangingApplicationPrecedence() throws Exception {
+        server.createContext("/headers", exchange -> {
+            try (exchange) {
+                final var bytes = (exchange.getRequestHeaders().getFirst("Authorization") + "/"
+                                + exchange.getRequestHeaders().getFirst("X-Default") + "/"
+                                + exchange.getRequestHeaders().getFirst("User-Agent"))
+                        .getBytes(StandardCharsets.UTF_8);
+                exchange.sendResponseHeaders(200, bytes.length);
+                exchange.getResponseBody().write(bytes);
+            }
+        });
+        final var config = TestConfigs.codingAgent(Map.of(
+                "yca.httpClient.headers", "authorization=global\nx-default=default\nuser-agent=configured-agent"));
+        final var request = HttpRequest.newBuilder(
+                        URI.create("http://127.0.0.1:" + server.getAddress().getPort() + "/headers"))
+                .header("aUtHoRiZaTiOn", "ide-secret")
+                .header("USER-AGENT", "ide-agent")
+                .build();
+        try (final var shared =
+                new HttpClientProducer().httpClient(config, new NativeProviderConfiguration(null, null))) {
+            try (final var view = shared.openSession(Set.of("aUtHoRiZaTiOn", "USER-AGENT"))) {
+                Assertions.assertEquals(
+                        "ide-secret/default/ide-agent", view.send(request).body());
+                Assertions.assertEquals(
+                        "global/default/configured-agent", shared.send(request).body());
+            }
+            Assertions.assertEquals(
+                    "global/default/configured-agent", shared.send(request).body());
+        }
+    }
+
+    @Test
+    void sessionBlocksRedirectsBeforeForwardingSyncAndAsync() throws Exception {
+        final var reached = new AtomicInteger();
+        final var destination = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        destination.createContext("/", exchange -> {
+            try (exchange) {
+                reached.incrementAndGet();
+                exchange.sendResponseHeaders(200, -1);
+            }
+        });
+        destination.start();
+        server.createContext("/redirect", exchange -> {
+            try (exchange) {
+                exchange.getResponseHeaders()
+                        .set(
+                                "Location",
+                                "http://127.0.0.1:" + destination.getAddress().getPort() + "/");
+                exchange.sendResponseHeaders(307, -1);
+            }
+        });
+        try (final var shared = new HttpClientProducer()
+                        .httpClient(TestConfigs.codingAgent(Map.of()), new NativeProviderConfiguration(null, null));
+                final var view = shared.openSession(Set.of("X-Arbitrary"))) {
+            final var request = HttpRequest.newBuilder(
+                            URI.create("http://127.0.0.1:" + server.getAddress().getPort() + "/redirect"))
+                    .header("X-Arbitrary", "secret")
+                    .build();
+            Assertions.assertEquals(HttpClient.Redirect.NORMAL, shared.followRedirects());
+            Assertions.assertEquals(HttpClient.Redirect.NEVER, view.followRedirects());
+            Assertions.assertEquals(307, view.send(request).statusCode());
+            Assertions.assertEquals(
+                    307,
+                    view.sendAsync(request, HttpResponse.BodyHandlers.discarding())
+                            .join()
+                            .statusCode());
+            Assertions.assertEquals(
+                    307,
+                    view.sendAsync(
+                                    request,
+                                    HttpResponse.BodyHandlers.discarding(),
+                                    (initial, push, acceptor) -> Assertions.fail("Unexpected push"))
+                            .join()
+                            .statusCode());
+            Assertions.assertEquals(0, reached.get());
+            Assertions.assertEquals(200, shared.send(request).statusCode());
+            Assertions.assertEquals(1, reached.get());
+        } finally {
+            destination.stop(0);
+        }
+    }
+
+    @Test
+    void sessionDebugNeverLogsHeaderUrlOrEchoedSecrets() {
+        server.createContext("/secret-path", exchange -> {
+            try (exchange) {
+                exchange.getResponseHeaders().set("Location", "https://example.test/?token=response-secret");
+                exchange.getResponseHeaders().set("X-Arbitrary", "response-header-secret");
+                final var body = "echoed-secret".getBytes(StandardCharsets.UTF_8);
+                exchange.sendResponseHeaders(200, body.length);
+                exchange.getResponseBody().write(body);
+            }
+        });
+        final var config = TestConfigs.codingAgent(
+                Map.of("yca.httpClient.debug", "true", "yca.httpClient.headers", "X-Global=global-secret"));
+        try (final var shared =
+                        new HttpClientProducer().httpClient(config, new NativeProviderConfiguration(null, null));
+                final var view = shared.openSession(Set.of("X-Arbitrary", "Authorization", "Cookie"))) {
+            view.send(HttpRequest.newBuilder(URI.create("http://user:url-secret@127.0.0.1:"
+                            + server.getAddress().getPort() + "/secret-path?token=query-secret"))
+                    .header("x-arbitrary", "arbitrary-secret")
+                    .header("Authorization", "Bearer auth-secret")
+                    .header("Cookie", "cookie-secret")
+                    .POST(HttpRequest.BodyPublishers.ofString("payload-secret"))
+                    .build());
+        }
+        final var trace = logs.toString(StandardCharsets.UTF_8);
+        assertTrue(trace.contains("Session MCP HTTP POST"), trace);
+        assertTrue(trace.contains("HTTP status 200"), trace);
+        assertTrue(trace.contains("******"), trace);
+        assertFalse(trace.contains("secret"), trace);
+    }
+
+    @Test
+    void sessionInheritsCookiesAndReusesOneApplicationOwnedTransport() {
+        server.createContext("/set-cookie", exchange -> {
+            try (exchange) {
+                exchange.getResponseHeaders().set("Set-Cookie", "route=shared; Path=/");
+                exchange.sendResponseHeaders(200, -1);
+            }
+        });
+        server.createContext("/cookie", exchange -> {
+            try (exchange) {
+                final var cookie = String.valueOf(exchange.getRequestHeaders().getFirst("Cookie"));
+                final var bytes = cookie.getBytes(StandardCharsets.UTF_8);
+                exchange.sendResponseHeaders(200, bytes.length);
+                exchange.getResponseBody().write(bytes);
+            }
+        });
+        final var config = TestConfigs.codingAgent(Map.of("yca.httpClient.enableCookies", "true"));
+        final var shared = new HttpClientProducer().httpClient(config, new NativeProviderConfiguration(null, null));
+        final HttpClient sessionTransport;
+        try (shared) {
+            final var root = "http://127.0.0.1:" + server.getAddress().getPort();
+            shared.send(HttpRequest.newBuilder(URI.create(root + "/set-cookie")).build());
+            final var first = shared.openSession(Set.of());
+            sessionTransport = first.delegate();
+            try (first;
+                    final var second = shared.openSession(Set.of())) {
+                Assertions.assertSame(first.delegate(), second.delegate());
+                Assertions.assertSame(
+                        shared.cookieHandler().orElseThrow(),
+                        first.cookieHandler().orElseThrow());
+                assertTrue(first.send(HttpRequest.newBuilder(URI.create(root + "/cookie"))
+                                .build())
+                        .body()
+                        .contains("route=shared"));
+            }
+            try (final var third = shared.openSession(Set.of())) {
+                Assertions.assertSame(first.delegate(), third.delegate());
+                Assertions.assertEquals(
+                        200,
+                        third.send(HttpRequest.newBuilder(URI.create(root + "/"))
+                                        .build())
+                                .statusCode());
+            }
+            Assertions.assertEquals(
+                    200,
+                    shared.send(HttpRequest.newBuilder(URI.create(root + "/")).build())
+                            .statusCode());
+        }
+        assertTrue(sessionTransport.isTerminated(), "application close must close the lazy session transport");
+        assertThrows(IllegalStateException.class, () -> shared.openSession(Set.of()));
+    }
+
+    @Test
+    void sessionCanReuseAnAlreadyNoRedirectTransportWithoutOwningIt() {
+        try (final var transport = HttpClient.newBuilder()
+                .followRedirects(HttpClient.Redirect.NEVER)
+                .build()) {
+            final var request = HttpRequest.newBuilder(
+                            URI.create("http://127.0.0.1:" + server.getAddress().getPort() + "/"))
+                    .build();
+            try (final var view = new SessionMcpHttpClient(transport, List.of(), false, Set.of())) {
+                Assertions.assertSame(transport, view.delegate());
+                Assertions.assertEquals(200, view.send(request).statusCode());
+            }
+            assertFalse(transport.isTerminated());
+            try (final var view = new SessionMcpHttpClient(transport, List.of(), false, Set.of())) {
+                Assertions.assertEquals(200, view.send(request).statusCode());
+            }
+        }
+    }
+
+    @Test
+    void sessionRejectsRedirectingTransports() {
+        try (final var transport = HttpClient.newBuilder()
+                .followRedirects(HttpClient.Redirect.NORMAL)
+                .build()) {
+            assertThrows(
+                    IllegalArgumentException.class,
+                    () -> new SessionMcpHttpClient(transport, List.of(), false, Set.of()));
+        }
+    }
+
+    @Test
+    void applicationCloseAbortsUnconsumedSessionBodies() throws Exception {
+        final var bodyOpen = new CountDownLatch(1);
+        final var release = new CountDownLatch(1);
+        server.createContext("/open-stream", exchange -> {
+            try (exchange) {
+                exchange.getResponseHeaders().set("Content-Type", "text/event-stream");
+                exchange.sendResponseHeaders(200, 0);
+                exchange.getResponseBody().write(": open\n\n".getBytes(StandardCharsets.UTF_8));
+                exchange.getResponseBody().flush();
+                bodyOpen.countDown();
+                try {
+                    release.await();
+                } catch (final InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            }
+        });
+        final var shared = new HttpClientProducer()
+                .httpClient(TestConfigs.codingAgent(Map.of()), new NativeProviderConfiguration(null, null));
+        final var workers = Executors.newVirtualThreadPerTaskExecutor();
+        try (final var view = shared.openSession(Set.of())) {
+            final var request = HttpRequest.newBuilder(
+                            URI.create("http://127.0.0.1:" + server.getAddress().getPort() + "/open-stream"))
+                    .build();
+            try (final var body = view.send(request, HttpResponse.BodyHandlers.ofInputStream())
+                    .body()) {
+                assertTrue(body != null);
+                assertTrue(bodyOpen.await(5, TimeUnit.SECONDS));
+                workers.submit(shared::close).get(5, TimeUnit.SECONDS);
+                assertTrue(view.delegate().isTerminated());
+                assertThrows(IllegalStateException.class, () -> shared.openSession(Set.of()));
+            }
+        } finally {
+            release.countDown();
+            workers.shutdownNow();
+            shared.close();
+        }
+    }
+
+    @Test
+    void sessionCustomCertificateIsTrusted() throws Exception {
+        final var config = TestConfigs.codingAgent(Map.of(
+                "yca.httpClient.certificates.importGlobalCertificate", "false",
+                "yca.httpClient.certificates.custom.length", "1",
+                "yca.httpClient.certificates.custom.0.pem", pem()));
+        final var https = httpsServer();
+        try (final var shared =
+                        new HttpClientProducer().httpClient(config, new NativeProviderConfiguration(null, null));
+                final var view = shared.openSession(Set.of())) {
+            final var response = view.send(HttpRequest.newBuilder(
+                            URI.create("https://localhost:" + https.getAddress().getPort() + "/"))
+                    .build());
+            Assertions.assertEquals(200, response.statusCode());
+        } finally {
+            https.stop(0);
+        }
+    }
+
+    @Test
+    void sessionPreservesProxyTlsAndTimeoutSettings() {
+        final var config = TestConfigs.codingAgent(Map.of(
+                "yca.httpClient.proxy.host",
+                "proxy.example.test",
+                "yca.httpClient.proxy.port",
+                "3128",
+                "yca.httpClient.proxy.user",
+                "user",
+                "yca.httpClient.proxy.password",
+                "secret",
+                "yca.httpClient.connectTimeoutSeconds",
+                "17"));
+        try (final var shared =
+                        new HttpClientProducer().httpClient(config, new NativeProviderConfiguration(null, null));
+                final var view = shared.openSession(Set.of())) {
+            Assertions.assertSame(shared.proxy().orElseThrow(), view.proxy().orElseThrow());
+            Assertions.assertSame(
+                    shared.authenticator().orElseThrow(), view.authenticator().orElseThrow());
+            Assertions.assertSame(shared.sslContext(), view.sslContext());
+            Assertions.assertEquals(shared.connectTimeout(), view.connectTimeout());
+            Assertions.assertEquals(shared.version(), view.version());
+            Assertions.assertArrayEquals(
+                    shared.sslParameters().getProtocols(), view.sslParameters().getProtocols());
+            Assertions.assertArrayEquals(
+                    shared.sslParameters().getCipherSuites(),
+                    view.sslParameters().getCipherSuites());
+        }
+    }
+
+    @Test
+    void sessionDebugDisabledProducesNoLogs() {
+        try (final var shared = new HttpClientProducer()
+                        .httpClient(TestConfigs.codingAgent(Map.of()), new NativeProviderConfiguration(null, null));
+                final var view = shared.openSession(Set.of())) {
+            view.send(HttpRequest.newBuilder(
+                            URI.create("http://127.0.0.1:" + server.getAddress().getPort() + "/"))
+                    .build());
+        }
+        Assertions.assertEquals(0, logs.size());
     }
 
     @Test

@@ -29,15 +29,29 @@ import io.yupiik.ia.agent.core.context.UsageTracker;
 import io.yupiik.ia.agent.core.llm.ChatClient;
 import io.yupiik.ia.agent.core.llm.ChatSettings;
 import io.yupiik.ia.agent.core.llm.Usage;
+import io.yupiik.ia.agent.core.permissions.ApprovalGate;
+import io.yupiik.ia.agent.core.question.FeedbackGate;
 import io.yupiik.ia.agent.core.shell.ConversationTranscript;
 import io.yupiik.ia.agent.core.shell.SessionRuntime;
 import io.yupiik.ia.agent.core.shell.ShellEnv;
+import io.yupiik.ia.agent.core.shell.ShellIO;
 import io.yupiik.ia.agent.core.shell.ShellOutcome;
 import io.yupiik.ia.agent.core.shell.ShellSession;
+import java.nio.file.Path;
 import java.util.List;
+import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionStage;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 class ConfigCommandsTest {
+    @TempDir
+    private static Path eventWorkdir;
+
+    @TempDir
+    private static Path testWorkdir;
+
     private final ConfigCommands commands = new ConfigCommands(null, null, null, null, null, null, null);
 
     private ShellOutcome run(final String arg, final ShellSession session, final ConversationTranscript transcript) {
@@ -56,13 +70,15 @@ class ConfigCommandsTest {
     }
 
     private static ShellSession sessionWithUsage(final UsageTracker usage) {
-        return new ShellSession().runtime(new SessionRuntime(null, null, null, usage, null, null, null, null));
+        return new ShellSession()
+                .runtime(new SessionRuntime(null, null, null, usage, null, null, null, null, testWorkdir));
     }
 
     /** A session whose per-tab selection is backed by a minimal agent loop (geometry-free). */
     private static ShellSession sessionWithLoop() {
         return new ShellSession()
-                .runtime(new SessionRuntime(new AgentLoop() {}, null, null, null, null, null, null, null));
+                .runtime(new SessionRuntime(
+                        new AgentLoop(testWorkdir) {}, null, null, null, null, null, null, null, testWorkdir));
     }
 
     /** A ChatClient stub exposing a fixed model and variant set for the /variant command. */
@@ -94,7 +110,39 @@ class ConfigCommandsTest {
                         .findFirst()
                         .orElseThrow();
         return cmd.action()
-                .apply(arg, new ShellEnv(null, null, session, new ConversationTranscript()))
+                .apply(
+                        arg,
+                        new ShellEnv(
+                                null,
+                                new ShellIO() {
+                                    @Override
+                                    public CompletionStage<Optional<String>> readLine(final String prompt) {
+                                        return CompletableFuture.completedFuture(Optional.empty());
+                                    }
+
+                                    @Override
+                                    public CompletionStage<Boolean> confirm(final String question) {
+                                        return CompletableFuture.completedFuture(false);
+                                    }
+
+                                    @Override
+                                    public CompletionStage<Optional<String>> pick(
+                                            final String title, final List<String> options) {
+                                        return CompletableFuture.completedFuture(Optional.empty());
+                                    }
+
+                                    @Override
+                                    public ApprovalGate approvalGate() {
+                                        return (title, detail, name, args) -> ApprovalGate.Result.DENY;
+                                    }
+
+                                    @Override
+                                    public FeedbackGate feedbackGate() {
+                                        throw new AssertionError("no feedback expected");
+                                    }
+                                },
+                                session,
+                                new ConversationTranscript()))
                 .toCompletableFuture()
                 .join();
     }
@@ -110,7 +158,7 @@ class ConfigCommandsTest {
     @Test
     void defaultPrintsLastTurnValues() {
         final var transcript = new ConversationTranscript();
-        transcript.onEvent(new AgentEvent.TurnMetrics(3, 120, 300, 500, 5, 1500, "session-1"));
+        transcript.onEvent(new AgentEvent.TurnMetrics(3, 120, 300, 500, 5, 1500, "session-1", eventWorkdir));
         final var outcome = run("", session(), transcript);
         assertEquals(
                 "metrics: showPerTurn=true showSessionTotals=true displayMode=COMPACT\n"
@@ -121,7 +169,7 @@ class ConfigCommandsTest {
     @Test
     void defaultSurfacesCachedTokensWithTheShareOfPrompt() {
         final var transcript = new ConversationTranscript();
-        transcript.onEvent(new AgentEvent.TurnMetrics(2, 120, 300, 500, 3, 1500, "session-1"));
+        transcript.onEvent(new AgentEvent.TurnMetrics(2, 120, 300, 500, 3, 1500, "session-1", eventWorkdir));
         transcript.onEvent(new AgentEvent.UsageUpdated(
                 new Usage(4000, 800, 4800, 1200, 0),
                 42000,
@@ -132,7 +180,8 @@ class ConfigCommandsTest {
                 "s1",
                 null,
                 null,
-                AgentEvent.UsageUpdated.Quota.NONE));
+                AgentEvent.UsageUpdated.Quota.NONE,
+                eventWorkdir));
         final var outcome = run("", session(), transcript);
         assertEquals(
                 "metrics: showPerTurn=true showSessionTotals=true displayMode=COMPACT\n"

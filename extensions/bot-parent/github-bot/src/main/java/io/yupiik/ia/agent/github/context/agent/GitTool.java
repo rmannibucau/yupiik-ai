@@ -23,6 +23,7 @@ import io.yupiik.ia.agent.core.tools.ToolCategory;
 import io.yupiik.ia.agent.core.tools.ToolContext;
 import io.yupiik.ia.agent.core.tools.ToolResult;
 import io.yupiik.ia.agent.github.configuration.AgentContextConfiguration;
+import java.nio.file.Path;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -47,7 +48,7 @@ public class GitTool implements EmbeddedTool {
     }
 
     @Override
-    public String description() {
+    public String description(final Path workdir) {
         return "Read the WORKER-PINNED Git snapshot, not local edits. Use argv arrays, never a shell string. "
                 + "Examples: {argv:[\"log\",\"-5\",\"--oneline\"]}, {argv:[\"show\",\"HEAD:pom.xml\"]}, "
                 + "{argv:[\"diff\",\"BASE...HEAD\",\"--stat\"]}, {argv:[\"grep\",\"-n\",\"-e\",\"TODO\",\"HEAD\"]}. "
@@ -69,7 +70,7 @@ public class GitTool implements EmbeddedTool {
     }
 
     @Override
-    public boolean usable() {
+    public boolean usable(final Path workdir) {
         return ContextClient.usable(configuration, sources);
     }
 
@@ -98,11 +99,6 @@ public class GitTool implements EmbeddedTool {
                                 List.of("string", "null"),
                                 "description",
                                 "Previously granted canonical owner/repository; omitted/null selects primary.")));
-    }
-
-    @Override
-    public ToolResult execute(final Map<String, Object> args) {
-        return execute(args, ToolContext.empty());
     }
 
     @Override

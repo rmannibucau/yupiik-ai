@@ -24,10 +24,15 @@ import io.yupiik.ia.agent.core.configuration.MetricsConfiguration;
 import io.yupiik.ia.agent.core.configuration.MetricsDisplayMode;
 import io.yupiik.ia.agent.core.context.UsageTracker;
 import io.yupiik.ia.agent.core.llm.Usage;
+import java.nio.file.Path;
 import java.time.Clock;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 class MetricsFormatTest {
+    @TempDir
+    private static Path eventWorkdir;
+
     @Test
     void measuredRateOnly() {
         assertEquals(
@@ -132,7 +137,8 @@ class MetricsFormatTest {
                 new AgentEvent.Throughput(120, 0, 1_000, 0, 0, 1, 0, false),
                 "s1",
                 null,
-                null));
+                null,
+                eventWorkdir));
         final var report =
                 MetricsFormat.report(new MetricsConfiguration(true, true, MetricsDisplayMode.FULL), transcript, null);
         assertEquals(
@@ -164,7 +170,8 @@ class MetricsFormatTest {
                 "s1",
                 null,
                 null,
-                AgentEvent.UsageUpdated.Quota.NONE));
+                AgentEvent.UsageUpdated.Quota.NONE,
+                eventWorkdir));
         final var report =
                 MetricsFormat.report(new MetricsConfiguration(true, true, MetricsDisplayMode.FULL), transcript, null);
         final var lines = report.split("\n");
@@ -183,10 +190,12 @@ class MetricsFormatTest {
     @Test
     void cacheShareUsesFullInputForCacheExclusiveProviders() {
         final var transcript = transcriptWithReasoningTurn();
-        transcript.onEvent(new AgentEvent.UsageUpdated(new Usage(5, 2, 7, 100, 20, 0, 0, 125), 68, 14, "s1"));
+        transcript.onEvent(
+                new AgentEvent.UsageUpdated(new Usage(5, 2, 7, 100, 20, 0, 0, 125), 68, 14, "s1", eventWorkdir));
         final var metrics = new MetricsConfiguration(true, true, MetricsDisplayMode.FULL);
         assertTrue(MetricsFormat.report(metrics, transcript, null).contains("cached 100 (80%)"));
-        transcript.onEvent(new AgentEvent.UsageUpdated(new Usage(0, 2, 2, 100, 0, 0, 0, 100), 68, 14, "s1"));
+        transcript.onEvent(
+                new AgentEvent.UsageUpdated(new Usage(0, 2, 2, 100, 0, 0, 0, 100), 68, 14, "s1", eventWorkdir));
         assertTrue(MetricsFormat.report(metrics, transcript, null).contains("cached 100 (100%)"));
     }
 
@@ -209,8 +218,8 @@ class MetricsFormatTest {
                 new MetricsConfiguration(true, true, MetricsDisplayMode.COMPACT), transcript, usage);
         assertTrue(compact.contains("optimized 1 outputs ~3.1k tokens saved"), compact);
         assertFalse(compact.contains("chars"), compact);
-        final var full = MetricsFormat.report(
-                new MetricsConfiguration(true, true, MetricsDisplayMode.FULL), transcript, usage);
+        final var full =
+                MetricsFormat.report(new MetricsConfiguration(true, true, MetricsDisplayMode.FULL), transcript, usage);
         assertTrue(full.contains("~3.1k tokens saved (9000 chars)"), full);
         usage.recordOptimization(10, 9, -3_200);
         final var zero = MetricsFormat.report(
@@ -247,7 +256,8 @@ class MetricsFormatTest {
                 new AgentEvent.Throughput(1_204, 251, 2_000, 2_125, 1_204, 2, 2, false),
                 "s1",
                 null,
-                null));
+                null,
+                eventWorkdir));
         return transcript;
     }
 

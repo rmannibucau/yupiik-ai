@@ -17,6 +17,7 @@ package io.yupiik.ia.agent.core.context;
 
 import io.yupiik.fusion.framework.api.event.Emitter;
 import io.yupiik.ia.agent.core.agent.AgentEvent;
+import io.yupiik.ia.agent.core.agent.AgentEvent.CompactionPass;
 import io.yupiik.ia.agent.core.configuration.BufferConfiguration;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.CompactionLlmMode;
@@ -42,6 +43,7 @@ import io.yupiik.ia.agent.core.wiring.SessionAwareLogRecord;
 import io.yupiik.llm.client.ContextWindowExceededException;
 import io.yupiik.llm.client.LlmHttpFailureException;
 import java.io.IOException;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
@@ -49,6 +51,8 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.UUID;
+import java.util.concurrent.CancellationException;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import java.util.function.BooleanSupplier;
@@ -144,6 +148,7 @@ public class CompactionCoordinator {
     private static final String DIGEST_CLOSE = "</compacted-context>";
 
     private final CodingAgentConfiguration configuration;
+    private final Path workdir;
     private final ChatClient chatClient;
     private final UsageTracker usageTracker;
     private final ProviderManager providerManager;
@@ -159,7 +164,9 @@ public class CompactionCoordinator {
             final ProviderManager providerManager,
             final Emitter emitter,
             final String sessionId,
-            final BackoffSleeper backoffSleeper) {
+            final BackoffSleeper backoffSleeper,
+            final Path workdir) {
+        this.workdir = Objects.requireNonNull(workdir, "workdir");
         this.configuration = configuration;
         this.chatClient = chatClient;
         this.usageTracker = usageTracker;
@@ -167,16 +174,6 @@ public class CompactionCoordinator {
         this.emitter = emitter;
         this.sessionId = sessionId;
         this.backoffSleeper = backoffSleeper;
-    }
-
-    protected CompactionCoordinator() {
-        this.configuration = null;
-        this.chatClient = null;
-        this.usageTracker = null;
-        this.providerManager = null;
-        this.emitter = null;
-        this.sessionId = null;
-        this.backoffSleeper = new BackoffSleeper();
     }
 
     /**
@@ -354,13 +351,24 @@ public class CompactionCoordinator {
 
     /** Runs the blockable hook only on the foreground thread. */
     public boolean hookVetoed() {
+        return hookVetoed(null);
+    }
+
+    private boolean hookVetoed(final CompactionProgress progress) {
         if (emitter == null) {
             return false;
         }
         final var hook = new HookResult();
         emitter.emit(new CompactionStartingEvent(
                 new EventContext(
-                        sessionId, null, null, configuration.resolveProjectDir().toString(), null, null, null, null),
+                        sessionId,
+                        progress == null ? null : progress.subagentId(),
+                        progress == null ? null : progress.subagentName(),
+                        (progress == null ? workdir : progress.workdir()).toString(),
+                        null,
+                        null,
+                        null,
+                        null),
                 hook));
         return hook.forbidden();
     }
@@ -583,8 +591,19 @@ public class CompactionCoordinator {
      * @param extraToolTokens token contribution of the wire tool schemas injected into every request
      * @param tokensPublished receives the effective estimate used by the notice, right before it is
      *                        emitted; may be null to publish nothing
+     * @param subagentId the invocation's child id, or null for the parent
+     * @param subagentName the child's display name, or null for the parent
+     * @param workdir required immutable, absolute, normalized invocation root (including child overrides)
      */
-    public record CompactionProgress(int extraToolTokens, IntConsumer tokensPublished) {}
+    public record CompactionProgress(
+            int extraToolTokens, IntConsumer tokensPublished, String subagentId, String subagentName, Path workdir) {
+        public CompactionProgress {
+            Objects.requireNonNull(workdir, "workdir");
+            if (!workdir.isAbsolute() || !workdir.equals(workdir.normalize())) {
+                throw new IllegalArgumentException("workdir must be absolute and normalized: " + workdir);
+            }
+        }
+    }
 
     /**
      * Compacts a context, with an {@code urgent} flag: a manual, user-requested compaction that
@@ -621,9 +640,79 @@ public class CompactionCoordinator {
             final ChatSettings settings,
             final CompactionProgress progress) {
         Objects.requireNonNull(cancelled, "cancelled");
-        if (hookVetoed()) {
-            return new CompactionResult(messages, Mode.NONE, "compaction vetoed by hook");
+        final var id = "compaction-" + UUID.randomUUID();
+        var status = CompactionPass.Status.FAILED;
+        var mode = Mode.NONE;
+        var detail = "Compaction failed; context left unchanged.";
+        try {
+            emitPass(id, CompactionPass.Status.STARTED, null, null, progress);
+            if (cancelled.getAsBoolean() || Thread.currentThread().isInterrupted()) {
+                status = CompactionPass.Status.CANCELLED;
+                detail = "Compaction cancelled; context left unchanged.";
+                return new CompactionResult(messages, Mode.NONE, "cancelled");
+            }
+            if (hookVetoed(progress)) {
+                status = CompactionPass.Status.SKIPPED;
+                detail = "Compaction skipped by hook; context left unchanged.";
+                return new CompactionResult(messages, Mode.NONE, "compaction vetoed by hook");
+            }
+            final var result =
+                    compactPass(messages, force, focus, keepLastOverride, urgent, cancelled, settings, progress);
+            mode = result.mode();
+            if (cancelled.getAsBoolean() || Thread.currentThread().isInterrupted()) {
+                status = CompactionPass.Status.CANCELLED;
+                detail = "Compaction cancelled; context left unchanged.";
+                mode = Mode.NONE;
+                return new CompactionResult(messages, Mode.NONE, "cancelled");
+            }
+            if (result.changed()) {
+                status = CompactionPass.Status.SUCCEEDED;
+                detail = "Context compacted (" + result.mode().name() + ").";
+            } else if (result.error() == null || result.error().isBlank()) {
+                status = CompactionPass.Status.SKIPPED;
+                detail = "Compaction skipped; nothing to reclaim.";
+            }
+            return result;
+        } catch (final RuntimeException | Error failure) {
+            if (failure instanceof CancellationException
+                    || Thread.currentThread().isInterrupted()) {
+                status = CompactionPass.Status.CANCELLED;
+                detail = "Compaction cancelled; context left unchanged.";
+            }
+            throw failure;
+        } finally {
+            emitPass(id, status, mode, detail, progress);
         }
+    }
+
+    private void emitPass(
+            final String id,
+            final CompactionPass.Status status,
+            final Mode mode,
+            final String detail,
+            final CompactionProgress progress) {
+        if (emitter != null) {
+            emitter.emit(new CompactionPass(
+                    id,
+                    status,
+                    mode,
+                    detail,
+                    sessionId,
+                    progress == null ? null : progress.subagentId(),
+                    progress == null ? null : progress.subagentName(),
+                    progress == null ? workdir : progress.workdir()));
+        }
+    }
+
+    private CompactionResult compactPass(
+            final List<Message> messages,
+            final boolean force,
+            final String focus,
+            final int keepLastOverride,
+            final boolean urgent,
+            final BooleanSupplier cancelled,
+            final ChatSettings settings,
+            final CompactionProgress progress) {
         final var p = configuration.pruning();
         final var keepFloor =
                 Math.max(2, keepLastOverride > 0 ? keepLastOverride : force ? p.keepRecent() / 2 : p.keepRecent());
@@ -673,7 +762,8 @@ public class CompactionCoordinator {
             emit(AgentEvent.Notice.compactionStart(
                     "Compaction in progress... (\u2248" + effective + " estimated tokens; "
                             + usageTracker.lastContextMeasurement().source() + ")",
-                    sessionId));
+                    sessionId,
+                    workdir));
         }
         Outcome outcome;
         while (true) {
@@ -705,7 +795,12 @@ public class CompactionCoordinator {
                     AgentEvent.Notice.Level.WARN,
                     "Compaction exceeded the summarizer context window; retrying with chunks of ~" + chunkCap
                             + " chars.",
-                    sessionId));
+                    sessionId,
+                    workdir));
+        }
+        // Cancellation is not summarizer failure and must never trigger destructive truncation.
+        if (cancelled.getAsBoolean() || Thread.currentThread().isInterrupted()) {
+            return new CompactionResult(messages, Mode.NONE, "cancelled");
         }
         if (!outcome.summary().isBlank()) {
             List<Message> out = assembleSummary(messages, from, boundary, outcome.summary());
@@ -720,7 +815,8 @@ public class CompactionCoordinator {
                 emit(AgentEvent.Notice.compacted(
                         "Compacted the context in " + (outcome.calls() >= 1 ? outcome.calls() : 1)
                                 + " summarizer call(s) using a window-derived chunk size.",
-                        sessionId));
+                        sessionId,
+                        workdir));
             }
             // success feedback: the percentage reclaimed, or the token delta when the gain is below
             // one point (percentages would round to a no-op "0% -> 0%" readout)
@@ -736,7 +832,7 @@ public class CompactionCoordinator {
                     compactedMessage = "Compacted: context " + Math.round(beforePercent) + "% -> "
                             + Math.round(afterPercent) + "%";
                 }
-                emit(AgentEvent.Notice.compacted(compactedMessage, sessionId));
+                emit(AgentEvent.Notice.compacted(compactedMessage, sessionId, workdir));
             }
             return new CompactionResult(out, Mode.SUMMARY, "");
         }
@@ -757,7 +853,8 @@ public class CompactionCoordinator {
                     AgentEvent.Notice.Level.WARN,
                     failureMessage + "; compaction skipped, context kept raw (will retry next pass). Run /compact "
                             + "to retry now, or /compact urgent to force local truncation.",
-                    sessionId));
+                    sessionId,
+                    workdir));
             return new CompactionResult(messages, Mode.NONE, failureMessage + " (compaction skipped)");
         }
         final var truncated = localTruncate(messages, from, boundary);
@@ -776,7 +873,8 @@ public class CompactionCoordinator {
                 AgentEvent.Notice.Level.WARN,
                 (failureMessage.isBlank() ? "Summary failed; context truncated locally." : failureMessage)
                         + " Run /compact to retry the summarizer, or /compact urgent to force truncation.",
-                sessionId));
+                sessionId,
+                workdir));
         if (keptTruncated.equals(messages)) {
             return new CompactionResult(messages, Mode.NONE, failureMessage);
         }
@@ -1273,7 +1371,7 @@ public class CompactionCoordinator {
         var calls = 0;
         if (!quiet) {
             warnOnceWhenNoCompactModel();
-            emit(new AgentEvent.Status(label + " (chunk 1/" + chunks.size() + ")...", sessionId, null, null));
+            emit(new AgentEvent.Status(label + " (chunk 1/" + chunks.size() + ")...", sessionId, null, null, workdir));
         }
         for (var c = 0; c < chunks.size(); c++) {
             if (cancelled.getAsBoolean()) {
@@ -1310,7 +1408,8 @@ public class CompactionCoordinator {
                                                     : AgentEvent.Pause.Kind.RETRY,
                                             label + ": " + pause.message(),
                                             pause.durationMs(),
-                                            sessionId));
+                                            sessionId,
+                                            workdir));
                                 }
                             },
                             cancelled);
@@ -1351,7 +1450,8 @@ public class CompactionCoordinator {
                                 AgentEvent.Pause.Kind.RETRY,
                                 label + " failed, retrying in ~" + (delay / 1000) + "s...",
                                 delay,
-                                sessionId));
+                                sessionId,
+                                workdir));
                     }
                     backoffSleeper.sleep(delay);
                 }
@@ -1370,7 +1470,8 @@ public class CompactionCoordinator {
                                     label + ": summarizer unavailable, retrying on " + mainModel + "...",
                                     sessionId,
                                     null,
-                                    null));
+                                    null,
+                                    workdir));
                         }
                         try {
                             // rebuild the request for the main model instead of copying the compact
@@ -1398,7 +1499,8 @@ public class CompactionCoordinator {
                                             label + " (chunk " + (c + 2) + "/" + chunks.size() + ")...",
                                             sessionId,
                                             null,
-                                            null));
+                                            null,
+                                            workdir));
                                 }
                                 continue;
                             }
@@ -1430,7 +1532,7 @@ public class CompactionCoordinator {
             replaceBounded(summary, part, digestCap);
             if (!quiet && c + 1 < chunks.size()) {
                 emit(new AgentEvent.Status(
-                        label + " (chunk " + (c + 2) + "/" + chunks.size() + ")...", sessionId, null, null));
+                        label + " (chunk " + (c + 2) + "/" + chunks.size() + ")...", sessionId, null, null, workdir));
             }
         }
         return new Outcome(summary.toString(), "", calls, false, false);

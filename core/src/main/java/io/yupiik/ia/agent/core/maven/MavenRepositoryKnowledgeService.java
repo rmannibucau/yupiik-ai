@@ -16,9 +16,7 @@
 package io.yupiik.ia.agent.core.maven;
 
 import io.yupiik.codegraph.index.CodeGraphIndex;
-import io.yupiik.fusion.framework.api.lifecycle.Start;
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
-import io.yupiik.fusion.framework.build.api.event.OnEvent;
 import io.yupiik.fusion.httpclient.core.ExtendedHttpClient;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.llm.ChatSettings;
@@ -42,22 +40,35 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
+import java.util.concurrent.CancellationException;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
+import java.util.concurrent.CompletionStage;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.FutureTask;
+import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Consumer;
+import java.util.function.Supplier;
 
 /**
  * Shared pipeline for the embedded Maven repository knowledge feature. The embedded tool, the
  * {@code /maven-repository-knowledge} slash command and the session-start skill loader all delegate
  * to this service so the indexing logic lives in a single, framework-agnostic place.
+ * All operations require an explicit project path for dependency selection and fingerprints.
+ * Artifact storage and file caches are intentionally shared across all projects.
  */
 @ApplicationScoped
 public class MavenRepositoryKnowledgeService {
@@ -68,8 +79,8 @@ public class MavenRepositoryKnowledgeService {
     private final ExtendedHttpClient httpClient;
     private final AtomicReference<List<String>> sessionSkillBlocks = new AtomicReference<>(List.of());
     private final AtomicBoolean sessionSkillsRequested = new AtomicBoolean();
-    private final AtomicReference<IndexRun> runningIndex = new AtomicReference<>();
-    private volatile String lastSummary;
+    private final Set<IndexRun> activeIndexes = new HashSet<>();
+    private volatile IndexRun lastCompletedIndex;
     private final CodeGraphIndexCache codeGraphCache = new CodeGraphIndexCache();
     private final KnowledgeFileCache knowledgeFileCache = new KnowledgeFileCache();
 
@@ -100,20 +111,23 @@ public class MavenRepositoryKnowledgeService {
      * {@code synchronous} config flag is set, the warm-up runs on the calling thread and blocks until the
      * index is fully provisioned (used by tests/benchmarks that must guarantee the index is finished).
      */
-    public void onStart(@OnEvent final Start start) {
-        if (!enabled()) {
+    /** Optional session-start provisioning, with the root captured before scheduling any work. */
+    public void warmUp(final Path projectRoot) {
+        final var root = projectRoot(projectRoot);
+        if (!enabled(root)) {
             return;
         }
         if (!configuration.mavenRepositoryKnowledge().skillsAtSessionStart()) {
             return;
         }
-        if (!llm.available()) {
+        final var operationLlm = operationLlm(root, null);
+        if (operationLlm == null || !operationLlm.available()) {
             return;
         }
         if (configuration.mavenRepositoryKnowledge().synchronous()) {
-            loadSessionSkillsLazily();
+            loadSessionSkillsLazily(root, operationLlm);
         } else {
-            executor.execute(this::loadSessionSkillsLazily);
+            executor.execute(() -> loadSessionSkillsLazily(root, operationLlm));
         }
     }
 
@@ -128,17 +142,16 @@ public class MavenRepositoryKnowledgeService {
      * on-demand path and {@code code_resolve} have real data to serve; only the eager prompt mounting is
      * disabled. Returns an always-empty list so callers (e.g. {@code SystemPromptBuilder}) mount nothing.
      */
-    public List<String> sessionSkillBlocks() {
+    /** Root-aware prompt entrypoint; knowledge remains on-demand, never eagerly mounted. */
+    public List<String> sessionSkillBlocks(final Path root) {
+        Objects.requireNonNull(root, "workdir");
         return List.of();
     }
 
-    private void loadSessionSkillsLazily() {
-        if (!sessionSkillsRequested.compareAndSet(false, true)) {
-            return;
-        }
+    private void loadSessionSkillsLazily(final Path root, final KnowledgeLlm operationLlm) {
         try {
-            synchronouslyProvisioned();
-            final var suggested = suggest();
+            synchronouslyProvisioned(root, operationLlm);
+            final var suggested = suggest(operationLlm);
             final var config = knowledgeConfig();
             final var writer = new KnowledgeWriter(config.localRepository());
             final var maxChars = configuration.mavenRepositoryKnowledge().maxSessionSkillChars();
@@ -172,30 +185,30 @@ public class MavenRepositoryKnowledgeService {
      *
      * @return {@code true} when the index is known to be complete before mounting skills.
      */
-    private boolean synchronouslyProvisioned() {
+    private boolean synchronouslyProvisioned(final Path root, final KnowledgeLlm operationLlm) {
         final var synchronous = configuration != null
                 && configuration.mavenRepositoryKnowledge() != null
                 && configuration.mavenRepositoryKnowledge().synchronous();
         if (!synchronous) {
             return false;
         }
-        var run = currentIndex();
-        if (!run.inFlight() && !anyIndexed()) {
-            final var targets =
-                    projectDependencies().stream().map(Gav::coordinate).toList();
+        var run = currentIndex(root);
+        if (!run.inFlight() && !anyIndexed(operationLlm)) {
+            final var targets = projectDependencies(operationLlm).stream()
+                    .map(Gav::coordinate)
+                    .toList();
             if (!targets.isEmpty()) {
-                startIndex(targets, false, null, null);
-                run = currentIndex();
+                run = doStartIndex(root, operationLlm, targets, false, null, null, null);
             }
         }
         awaitIdle(run);
         return true;
     }
 
-    private boolean anyIndexed() {
+    private boolean anyIndexed(final KnowledgeLlm operationLlm) {
         final var config = knowledgeConfig();
         final var writer = new KnowledgeWriter(config.localRepository());
-        return projectDependencies().stream().anyMatch(writer::alreadyIndexed);
+        return projectDependencies(operationLlm).stream().anyMatch(writer::alreadyIndexed);
     }
 
     private void awaitIdle(final IndexRun run) {
@@ -216,19 +229,27 @@ public class MavenRepositoryKnowledgeService {
         return raw.substring(0, maxChars) + marker;
     }
 
-    private boolean enabled() {
+    private Path projectRoot(final Path root) {
+        return Objects.requireNonNull(root, "workdir");
+    }
+
+    private KnowledgeLlm operationLlm(final Path root, final ChatSettings settings) {
+        return llm instanceof YcaKnowledgeLlm yca ? yca.forProject(root, settings) : llm;
+    }
+
+    private boolean enabled(final Path root) {
         return configuration != null
                 && configuration.mavenRepositoryKnowledge() != null
                 && configuration.mavenRepositoryKnowledge().enabled()
-                && hasBuildFile();
+                && root != null
+                && hasBuildFile(root);
     }
 
     /**
      * Only act when the current project is a Maven or Gradle project (a pom.xml or a build.gradle).
      * This keeps the embedded knowledge feature quiet when working in a plain directory.
      */
-    private boolean hasBuildFile() {
-        final var dir = configuration.resolveProjectDir();
+    private boolean hasBuildFile(final Path dir) {
         if (Files.exists(dir.resolve("pom.xml"))) {
             return true;
         }
@@ -244,12 +265,12 @@ public class MavenRepositoryKnowledgeService {
      * without re-indexing; the LLM picks the main ones (silently returning all when structured output is
      * unsupported).
      */
-    private List<Gav> suggest() {
+    private List<Gav> suggest(final KnowledgeLlm operationLlm) {
         final var config = knowledgeConfig();
         final var repo = new LocalRepository(config.localRepository());
         final var writer = new KnowledgeWriter(config.localRepository());
         final var candidates = new ArrayList<Gav>();
-        for (final var gav : projectDependencies()) {
+        for (final var gav : projectDependencies(operationLlm)) {
             if (writer.alreadyIndexed(gav) && repo.resolve(gav).present()) {
                 candidates.add(gav);
             }
@@ -257,11 +278,11 @@ public class MavenRepositoryKnowledgeService {
         if (candidates.isEmpty()) {
             return List.of();
         }
-        if (!llm.available()) {
+        if (!operationLlm.available()) {
             return candidates;
         }
         try {
-            return llm.suggestEntryGavs(candidates);
+            return operationLlm.suggestEntryGavs(candidates);
         } catch (final RuntimeException e) {
             return candidates;
         }
@@ -272,8 +293,8 @@ public class MavenRepositoryKnowledgeService {
      * current project (feature enabled and a build file is present). Used by tools that must decide whether
      * the knowledge source will actually serve data before advertising it or spending a round trip.
      */
-    public boolean knowledgeEnabled() {
-        return enabled();
+    public boolean knowledgeEnabled(final Path root) {
+        return enabled(projectRoot(root));
     }
 
     /**
@@ -283,15 +304,16 @@ public class MavenRepositoryKnowledgeService {
      *
      * @return the sorted list of {@code groupId:artifactId:version} coordinates with knowledge already indexed.
      */
-    public List<String> indexedArtifacts() {
-        if (!enabled()) {
+    public List<String> indexedArtifacts(final Path projectRoot) {
+        final var root = projectRoot(projectRoot);
+        if (!enabled(root)) {
             return List.of();
         }
         final var config = knowledgeConfig();
         final var repo = new LocalRepository(config.localRepository());
         final var writer = new KnowledgeWriter(config.localRepository());
         final var out = new ArrayList<String>();
-        for (final var gav : projectDependencies()) {
+        for (final var gav : projectDependencies(operationLlm(root, null))) {
             if (writer.alreadyIndexed(gav) && repo.resolve(gav).present()) {
                 out.add(gav.coordinate());
             }
@@ -306,14 +328,14 @@ public class MavenRepositoryKnowledgeService {
      * set drives the no-arg {@code refresh} baseline and the session-start suggestion instead of a whole-repo
      * walk, so the context stays bounded to what the project actually uses.
      */
-    private List<Gav> projectDependencies() {
-        if (llm == null) {
+    private List<Gav> projectDependencies(final KnowledgeLlm operationLlm) {
+        if (operationLlm == null) {
             return List.of();
         }
         final var config = knowledgeConfig();
         final var repo = new LocalRepository(config.localRepository());
         final var out = new ArrayList<Gav>();
-        for (final var gav : llm.resolveProjectDeps()) {
+        for (final var gav : operationLlm.resolveProjectDeps()) {
             final var resolved = repo.resolve(gav);
             final var main = resolved.mainJar();
             if (resolved.present() && main != null && Files.isRegularFile(main)) {
@@ -326,39 +348,27 @@ public class MavenRepositoryKnowledgeService {
     /**
      * Index the given GAVs. Returns a human readable report.
      */
-    public String index(final List<String> gavStrings, final boolean force) {
-        return index(gavStrings, force, null);
-    }
-
     /**
      * Index the given GAVs with the requesting session's provider/model selection. Returns a human
      * readable report. When {@code settings} is non-null and the backing {@link YcaKnowledgeLlm} is
-     * used, the LLM calls resolve the session's provider/model lazily at call time (never captured at
-     * construction); null falls back to the process default.
+     * used, an operation-local adapter captures the session's provider/model selection; null falls
+     * back to the process default without changing another run's settings.
      */
-    public String index(final List<String> gavStrings, final boolean force, final ChatSettings settings) {
-        if (!enabled()) {
+    public String index(
+            final Path projectRoot, final List<String> gavStrings, final boolean force, final ChatSettings settings) {
+        final var root = projectRoot(projectRoot);
+        if (!enabled(root)) {
             return "maven repository knowledge is disabled";
         }
-        bindLlmSettings(settings);
-        try {
-            return doIndex(gavStrings, force);
-        } finally {
-            bindLlmSettings(null);
-        }
+        return doIndex(root, operationLlm(root, settings), gavStrings, force);
     }
 
-    private void bindLlmSettings(final ChatSettings settings) {
-        if (llm instanceof YcaKnowledgeLlm yca) {
-            yca.withSettings(settings);
-        }
-    }
-
-    private String doIndex(final List<String> gavStrings, final boolean force) {
-        if (!enabled()) {
+    private String doIndex(
+            final Path root, final KnowledgeLlm operationLlm, final List<String> gavStrings, final boolean force) {
+        if (!enabled(root)) {
             return "maven repository knowledge is disabled";
         }
-        final var config = knowledgeConfig(force);
+        final var config = knowledgeConfig(force, operationLlm);
         final var effective = new KnowledgeConfig(
                 config.localRepository(),
                 config.concurrency(),
@@ -393,7 +403,7 @@ public class MavenRepositoryKnowledgeService {
         if (problems.length() > 0) {
             sb.append("skipped invalid GAVs: ").append(problems).append('\n');
         }
-        final var indexer = newIndexer(effective, fingerprints(gavs));
+        final var indexer = newIndexer(effective, fingerprints(root, gavs), operationLlm);
         try {
             final var results = indexer.index(gavs, result -> {});
             sb.append("indexed ")
@@ -422,105 +432,129 @@ public class MavenRepositoryKnowledgeService {
         }
     }
 
-    /**
-     * Refresh command entry point for the {@code /maven-repository-knowledge refresh} slash command.
-     * With no GAV, re-runs the baseline over the project's local artifacts; with a GAV, force-regenerates
-     * that single artifact (bypassing the immutable-skip rule). Runs asynchronously on the shared executor
-     * and returns immediately with a short acknowledgement.
-     */
-    public List<String> refresh(final String gav) {
-        return refresh(gav, null, null);
+    private static void awaitIndexer(final Indexer indexer) {
+        // Only the service-owned orchestrator drains. Frontend cancellation must never wait here.
+        var interrupted = false;
+        try {
+            while (true) {
+                try {
+                    if (indexer.awaitTermination(Long.MAX_VALUE, TimeUnit.NANOSECONDS)) {
+                        return;
+                    }
+                } catch (final InterruptedException e) {
+                    interrupted = true;
+                }
+            }
+        } finally {
+            if (interrupted) {
+                Thread.currentThread().interrupt();
+            }
+        }
     }
 
-    /**
-     * Same as {@link #refresh(String)} but with progress + completion callbacks so a frontend can surface
-     * per-batch progress lines and the final summary.
-     */
-    public List<String> refresh(final String gav, final Consumer<String> progress, final Consumer<String> onFinished) {
-        return refresh(gav, progress, onFinished, null);
-    }
-
-    /**
-     * Same as {@link #refresh(String, Consumer, Consumer)} with the requesting session's provider/model
-     * selection; the index LLM calls resolve it lazily at call time (see {@link #index(List, boolean, ChatSettings)}).
-     */
+    /** Starts {@link #refreshJob} and returns only its immediate acknowledgement for detached frontends. */
     public List<String> refresh(
+            final Path projectRoot,
             final String gav,
             final Consumer<String> progress,
             final Consumer<String> onFinished,
             final ChatSettings settings) {
-        if (!enabled()) {
-            return List.of("maven repository knowledge is disabled");
+        return acknowledgement(refreshJob(projectRoot, gav, progress, onFinished, settings));
+    }
+
+    /**
+     * Refreshes project dependencies, or force-regenerates one explicit GAV. Returns the exact operation,
+     * not a subsequent status lookup. Disabled/empty operations return an already completed handle.
+     * Progress and the optional success-only callback run on indexing threads; use {@link IndexRun#completion()}
+     * to observe failure/cancellation and to keep a requesting frontend alive until cleanup.
+     * Dependency discovery is performed before submission, as in {@link #refresh}.
+     */
+    public IndexRun refreshJob(
+            final Path projectRoot,
+            final String gav,
+            final Consumer<String> progress,
+            final Consumer<String> onFinished,
+            final ChatSettings settings) {
+        final var root = projectRoot(projectRoot);
+        if (!enabled(root)) {
+            return new IndexRun(root, 0, settings, List.of("maven repository knowledge is disabled"));
         }
-        final var config = knowledgeConfig();
+        final var operationLlm = operationLlm(root, settings);
         final List<String> targets;
         final boolean force;
         if (gav == null || gav.isBlank()) {
-            targets = projectDependencies().stream().map(Gav::coordinate).toList();
+            targets = projectDependencies(operationLlm).stream()
+                    .map(Gav::coordinate)
+                    .toList();
             force = false;
         } else {
             targets = List.of(Gav.parse(gav.strip()).coordinate());
             force = true;
         }
-        return startIndex(targets, force, progress, onFinished, settings);
+        return doStartIndex(root, operationLlm, targets, force, progress, onFinished, settings);
     }
 
-    /**
-     * Start an asynchronous index of the given GAV coordinates. The task runs on the shared executor; the
-     * returned push-back is populated immediately.
-     *
-     * @param gavs        coordinates to index (already validated).
-     * @param force       whether to bypass the immutable-skip rule.
-     * @param progress    optional per-batch progress consumer, receiving lines like {@code ~NN% (done/total)}.
-     * @param onFinished  optional consumer run on the executor thread once indexing completes, with the
-     *                    final "indexed X, skipped Y" summary (may be null).
-     * @return an acknowledgement of the starting run (one line).
-     */
+    /** Starts {@link #startIndexJob} and returns only its acknowledgement for detached frontends. */
     public List<String> startIndex(
-            final List<String> gavs,
-            final boolean force,
-            final Consumer<String> progress,
-            final Consumer<String> onFinished) {
-        return startIndex(gavs, force, progress, onFinished, null);
-    }
-
-    /**
-     * {@link #startIndex(List, boolean, Consumer, Consumer)} with the requesting session's provider/model
-     * selection. The settings are bound around the whole asynchronous run and cleared when it completes.
-     */
-    public List<String> startIndex(
+            final Path projectRoot,
             final List<String> gavs,
             final boolean force,
             final Consumer<String> progress,
             final Consumer<String> onFinished,
             final ChatSettings settings) {
-        if (!enabled()) {
-            return List.of("maven repository knowledge is disabled");
-        }
-        if (gavs == null || gavs.isEmpty()) {
-            return List.of("nothing to index");
-        }
-        bindLlmSettings(settings);
-        try {
-            return doStartIndex(gavs, force, progress, onFinished);
-        } catch (final RuntimeException e) {
-            bindLlmSettings(null);
-            throw e;
-        }
+        return acknowledgement(startIndexJob(projectRoot, gavs, force, progress, onFinished, settings));
     }
 
-    private List<String> doStartIndex(
+    /**
+     * Starts an asynchronous index with immutable operation-local root/settings. Admission rejects another
+     * active run for the same root. Submission failures settle the returned handle exceptionally rather than
+     * losing the operation. Invalid coordinates are skipped, as for {@link #startIndex}.
+     * Neither this operation nor its cancellation closes the shared executor or HTTP client.
+     */
+    public IndexRun startIndexJob(
+            final Path projectRoot,
             final List<String> gavs,
             final boolean force,
             final Consumer<String> progress,
-            final Consumer<String> onFinished) {
-        if (!enabled()) {
-            return List.of("maven repository knowledge is disabled");
+            final Consumer<String> onFinished,
+            final ChatSettings settings) {
+        final var root = projectRoot(projectRoot);
+        return doStartIndex(root, operationLlm(root, settings), gavs, force, progress, onFinished, settings);
+    }
+
+    private List<String> acknowledgement(final IndexRun run) {
+        // Preserve immediate failure reporting (notably executor rejection) for detached callers.
+        if (run.completion.isCompletedExceptionally()) {
+            try {
+                run.completion.join();
+            } catch (final CompletionException e) {
+                if (e.getCause() instanceof RuntimeException runtime) {
+                    throw runtime;
+                }
+                if (e.getCause() instanceof Error error) {
+                    throw error;
+                }
+                throw e;
+            }
+        }
+        return run.messages();
+    }
+
+    private IndexRun doStartIndex(
+            final Path root,
+            final KnowledgeLlm operationLlm,
+            final List<String> gavs,
+            final boolean force,
+            final Consumer<String> progress,
+            final Consumer<String> onFinished,
+            final ChatSettings settings) {
+        if (!enabled(root)) {
+            return new IndexRun(root, 0, settings, List.of("maven repository knowledge is disabled"));
         }
         if (gavs == null || gavs.isEmpty()) {
-            return List.of("nothing to index");
+            return new IndexRun(root, 0, settings, List.of("nothing to index"));
         }
-        final var config = knowledgeConfig(force);
+        final var config = knowledgeConfig(force, operationLlm);
         final var effective = new KnowledgeConfig(
                 config.localRepository(),
                 config.concurrency(),
@@ -534,6 +568,9 @@ public class MavenRepositoryKnowledgeService {
                 config.runContentBudget());
         final List<Gav> parsed = new ArrayList<>();
         for (final var raw : gavs) {
+            if (raw == null || raw.isBlank()) {
+                continue;
+            }
             try {
                 parsed.add(Gav.parse(raw.strip()));
             } catch (final IllegalArgumentException ignored) {
@@ -541,48 +578,78 @@ public class MavenRepositoryKnowledgeService {
             }
         }
         if (parsed.isEmpty()) {
-            return List.of("no valid GAVs to index");
+            return new IndexRun(root, 0, settings, List.of("no valid GAVs to index"));
         }
         final var total = parsed.size();
-        final var run = new IndexRun(total);
-        runningIndex.set(run);
-        executor.execute(() -> {
-            final var indexer = newIndexer(effective, fingerprints(parsed));
-            try {
-                final var results = indexer.index(parsed, result -> run.done(), batch -> fireProgress(run, progress));
-                fireProgress(run, progress); // final ~100% (done/total) line once every artifact is processed
-                final var summary = summarize(results);
-                run.summary(summary);
-                lastSummary = summary;
-                if (onFinished != null) {
-                    onFinished.accept(summary);
+        final var run = new IndexRun(
+                root,
+                total,
+                settings,
+                List.of("started indexing " + total + " artifact(s)", "starting to index " + coordsPreview(parsed)));
+        run.cleanup = () -> finishIndex(run);
+        synchronized (activeIndexes) {
+            for (final var active : activeIndexes) {
+                if (Objects.equals(root, active.root)) {
+                    throw new IllegalStateException("index already in progress for " + root);
                 }
-            } finally {
-                run.complete();
-                indexer.close();
-                runningIndex.compareAndSet(run, null);
-                bindLlmSettings(null);
             }
-        });
-        return List.of("started indexing " + total + " artifact(s)", "starting to index " + coordsPreview(parsed));
+            activeIndexes.add(run);
+        }
+        run.start(
+                executor,
+                () -> {
+                    run.checkCancelled();
+                    final var indexer = newIndexer(effective, fingerprints(root, parsed), operationLlm);
+                    try {
+                        run.attachIndexer(indexer);
+                        run.checkCancelled();
+                        final var results = indexer.index(
+                                parsed, result -> run.recordResult(), batch -> fireProgress(run, progress));
+                        fireProgress(run, progress);
+                        return summarize(results);
+                    } finally {
+                        run.drainIndexer(indexer);
+                    }
+                },
+                onFinished);
+        return run;
+    }
+
+    private void finishIndex(final IndexRun run) {
+        synchronized (activeIndexes) {
+            activeIndexes.remove(run);
+            if (run.summary() != null) {
+                lastCompletedIndex = run;
+            }
+        }
     }
 
     /**
      * Report the current index state: whether a run is in progress with its progress, the last completed
      * run summary (when any), and how many per-artifact skills are loaded for the session.
      */
-    public List<String> status() {
-        final var run = currentIndex();
+    /** Reports this project's active run or the single last completed summary when it belongs to this project. */
+    public List<String> status(final Path root) {
+        return indexStatus(projectRoot(root));
+    }
+
+    private List<String> indexStatus(final Path root) {
+        final var run = currentIndex(root);
+        final var completed = lastCompletedIndex;
         final var list = new ArrayList<String>();
         if (run.inFlight()) {
             final var pct = run.total() > 0 ? (int) (100.0 * run.doneCount() / run.total()) : 0;
             list.add("index in progress: ~" + pct + "% (" + run.doneCount() + "/" + run.total() + ")");
-        } else if (lastSummary != null && !lastSummary.isBlank()) {
-            list.add("index idle (last run): " + lastSummary.lines().findFirst().orElse(""));
+        } else if (completed != null
+                && root.equals(completed.root)
+                && completed.summary() != null
+                && !completed.summary().isBlank()) {
+            list.add("index idle (last run): "
+                    + completed.summary().lines().findFirst().orElse(""));
         } else {
             list.add("no index has run");
         }
-        list.add("session skills loaded: " + sessionSkillBlocks().size());
+        list.add("session skills loaded: " + sessionSkillBlocks(root).size());
         return list;
     }
 
@@ -595,8 +662,9 @@ public class MavenRepositoryKnowledgeService {
      * @param symbol the fully-qualified symbol (or unique simple name) to find.
      * @param artifactHint optional {@code group:artifact} (or artifact) hint to narrow the scan; may be null/blank.
      */
-    public String codeGraphProvider(final String symbol, final String artifactHint) {
-        if (!enabled()
+    public String codeGraphProvider(final Path projectRoot, final String symbol, final String artifactHint) {
+        final var root = projectRoot(projectRoot);
+        if (!enabled(root)
                 || configuration == null
                 || configuration.mavenRepositoryKnowledge() == null
                 || !configuration.mavenRepositoryKnowledge().codegraphIndexEnabled()) {
@@ -609,7 +677,7 @@ public class MavenRepositoryKnowledgeService {
         final var config = knowledgeConfig();
         final var repo = new LocalRepository(config.localRepository());
         final var writer = new KnowledgeWriter(config.localRepository());
-        for (final var gav : projectDependencies()) {
+        for (final var gav : projectDependencies(operationLlm(root, null))) {
             if (artifactHint != null
                     && !artifactHint.isBlank()
                     && !gav.coordinate().contains(artifactHint)) {
@@ -640,8 +708,8 @@ public class MavenRepositoryKnowledgeService {
      * mounted at session start can be dereferenced without re-indexing. Returns a human-readable message when
      * the coordinate is unknown, not indexed or the file is missing.
      */
-    public String knowledge(final String coordinate, final String shortName) {
-        if (!enabled()) {
+    public String knowledge(final Path projectRoot, final String coordinate, final String shortName) {
+        if (!enabled(projectRoot(projectRoot))) {
             return "maven repository knowledge is disabled";
         }
         final var config = knowledgeConfig();
@@ -689,21 +757,35 @@ public class MavenRepositoryKnowledgeService {
         return sb.toString();
     }
 
-    /**
-     * @return the currently running index (never {@code null}); {@link IndexRun#inFlight()} tells whether
-     *         an index is still in progress, so callers can ask before sending a prompt.
-     */
-    public IndexRun currentIndex() {
-        final var run = runningIndex.get();
-        return run == null ? new IndexRun(0) : run;
+    /** Returns the active run for this root or a completed idle handle, without per-project retained history. */
+    public IndexRun currentIndex(final Path projectRoot) {
+        final var root = projectRoot(projectRoot);
+        synchronized (activeIndexes) {
+            for (final var run : activeIndexes) {
+                if (Objects.equals(root, run.root)) {
+                    return run;
+                }
+            }
+            return new IndexRun(root, 0, null, List.of());
+        }
     }
 
     private void fireProgress(final IndexRun run, final Consumer<String> progress) {
-        if (progress == null || run.total() <= 0) {
-            return;
+        final String message;
+        run.lifecycle.lock();
+        try {
+            run.checkCancelled();
+            if (progress == null || run.total() <= 0) {
+                return;
+            }
+            final var pct = (int) (100.0 * run.doneCount() / run.total());
+            // Admit delivery against cancel(), but never hold the lock while user code runs.
+            message = "~" + pct + "% (" + run.doneCount() + "/" + run.total() + ")";
+        } finally {
+            run.lifecycle.unlock();
         }
-        final var pct = (int) (100.0 * run.doneCount() / run.total());
-        progress.accept("~" + pct + "% (" + run.doneCount() + "/" + run.total() + ")");
+        progress.accept(message);
+        run.checkCancelled();
     }
 
     private static String summarize(final IndexResult.Results results) {
@@ -729,13 +811,16 @@ public class MavenRepositoryKnowledgeService {
         return sb.toString().stripTrailing();
     }
 
-    private Indexer newIndexer(final KnowledgeConfig config, final Map<Gav, String> expectedFingerprints) {
+    private Indexer newIndexer(
+            final KnowledgeConfig config,
+            final Map<Gav, String> expectedFingerprints,
+            final KnowledgeLlm operationLlm) {
         final var writer = new KnowledgeWriter(config.localRepository());
         return new Indexer(
                 new ContentAcquirer(new LocalRepository(config.localRepository()), webFetch(), config),
                 writer,
                 new KnowledgeFactory(writer),
-                llm,
+                operationLlm,
                 config,
                 expectedFingerprints);
     }
@@ -744,15 +829,14 @@ public class MavenRepositoryKnowledgeService {
      * @return per-GAV expected build-declaration fingerprints, so a pom/gradle change re-indexes only the
      *         dependencies whose declaring build files changed (unchanged, already-indexed ones are skipped).
      */
-    private Map<Gav, String> fingerprints(final List<Gav> gavs) {
-        return ProjectFingerprint.of(gavs, projectBuildFiles());
+    private Map<Gav, String> fingerprints(final Path root, final List<Gav> gavs) {
+        return ProjectFingerprint.of(gavs, projectBuildFiles(root));
     }
 
     /**
      * @return the project's Maven/Gradle build files (present in the project dir) that feed the fingerprints.
      */
-    private List<Path> projectBuildFiles() {
-        final var dir = configuration.resolveProjectDir();
+    private List<Path> projectBuildFiles(final Path dir) {
         final var out = new ArrayList<Path>();
         try (final var stream = Files.walk(dir)) {
             stream.filter(Files::isRegularFile)
@@ -804,6 +888,10 @@ public class MavenRepositoryKnowledgeService {
     }
 
     private KnowledgeConfig knowledgeConfig(final boolean force) {
+        return knowledgeConfig(force, llm);
+    }
+
+    private KnowledgeConfig knowledgeConfig(final boolean force, final KnowledgeLlm operationLlm) {
         final var cfg = configuration.mavenRepositoryKnowledge();
         return new KnowledgeConfig(
                 resolveLocalRepository(cfg.localRepository()),
@@ -813,7 +901,7 @@ public class MavenRepositoryKnowledgeService {
                 force,
                 KnowledgeConfig.BoundedFetch.of(60, 30_000L, 200_000),
                 cfg.maxBatchChars(),
-                llm == null ? null : llm.tokenBudget(),
+                operationLlm == null ? null : operationLlm.tokenBudget(),
                 cfg.maxContentBytes(),
                 cfg.runContentBudget(),
                 cfg.useLlm(),
@@ -833,38 +921,273 @@ public class MavenRepositoryKnowledgeService {
     }
 
     /**
-     * Handle on an asynchronous indexing run, so callers (CLI/TUI gating) can ask whether it is still in
-     * flight and how far it has progressed.
+     * One indexing operation. Completion is read-only and settles after the submitted worker's finally/close
+     * path and admission cleanup, not when interruption is requested. In particular, an interruption-ignoring
+     * worker, including library-internal work, stays in flight and keeps same-root admission until actual
+     * owned-executor termination. Cancellation requests shutdown; only the orchestrator performs the drain.
+     * Frontends should cancel(), then await completion with a bounded close deadline, without closing shared
+     * application executors or HTTP resources and without interpreting a timeout as successful termination.
      */
     public static final class IndexRun {
+        private final Path root;
+        private final ChatSettings settings;
+        private final List<String> messages;
         private final int total;
         private final AtomicInteger done = new AtomicInteger();
-        private final AtomicBoolean finished = new AtomicBoolean();
         private final CountDownLatch completed = new CountDownLatch(1);
+        private final CompletableFuture<String> completion = new CompletableFuture<>();
+        private final CompletionStage<String> completionView = completion.minimalCompletionStage();
+        private final ReentrantLock lifecycle = new ReentrantLock();
+        private volatile boolean finished;
+        private volatile boolean cancellationRequested;
         private volatile String summary;
+        // Protected by lifecycle; released at terminal cleanup, including before-start cancellation/rejection.
+        private FutureTask<Void> task;
+        private ThreadPoolExecutor queueOwner;
+        private Indexer indexer;
+        private boolean indexerCloseRequested;
+        private Runnable cleanup;
+        private boolean started;
+        private boolean deliveringSuccess;
+        private boolean settling;
 
-        IndexRun(final int total) {
+        private IndexRun(final Path root, final int total, final ChatSettings settings, final List<String> messages) {
+            this.root = root;
             this.total = total;
+            this.settings = settings;
+            this.messages = List.copyOf(messages);
+            if (total == 0) {
+                finished = true;
+                completed.countDown();
+                completion.complete(String.join("\n", messages));
+            }
         }
 
-        void done() {
-            done.incrementAndGet();
+        private void start(
+                final ExecutorService executor, final Supplier<String> work, final Consumer<String> onFinished) {
+            final FutureTask<Void> submitted;
+            lifecycle.lock();
+            try {
+                if (finished || cancellationRequested || settling) {
+                    return;
+                }
+                submitted = new FutureTask<>(() -> {
+                    execute(work, onFinished);
+                    return null;
+                });
+                task = submitted;
+                queueOwner = executor instanceof ThreadPoolExecutor pool ? pool : null;
+            } finally {
+                lifecycle.unlock();
+            }
+            try {
+                executor.execute(submitted);
+                // Cancellation can race submission. Generic ExecutorService queues cannot be removed from;
+                // their cancelled FutureTask is inert and no longer retains its work/callback callable.
+                if (submitted.isCancelled() && executor instanceof ThreadPoolExecutor pool) {
+                    pool.remove(submitted);
+                }
+            } catch (final RuntimeException | Error failure) {
+                lifecycle.lock();
+                try {
+                    if (started || finished || settling) {
+                        return;
+                    }
+                    started = true; // claim the never-started task before releasing the lock
+                    submitted.cancel(false);
+                } finally {
+                    lifecycle.unlock();
+                }
+                finish(null, failure);
+            }
         }
 
-        void summary(final String summary) {
-            this.summary = summary;
+        private void execute(final Supplier<String> work, final Consumer<String> onFinished) {
+            lifecycle.lock();
+            try {
+                if (started || finished || cancellationRequested || settling) {
+                    return;
+                }
+                started = true;
+            } finally {
+                lifecycle.unlock();
+            }
+            try {
+                final var result = work.get();
+                lifecycle.lock();
+                try {
+                    checkCancelled();
+                    // Linearize success delivery against cancel(), without holding a lock during user code.
+                    deliveringSuccess = true;
+                } finally {
+                    lifecycle.unlock();
+                }
+                if (onFinished != null) {
+                    onFinished.accept(result);
+                }
+                finish(result, null);
+            } catch (final RuntimeException | Error failure) {
+                finish(null, failure);
+            }
         }
 
-        void complete() {
-            finished.set(true);
-            completed.countDown();
+        private void checkCancelled() {
+            if (cancellationRequested) {
+                throw new CancellationException("index cancelled for " + root);
+            }
+        }
+
+        private void attachIndexer(final Indexer owned) {
+            lifecycle.lock();
+            try {
+                indexer = owned;
+                if (cancellationRequested) {
+                    closeIndexer();
+                }
+            } finally {
+                lifecycle.unlock();
+            }
+        }
+
+        // Called with lifecycle held. Indexer.close is nonblocking, even on an internal worker.
+        private void closeIndexer() {
+            if (indexer != null && !indexerCloseRequested) {
+                indexerCloseRequested = true;
+                indexer.close();
+            }
+        }
+
+        private void drainIndexer(final Indexer owned) {
+            lifecycle.lock();
+            try {
+                closeIndexer();
+            } finally {
+                lifecycle.unlock();
+            }
+            try {
+                awaitIndexer(owned);
+            } finally {
+                lifecycle.lock();
+                try {
+                    indexer = null;
+                } finally {
+                    lifecycle.unlock();
+                }
+            }
+        }
+
+        private void recordResult() {
+            lifecycle.lock();
+            try {
+                checkCancelled();
+                done.incrementAndGet();
+            } finally {
+                lifecycle.unlock();
+            }
+        }
+
+        private void finish(final String result, final Throwable failure) {
+            final Runnable release;
+            Throwable terminal = failure;
+            lifecycle.lock();
+            try {
+                if (finished || settling) {
+                    return;
+                }
+                settling = true;
+                if (cancellationRequested) {
+                    terminal = new CancellationException("index cancelled for " + root);
+                    if (failure != null && !(failure instanceof CancellationException)) {
+                        terminal.addSuppressed(failure);
+                    }
+                }
+                summary = terminal == null ? result : null;
+                task = null;
+                queueOwner = null;
+                release = cleanup;
+                cleanup = null;
+            } finally {
+                lifecycle.unlock();
+            }
+            try {
+                if (release != null) {
+                    release.run();
+                }
+            } catch (final RuntimeException | Error cleanupFailure) {
+                if (terminal == null) {
+                    terminal = cleanupFailure;
+                } else {
+                    terminal.addSuppressed(cleanupFailure);
+                }
+            } finally {
+                finished = true;
+                completed.countDown();
+                if (terminal == null) {
+                    completion.complete(result);
+                } else {
+                    completion.completeExceptionally(terminal);
+                }
+            }
+        }
+
+        /** Immutable workdir captured at admission; never inferred from a mutable session or global state. */
+        public Path root() {
+            return root;
+        }
+
+        /** Immutable requested model selection; null means process-default selection. */
+        public ChatSettings settings() {
+            return settings;
+        }
+
+        /** Immutable immediate acknowledgement, not a terminal success result. */
+        public List<String> messages() {
+            return messages;
+        }
+
+        /** Final summary, or exceptional completion for failure/cancellation, after worker cleanup. */
+        public CompletionStage<String> completion() {
+            return completionView;
         }
 
         /**
-         * Blocks until the run completed or the wait timed out, without any polling.
-         *
-         * @return {@code true} when the run is no longer in flight (completed, or nothing to index).
+         * Requests interruption of the actual submitted task. Before-start cancellation prevents its work
+         * from ever running and completes immediately; a running task remains admitted until its finally
+         * path has drained the owned indexer. Returns false if cancellation was already requested,
+         * cleanup started, or success delivery was committed (including while the success callback runs).
+         * No success callback starts
+         * after an accepted cancellation. Cancelling a copy of completion() is not operation cancellation.
          */
+        public boolean cancel() {
+            final boolean queued;
+            lifecycle.lock();
+            try {
+                if (finished || settling || deliveringSuccess || cancellationRequested) {
+                    return false;
+                }
+                cancellationRequested = true;
+                queued = !started;
+                closeIndexer();
+                if (task != null) {
+                    task.cancel(true);
+                    if (queueOwner != null) {
+                        queueOwner.remove(task);
+                    }
+                }
+            } finally {
+                lifecycle.unlock();
+            }
+            if (queued) {
+                finish(null, null);
+            }
+            return true;
+        }
+
+        public boolean cancellationRequested() {
+            return cancellationRequested;
+        }
+
+        /** Waits for real worker cleanup, not just a cancellation request. False does not mean stopped. */
         public boolean awaitCompletion(final long timeout, final TimeUnit unit) throws InterruptedException {
             if (!inFlight()) {
                 return true;
@@ -872,9 +1195,8 @@ public class MavenRepositoryKnowledgeService {
             return completed.await(timeout, unit);
         }
 
-        /** {@code true} while the indexing run is still in progress (nothing to index is never in-flight). */
         public boolean inFlight() {
-            return !finished.get() && total > 0;
+            return !finished;
         }
 
         public int doneCount() {
@@ -885,7 +1207,7 @@ public class MavenRepositoryKnowledgeService {
             return total;
         }
 
-        /** Final "indexed X, skipped Y" summary, {@code null} until the run completed. */
+        /** Final successful summary, null for an unfinished, failed or cancelled operation. */
         public String summary() {
             return summary;
         }

@@ -55,6 +55,7 @@ import java.util.regex.Pattern;
  * (sampled during processes), not an OS quota. Each operation has a single wall-clock deadline.
  */
 public final class TrustedGitStore implements AutoCloseable {
+    private static final Pattern HEADER_LINES = Pattern.compile("\r\n");
     private static final Pattern CONFIG_KEY = Pattern.compile("[a-z][a-z0-9-]*");
 
     private static final Pattern REPOSITORY =
@@ -569,7 +570,7 @@ public final class TrustedGitStore implements AutoCloseable {
         int status = 200;
         boolean hasStatus = false;
         final var headers = new LinkedHashMap<String, String>();
-        for (final var line : response.split("\r\n")) {
+        for (final var line : HEADER_LINES.split(response)) {
             final int colon = line.indexOf(':');
             if (colon < 1) {
                 throw new IOException("Malformed Git CGI header");

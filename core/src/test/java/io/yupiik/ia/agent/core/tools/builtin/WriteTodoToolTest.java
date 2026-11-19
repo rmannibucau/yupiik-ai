@@ -21,6 +21,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.configuration.AgentMode;
+import io.yupiik.ia.agent.core.configuration.TestConfigs;
 import io.yupiik.ia.agent.core.permissions.PermissionService;
 import io.yupiik.ia.agent.core.runtime.Cancellations;
 import io.yupiik.ia.agent.core.todo.TodoItem;
@@ -38,6 +39,9 @@ import org.junit.jupiter.api.io.TempDir;
 @ExtendWith(TestJsonMapper.class)
 class WriteTodoToolTest {
     @TempDir
+    private static Path testWorkdir;
+
+    @TempDir
     Path storageHome;
 
     private JsonMapper mapper;
@@ -48,22 +52,33 @@ class WriteTodoToolTest {
     }
 
     private TodoStore todoStore() {
-        return new TodoStore(
-                io.yupiik.ia.agent.core.configuration.TestConfigs.codingAgent(
-                        Map.of("yca.storageHome", storageHome.toString())),
-                mapper);
+        return new TodoStore(TestConfigs.codingAgent(Map.of("yca.storageHome", storageHome.toString())), mapper);
     }
 
     private PermissionService permissions(final AgentMode mode) {
-        final var service = new PermissionService(io.yupiik.ia.agent.core.configuration.TestConfigs.codingAgent(
-                Map.of("yca.storageHome", storageHome.toString())));
+        final var service = new PermissionService(
+                TestConfigs.codingAgent(Map.of("yca.storageHome", storageHome.toString())),
+                (TestConfigs.codingAgent(Map.of("yca.storageHome", storageHome.toString()))).resolveWorkingDir());
         service.setMode(mode);
         return service;
     }
 
     /** The tool is stateless: the session's todo list and permissions arrive through the context. */
     private ToolContext context(final TodoStore todos, final PermissionService permissions) {
-        return new ToolContext("s1", null, null, permissions, null, todos, null, null, null, Cancellations.NEVER);
+        return new ToolContext(
+                "s1",
+                null,
+                null,
+                permissions,
+                null,
+                todos,
+                null,
+                null,
+                null,
+                Cancellations.NEVER,
+                null,
+                null,
+                testWorkdir);
     }
 
     @Test
@@ -241,7 +256,7 @@ class WriteTodoToolTest {
     @Test
     void descriptionCarriesPlanModeRuleAndParallelBuildStatuses() {
         final var tool = new WriteTodoTool();
-        final var description = tool.description();
+        final var description = tool.description(storageHome);
         assertTrue(
                 description.contains("In PLAN mode"),
                 "the description must carry the plan-mode contract (plan is the default mode): " + description);
@@ -278,7 +293,9 @@ class WriteTodoToolTest {
     @Test
     void withoutSessionContextTheToolFailsCleanly() {
         final var tool = new WriteTodoTool();
-        final var result = tool.execute(Map.of("todos", List.of(Map.of("content", "step 1", "status", "pending"))));
+        final var result = tool.execute(
+                Map.of("todos", List.of(Map.of("content", "step 1", "status", "pending"))),
+                ToolContext.empty(storageHome));
         assertFalse(result.success(), result.output());
         assertTrue(result.output().contains("session"), result.output());
     }

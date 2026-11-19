@@ -53,11 +53,24 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.logging.Handler;
 import java.util.logging.LogRecord;
 import java.util.logging.Logger;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 class PollerTest {
+    private static final Pattern ISSUE_PATH = Pattern.compile(".*/issues/[0-9]+$");
+    private static final Pattern DISCOVERY_SUCCESS = Pattern.compile(
+            "GitHub poll phase=discovery outcome=success durationMillis=\\d+ requests=0 httpMillis=\\d+ pacingMillis=\\d+");
+    private static final Pattern MENTIONS_SUCCESS = Pattern.compile(
+            "GitHub poll phase=mentions outcome=success durationMillis=\\d+ requests=3 httpMillis=\\d+ pacingMillis=\\d+");
+    private static final Pattern REVIEWS_SUCCESS = Pattern.compile(
+            "GitHub poll phase=reviews-and-discussions outcome=success durationMillis=\\d+ requests=1 httpMillis=\\d+ pacingMillis=\\d+");
+    private static final Pattern TOTAL_SUCCESS = Pattern.compile(
+            "GitHub poll phase=total outcome=success durationMillis=\\d+ requests=4 httpMillis=\\d+ pacingMillis=\\d+");
+    private static final Pattern TOTAL_FAILURE = Pattern.compile(
+            "GitHub poll phase=total outcome=failure durationMillis=\\d+ requests=1 httpMillis=\\d+ pacingMillis=\\d+");
+
     @TempDir
     Path home;
 
@@ -207,7 +220,7 @@ class PollerTest {
                                 "/repos/owner/repo/issues/14",
                                 "/repos/owner/repo/issues/17"),
                         requests.stream()
-                                .filter(path -> path.matches(".*/issues/[0-9]+$"))
+                                .filter(path -> ISSUE_PATH.matcher(path).matches())
                                 .collect(toSet()));
                 assertEquals(0, poller.poll(options));
             }
@@ -799,26 +812,14 @@ class PollerTest {
                     assertEquals(4, github.statistics().requests());
                 }
                 assertEquals(4, messages.size());
-                assertTrue(
-                        messages.stream()
-                                .anyMatch(
-                                        message -> message.matches(
-                                                "GitHub poll phase=discovery outcome=success durationMillis=\\d+ requests=0 httpMillis=\\d+ pacingMillis=\\d+")));
-                assertTrue(
-                        messages.stream()
-                                .anyMatch(
-                                        message -> message.matches(
-                                                "GitHub poll phase=mentions outcome=success durationMillis=\\d+ requests=3 httpMillis=\\d+ pacingMillis=\\d+")));
-                assertTrue(
-                        messages.stream()
-                                .anyMatch(
-                                        message -> message.matches(
-                                                "GitHub poll phase=reviews-and-discussions outcome=success durationMillis=\\d+ requests=1 httpMillis=\\d+ pacingMillis=\\d+")));
-                assertTrue(
-                        messages.stream()
-                                .anyMatch(
-                                        message -> message.matches(
-                                                "GitHub poll phase=total outcome=success durationMillis=\\d+ requests=4 httpMillis=\\d+ pacingMillis=\\d+")));
+                assertTrue(messages.stream()
+                        .anyMatch(message -> DISCOVERY_SUCCESS.matcher(message).matches()));
+                assertTrue(messages.stream()
+                        .anyMatch(message -> MENTIONS_SUCCESS.matcher(message).matches()));
+                assertTrue(messages.stream()
+                        .anyMatch(message -> REVIEWS_SUCCESS.matcher(message).matches()));
+                assertTrue(messages.stream()
+                        .anyMatch(message -> TOTAL_SUCCESS.matcher(message).matches()));
             }
             messages.clear();
             fail.set(true);
@@ -832,11 +833,8 @@ class PollerTest {
                 assertEquals(1, github.statistics().requests());
             }
             assertEquals(3, messages.size());
-            assertTrue(
-                    messages.stream()
-                            .anyMatch(
-                                    message -> message.matches(
-                                            "GitHub poll phase=total outcome=failure durationMillis=\\d+ requests=1 httpMillis=\\d+ pacingMillis=\\d+")));
+            assertTrue(messages.stream()
+                    .anyMatch(message -> TOTAL_FAILURE.matcher(message).matches()));
             assertTrue(messages.stream()
                     .noneMatch(message -> message.contains("private-token") || message.contains("since=")));
         } finally {

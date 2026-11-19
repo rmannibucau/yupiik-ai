@@ -20,30 +20,13 @@ import io.yupiik.fusion.json.JsonMapper;
 import java.io.IOException;
 import java.net.URI;
 import java.net.http.HttpRequest;
-import java.net.http.HttpResponse;
-import java.time.Duration;
-import java.time.Instant;
-import java.time.format.DateTimeFormatter;
-import java.util.ArrayList;
-import java.util.LinkedHashMap;
+import java.nio.charset.StandardCharsets;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
-import java.util.Optional;
-import java.util.concurrent.atomic.AtomicLong;
 
-class HttpMcpClient implements McpClient {
-    private final String name;
-    private final String url;
-    private final String apiKey;
-    private final List<String> headers;
-    private final long timeoutSeconds;
-    private final JsonMapper mapper;
-    private final ExtendedHttpClient client;
-    private final AtomicLong ids = new AtomicLong();
-
-    private volatile String sessionId;
-    private volatile String protocolVersion;
-
+/** Streamable HTTP MCP, consuming SSE incrementally rather than buffering until EOF. */
+class HttpMcpClient extends RemoteMcpClient {
     HttpMcpClient(
             final String name,
             final String url,
@@ -52,228 +35,76 @@ class HttpMcpClient implements McpClient {
             final long timeoutSeconds,
             final JsonMapper mapper,
             final ExtendedHttpClient client) {
-        this.name = name;
-        this.url = url;
-        this.apiKey = apiKey;
-        this.headers = headers;
-        this.timeoutSeconds = timeoutSeconds;
-        this.mapper = mapper;
-        this.client = client;
+        super(name, url, apiKey, headers, timeoutSeconds, mapper, client);
     }
 
     @Override
-    public void initialize() throws IOException, InterruptedException {
-        IOException last = null;
-        for (final var candidate : SUPPORTED_PROTOCOL_VERSIONS) {
-            try {
-                final var res = request(
-                        "initialize",
-                        Map.of(
-                                "protocolVersion", candidate,
-                                "capabilities", Map.of(),
-                                "clientInfo", Map.of("name", "yca", "version", "1.0.0")));
-                if (res instanceof Map<?, ?> r
-                        && r.get("protocolVersion") instanceof String echoed
-                        && !echoed.isBlank()) {
-                    protocolVersion = echoed;
-                } else {
-                    protocolVersion = candidate;
-                }
-                request("notifications/initialized", null);
-                return;
-            } catch (final IOException e) {
-                last = e;
-            }
-        }
-        if (last != null) {
-            throw last;
-        }
-        throw new IOException("MCP " + name + ": empty initialize response");
+    protected URI postUri() {
+        return uri;
     }
 
     @Override
-    public List<McpServerTool> listTools() throws IOException, InterruptedException {
-        final var res = request("tools/list", Map.of());
-        final var out = new ArrayList<McpServerTool>();
-        if (res instanceof Map<?, ?> m && m.get("tools") instanceof List<?> tools) {
-            for (final var t : tools) {
-                if (t instanceof Map<?, ?> tool) {
-                    out.add(new McpServerTool(
-                            String.valueOf(tool.get("name")),
-                            tool.get("description") == null ? "" : String.valueOf(tool.get("description")),
-                            tool.get("inputSchema") instanceof Map<?, ?> s ? castMap(s) : Map.of()));
-                }
-            }
-        }
-        return out;
-    }
-
-    @Override
-    public String callTool(final String toolName, final Map<String, Object> arguments)
+    protected Object exchange(
+            final Operation op, final Map<String, Object> message, final Long id, final boolean initialize)
             throws IOException, InterruptedException {
-        final var res = request("tools/call", Map.of("name", toolName, "arguments", arguments));
-        if (res instanceof Map<?, ?> m) {
-            if (Boolean.parseBoolean(String.valueOf(m.get("isError")))) {
-                throw new IOException("MCP tool " + toolName + " failed: " + m.get("content"));
+        final var response = send(
+                op,
+                builder(uri, op)
+                        .header("content-type", "application/json")
+                        .POST(HttpRequest.BodyPublishers.ofByteArray(mapper.toBytes(message)))
+                        .build());
+        try {
+            if (initialize) {
+                op.check();
+                final var session = response.headers().firstValue("mcp-session-id");
+                if (session.isPresent()) {
+                    final var value = session.orElseThrow();
+                    if (value.isEmpty() || value.chars().anyMatch(c -> c < 0x21 || c > 0x7e)) {
+                        throw new IOException("MCP " + name + ": invalid session ID");
+                    }
+                    sessionId = value;
+                }
             }
-            final var sb = new StringBuilder();
-            if (m.get("content") instanceof List<?> content) {
-                for (final var c : content) {
-                    if (c instanceof Map<?, ?> cm && "text".equals(String.valueOf(cm.get("type")))) {
-                        if (sb.length() > 0) {
-                            sb.append('\n');
+            if (id == null) {
+                return null;
+            }
+            final var contentType = response.headers()
+                    .firstValue("content-type")
+                    .orElse("")
+                    .split(";", 2)[0]
+                    .strip()
+                    .toLowerCase(Locale.ROOT);
+            if ("text/event-stream".equals(contentType)) {
+                final var reader = new McpSseReader(response.body());
+                McpSseReader.Event event;
+                while ((event = reader.next()) != null) {
+                    op.check();
+                    if (!"message".equals(event.type())) {
+                        continue;
+                    }
+                    final var incoming = decode(event.data());
+                    if (!serverMessage(op, incoming)) {
+                        // This POST stream belongs to this request, not to other concurrent POSTs.
+                        if (sameId(incoming.get("id"), id)) {
+                            return result(incoming, id);
                         }
-                        sb.append(cm.get("text"));
+                        throw new IOException("MCP " + name + ": unexpected JSON-RPC response ID");
                     }
                 }
+                throw new IOException("MCP " + name + ": SSE stream ended before response");
             }
-            return sb.toString();
-        }
-        return String.valueOf(res);
-    }
-
-    private Object request(final String method, final Map<String, Object> params)
-            throws IOException, InterruptedException {
-        final var notification = method.startsWith("notifications/");
-        final var message = new LinkedHashMap<String, Object>();
-        message.put("jsonrpc", "2.0");
-        if (!notification) {
-            message.put("id", ids.incrementAndGet());
-        }
-        message.put("method", method);
-        if (params != null) {
-            message.put("params", params);
-        }
-        final var builder = HttpRequest.newBuilder()
-                .uri(URI.create(url))
-                .header("content-type", "application/json")
-                .header("accept", "application/json, text/event-stream");
-        if (timeoutSeconds > 0) {
-            builder.timeout(Duration.ofSeconds(timeoutSeconds));
-        }
-        if (apiKey != null && !apiKey.isBlank()) {
-            builder.header("authorization", "Bearer " + apiKey);
-        }
-        if (sessionId != null) {
-            builder.header("mcp-session-id", sessionId);
-        }
-        for (final var kv : headers == null ? List.<String>of() : headers) {
-            final var i = kv.indexOf('=');
-            if (i > 0) {
-                builder.header(kv.substring(0, i).strip(), kv.substring(i + 1).strip());
+            if (!"application/json".equals(contentType)) {
+                throw new IOException("MCP " + name + ": expected JSON or SSE response");
             }
+            return result(decode(new String(response.body().readAllBytes(), StandardCharsets.UTF_8)), id);
+        } finally {
+            op.release(response.body());
         }
-        builder.POST(HttpRequest.BodyPublishers.ofByteArray(mapper.toBytes(message)));
-        final HttpResponse<String> response;
-        try {
-            response = client.send(builder.build(), HttpResponse.BodyHandlers.ofString());
-        } catch (final InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new IOException(e);
-        }
-        response.headers().firstValue("mcp-session-id").ifPresent(s -> sessionId = s);
-        if (response.statusCode() == 202
-                || response.body() == null
-                || response.body().isBlank()) {
-            return null;
-        }
-        if (response.statusCode() >= 400) {
-            throw new McpHttpException(
-                    name,
-                    response.statusCode(),
-                    response.body(),
-                    retryAfterMillis(response.headers().firstValue("retry-after")));
-        }
-        final var contentType = response.headers().firstValue("content-type").orElse("");
-        final Object json;
-        if (contentType.contains("text/event-stream")) {
-            json = parseSse(response.body(), message.get("id") instanceof Number n ? n.longValue() : -1);
-        } else {
-            try {
-                json = mapper.fromString(Object.class, response.body());
-            } catch (final RuntimeException e) {
-                throw new IOException("MCP " + name + ": invalid JSON response: " + response.body());
-            }
-        }
-        if (json instanceof Map<?, ?> m) {
-            if (m.get("error") instanceof Map<?, ?> err) {
-                throw new IOException("MCP " + name + " " + method + " error: " + err.get("message"));
-            }
-            return m.get("result");
-        }
-        return null;
-    }
-
-    private Object parseSse(final String body, final long expectedId) throws IOException {
-        for (final var line : body.split("\n")) {
-            final var trimmed = line.strip();
-            if (!trimmed.startsWith("data:")) {
-                continue;
-            }
-            final var payload = trimmed.substring(5).strip();
-            if (payload.isEmpty() || "[DONE]".equals(payload)) {
-                continue;
-            }
-            final Object json;
-            try {
-                json = mapper.fromString(Object.class, payload);
-            } catch (final RuntimeException e) {
-                continue;
-            }
-            if (json instanceof Map<?, ?> m && m.get("id") != null && expectedId == numberOrMinusOne(m.get("id"))) {
-                if (m.get("error") instanceof Map<?, ?> err) {
-                    throw new IOException("MCP " + name + " error: " + err.get("message"));
-                }
-                return m;
-            }
-        }
-        return null;
-    }
-
-    private static Long retryAfterMillis(final Optional<String> retryAfter) {
-        if (retryAfter == null || retryAfter.isEmpty()) {
-            return null;
-        }
-        final var value = retryAfter.get().strip();
-        try {
-            return Math.max(0, Long.parseLong(value) * 1_000L);
-        } catch (final NumberFormatException e) {
-            // not delay-seconds: try HTTP-date forms
-            try {
-                return Math.max(0, Instant.parse(value).toEpochMilli() - System.currentTimeMillis());
-            } catch (final RuntimeException re) {
-                try {
-                    return Math.max(
-                            0,
-                            DateTimeFormatter.RFC_1123_DATE_TIME
-                                            .parse(value, Instant::from)
-                                            .toEpochMilli()
-                                    - System.currentTimeMillis());
-                } catch (final RuntimeException re2) {
-                    return null;
-                }
-            }
-        }
-    }
-
-    private static long numberOrMinusOne(final Object o) {
-        if (o instanceof Number n) {
-            return n.longValue();
-        }
-        try {
-            return o == null ? -1 : Long.parseLong(o.toString());
-        } catch (final NumberFormatException e) {
-            return -1;
-        }
-    }
-
-    @SuppressWarnings("unchecked")
-    private static Map<String, Object> castMap(final Map<?, ?> m) {
-        return (Map<String, Object>) m;
     }
 
     @Override
-    public void close() {
-        // the ExtendedHttpClient is a shared application-scoped bean, do not close it here
+    protected void terminate(final Operation op) throws IOException, InterruptedException {
+        final var response = send(op, builder(uri, op).DELETE().build());
+        op.release(response.body());
     }
 }

@@ -409,7 +409,7 @@ public class ConversationTranscript {
             touch();
         } else if (event
                 instanceof
-                AgentEvent.TextDelta(String delta, String sessionId, String subagentId, String subagentName)) {
+                AgentEvent.TextDelta(String delta, String sessionId, String subagentId, String subagentName, var _)) {
             // the answer's first delta usually arrives with no reset: flush the reasoning
             // so it stays in place, above the streaming answer
             flushThinking();
@@ -424,7 +424,8 @@ public class ConversationTranscript {
                     touch();
                 }
             }
-        } else if (event instanceof AgentEvent.TextReset(String sessionId, String subagentId, String subagentName)) {
+        } else if (event
+                instanceof AgentEvent.TextReset(String sessionId, String subagentId, String subagentName, var _)) {
             pending.setLength(0);
             inlineThink.reset();
             // keep the reasoning visible: flush instead of dropping it, the model resets
@@ -433,7 +434,12 @@ public class ConversationTranscript {
             touch();
         } else if (event
                 instanceof
-                AgentEvent.ThinkingDelta(String delta, String sessionId, String subagentId, String subagentName)) {
+                AgentEvent.ThinkingDelta(
+                        String delta,
+                        String sessionId,
+                        String subagentId,
+                        String subagentName,
+                        var _)) {
             thinking.append(delta);
             touchThinking();
         } else if (event
@@ -444,7 +450,8 @@ public class ConversationTranscript {
                         long ordinal,
                         String sessionId,
                         String subagentId,
-                        String subagentName)) {
+                        String subagentName,
+                        var _)) {
             flushThinking();
             // the answer streamed before the call is now final: write it in place so the
             // tool block that follows cannot jump on top of it
@@ -461,7 +468,8 @@ public class ConversationTranscript {
                         long ordinal,
                         String sessionId,
                         String subagentId,
-                        String subagentName)) {
+                        String subagentName,
+                        var _)) {
             final var deque = runningTools.get(name);
             if (deque != null && !deque.isEmpty()) {
                 // the most recently started tool with this name is the live one; when the stream carries
@@ -492,7 +500,8 @@ public class ConversationTranscript {
                         long eventOrdinal,
                         String sessionId,
                         String subagentId,
-                        String subagentName)) {
+                        String subagentName,
+                        var _)) {
             final var deque = runningTools.get(name);
             // prefer the exact started call identified by the runner's ordinal; fall back to the name
             // deque (parallel batches and legacy events without an ordinal) when no ordinal matched
@@ -599,7 +608,8 @@ public class ConversationTranscript {
                         String subagentId,
                         String subagentName,
                         AgentEvent.UsageUpdated.Quota quota,
-                        ContextMeasurement.Snapshot measurement)) {
+                        ContextMeasurement.Snapshot measurement,
+                        var _)) {
             promptTokens = usage == null ? 0 : usage.promptTokens();
             contextInputTokens = usage == null ? 0 : usage.contextInputTokens();
             completionTokens = usage == null ? 0 : usage.completionTokens();
@@ -626,11 +636,12 @@ public class ConversationTranscript {
                         String sessionId,
                         String subagentId,
                         String subagentName,
-                        AgentEvent.Compacted.CompactionTokens tokens)) {
+                        AgentEvent.Compacted.CompactionTokens tokens,
+                        var _)) {
             // side feedback only: record the appliance for the sidebar instead of touching the
             // leading status, which must stay on the short busy/ready state (a stale "context
             // dedup done..." used to hide the current spinner/error at the bottom)
-            recordAppliance(new AgentEvent.Compacted(kinds, mode, sessionId, subagentId, subagentName, tokens));
+            recordAppliance((AgentEvent.Compacted) event);
             transcript
                     .append("\n\n> context ")
                     .append(String.join(", ", kinds))
@@ -653,7 +664,8 @@ public class ConversationTranscript {
                         long durationMs,
                         String sessionId,
                         String subagentId,
-                        String subagentName)) {
+                        String subagentName,
+                        var _)) {
             // transient provider-imposed delay (throttle/retry backoff): side feedback only.
             // Never overwrite the leading status nor write a durable transcript line - the
             // TUI renders it in the trailing notification slot and the next pause or turn
@@ -670,7 +682,8 @@ public class ConversationTranscript {
                         String subagentId,
                         String subagentName,
                         Throwable cause,
-                        AgentEvent.Notice.CompactionLifecycle compaction)) {
+                        AgentEvent.Notice.CompactionLifecycle compaction,
+                        var _)) {
             final var tag =
                     switch (level) {
                         case ERROR -> "⚠ error";
@@ -689,11 +702,16 @@ public class ConversationTranscript {
             // right notification slot is fed by the dedicated Pause/status channels).
         } else if (event
                 instanceof
-                AgentEvent.Status(String message, String sessionId, String subagentId, String subagentName)) {
+                AgentEvent.Status(String message, String sessionId, String subagentId, String subagentName, var _)) {
             status = message;
         } else if (event
                 instanceof
-                AgentEvent.PromptIntegrated(String text, String sessionId, String subagentId, String subagentName)) {
+                AgentEvent.PromptIntegrated(
+                        String text,
+                        String sessionId,
+                        String subagentId,
+                        String subagentName,
+                        var _)) {
             flushThinking();
             // the in-progress answer belongs above the prompt that just cut it off
             flushPending();
@@ -724,7 +742,8 @@ public class ConversationTranscript {
                         AgentEvent.Throughput throughput,
                         String sessionId,
                         String subagentId,
-                        String subagentName)) {
+                        String subagentName,
+                        var _)) {
             turnLlmCalls = llmCalls;
             turnThinkingMs = thinkingMs;
             turnToolSumMs = toolSumMs;
@@ -734,7 +753,7 @@ public class ConversationTranscript {
             turnThroughput = throughput == null ? AgentEvent.Throughput.EMPTY : throughput;
         } else if (event
                 instanceof
-                AgentEvent.TurnDone(String content, String sessionId, String subagentId, String subagentName)) {
+                AgentEvent.TurnDone(String content, String sessionId, String subagentId, String subagentName, var _)) {
             flushThinking();
             // split any inline <think> reasoning out of the final content so it renders
             // as a thought region instead of being dropped by markdown HTML handling
@@ -781,7 +800,7 @@ public class ConversationTranscript {
             touchTranscript();
             touch();
         } else if (event
-                instanceof AgentEvent.TurnCancelled(String sessionId, String subagentId, String subagentName)) {
+                instanceof AgentEvent.TurnCancelled(String sessionId, String subagentId, String subagentName, var _)) {
             // a user interrupt ends the turn cleanly: flush the streamed answer/thinking so it
             // stays in the transcript, but do not write an error line nor mark the turn red -
             // cancellation is a normal (user-driven) end, not a failure
@@ -794,7 +813,8 @@ public class ConversationTranscript {
             touchTranscript();
             touch();
         } else if (event
-                instanceof AgentEvent.Error(String message, String sessionId, String subagentId, String subagentName)) {
+                instanceof
+                AgentEvent.Error(String message, String sessionId, String subagentId, String subagentName, var _)) {
             // keep the reasoning readable even when the turn fails
             flushThinking();
             // ... and the answer it already streamed, above the error line
@@ -814,6 +834,7 @@ public class ConversationTranscript {
                         String sessionId,
                         String subagentId,
                         String subagentName,
+                        var _,
                         var _)) {
             // marker only: the subagent stream itself is captured separately (no inline
             // mixing of two model voices in one pane - see /subagents)
@@ -835,7 +856,8 @@ public class ConversationTranscript {
                         String sessionId,
                         String subagentId,
                         String subagentName,
-                        String model)) {
+                        String model,
+                        var _)) {
             appendSubagentReport(
                     subagentId,
                     subagentName,

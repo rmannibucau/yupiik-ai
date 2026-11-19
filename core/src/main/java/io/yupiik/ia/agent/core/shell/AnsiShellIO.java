@@ -36,6 +36,7 @@ import java.util.concurrent.CompletionStage;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Supplier;
+import java.util.regex.Pattern;
 
 /**
  * Terminal {@link ShellIO} backed by a blocking {@link Prompt}: returned
@@ -45,6 +46,7 @@ import java.util.function.Supplier;
  * the pending read into a cancellation (deny / {@code null} answer).
  */
 public class AnsiShellIO implements ShellIO {
+    private static final Pattern WHITESPACE = Pattern.compile("\\s+");
     private final Prompt prompt;
     private final LinedPrompt lined;
     private final Symbols symbols;
@@ -455,7 +457,7 @@ public class AnsiShellIO implements ShellIO {
             return List.of("");
         }
         final var out = new ArrayList<String>();
-        final var words = text.split("\\s+");
+        final var words = WHITESPACE.split(text);
         final var sb = new StringBuilder();
         for (final var word : words) {
             if (!sb.isEmpty() && sb.length() + 1 + word.length() > width) {

@@ -8,6 +8,7 @@
   <description>Aggregator for yca extensions. Each extension is a standalone tooling set composable with the core agent.</description>
 
   <subprojects>
+    <subproject>acp</subproject>
     <subproject>maven-repository-indexer-parent</subproject>
     <subproject>bot-parent</subproject>
     <subproject>nono-notifications</subproject>

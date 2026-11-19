@@ -69,6 +69,9 @@ import org.junit.jupiter.api.io.TempDir;
 @Timeout(30)
 class AgentLoopSpeculativeCompactionTest {
     @TempDir
+    private static Path testWorkdir;
+
+    @TempDir
     Path storageHome;
 
     @Test
@@ -214,18 +217,26 @@ class AgentLoopSpeculativeCompactionTest {
         final var manager = new ContextManager(
                 config,
                 usage,
-                new CompactionCoordinator(config, client, usage, providers, emitter, "s1", new BackoffSleeper()));
+                new CompactionCoordinator(
+                        config,
+                        client,
+                        usage,
+                        providers,
+                        emitter,
+                        "s1",
+                        new BackoffSleeper(),
+                        (config).resolveWorkingDir()));
         return new AgentLoop(
                 client,
                 new ToolRegistry(null) {
                     @Override
-                    public List<Tool> toWireTools() {
+                    public List<Tool> toWireTools(final Path workdir) {
                         return List.of();
                     }
                 },
                 new ToolExecutionService() {},
                 config,
-                new PermissionService(config),
+                new PermissionService(config, (config).resolveWorkingDir()),
                 usage,
                 null,
                 manager,
@@ -234,7 +245,7 @@ class AgentLoopSpeculativeCompactionTest {
                     @Override
                     public void append(final String id, final SessionEntry entry) {}
                 },
-                new SystemPromptBuilder() {
+                new SystemPromptBuilder(testWorkdir) {
                     @Override
                     public String build(final String prompt, final AgentConfiguration agent) {
                         return "system prompt";
@@ -246,7 +257,7 @@ class AgentLoopSpeculativeCompactionTest {
                 mapper,
                 new StructuralCodeGraph() {
                     @Override
-                    public void ensureReadyAsync() {}
+                    public void ensureReadyAsync(final Path root) {}
                 },
                 providers,
                 null,
@@ -254,7 +265,8 @@ class AgentLoopSpeculativeCompactionTest {
                 null,
                 null,
                 executor,
-                null);
+                null,
+                (config).resolveWorkingDir());
     }
 
     private static List<Message> history() {

@@ -36,7 +36,6 @@ import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.Executors;
@@ -52,8 +51,6 @@ public class BashTool implements EmbeddedTool {
     private final Emitter emitter;
     private final ProcessService processes;
     private final int maxOutputChars;
-    /** Configured default working directory process, used when neither a workdir arg nor a session root apply. */
-    private final Path fallbackDir;
 
     private final BashOverride bashOverride;
     private final ShellResolver shellResolver;
@@ -66,7 +63,6 @@ public class BashTool implements EmbeddedTool {
         this.emitter = emitter;
         this.processes = processes;
         this.maxOutputChars = configuration.tools().maxOutputChars();
-        this.fallbackDir = configuration.resolveWorkingDir().toAbsolutePath().normalize();
         this.bashOverride = bashOverride;
         this.shellResolver = new ShellResolver(
                 configuration.tools() == null ? null : configuration.tools().shell());
@@ -88,7 +84,6 @@ public class BashTool implements EmbeddedTool {
         this.emitter = emitter;
         this.processes = processes;
         this.maxOutputChars = 65536;
-        this.fallbackDir = null; // no configuration: inherit the JVM working directory
         this.bashOverride = null; // no config -> no overrides
         this.shellResolver = new ShellResolver(null);
     }
@@ -97,7 +92,6 @@ public class BashTool implements EmbeddedTool {
         this.emitter = null;
         this.processes = null;
         this.maxOutputChars = 65536;
-        this.fallbackDir = null;
         this.bashOverride = null;
         this.shellResolver = new ShellResolver(null);
     }
@@ -108,7 +102,7 @@ public class BashTool implements EmbeddedTool {
     }
 
     @Override
-    public String description() {
+    public String description(final Path workdir) {
         return "Run a shell command (real bash when available, /bin/sh otherwise) and return its combined "
                 + "stdout/stderr (truncated at maxOutputChars, " + toolOutputCapHuman() + "). "
                 + "For terminal operations (git, mvn, npm, docker...) and batched read-only surveys; file "
@@ -131,15 +125,8 @@ public class BashTool implements EmbeddedTool {
                         "command", Schemas.str("The shell command to run."),
                         "timeout_seconds",
                                 Schemas.intProp("Command timeout in seconds, default " + DEFAULT_TIMEOUT_SECONDS + "."),
-                        "workdir",
-                                Schemas.str("Working directory; defaults to the session's project directory, else the"
-                                        + " configured working directory.")),
+                        "workdir", Schemas.str("Working directory; defaults to the session's project directory.")),
                 "command");
-    }
-
-    @Override
-    public ToolResult execute(final Map<String, Object> args) {
-        return execute(args, ToolContext.empty());
     }
 
     @Override
@@ -158,56 +145,20 @@ public class BashTool implements EmbeddedTool {
         final var pbNotice = new StringBuilder(shell.notice());
         final var pb = new ProcessBuilder(shell.binary().toString(), "-c", command);
         pb.redirectErrorStream(true);
-        // A workdir chosen by the model this turn is a fact it can act on: reject it if it does not
-        // exist rather than silently running elsewhere (which would contradict what the model expects).
-        // Session-level directories (project root / configured working dir) were not chosen this turn,
-        // so a stale one falls through to the next live candidate with an explanatory notice.
         final var workdirNotice = new StringBuilder();
-        if (workdir != null && !workdir.isBlank()) {
-            final var dir = Path.of(workdir).toAbsolutePath().normalize();
-            if (!Files.isDirectory(dir)) {
-                return ToolResult.error("workdir '" + workdir + "' does not exist");
-            }
-            pb.directory(dir.toFile());
-        } else {
-            // no explicit workdir: honour the session's project root, else the configured working dir,
-            // rather than silently inheriting the JVM launch directory (which may differ from both).
-            // A candidate that no longer exists is skipped and the fallback is reported in the output
-            // so the caller can see that the command did not run exactly where the session intended.
-            final var candidates = candidateDirectories(context);
-            Path skipped = null;
-            boolean used = false;
-            for (final var candidate : candidates) {
-                if (Files.isDirectory(candidate)) {
-                    if (skipped != null) {
-                        workdirNotice
-                                .append("workdir '")
-                                .append(skipped)
-                                .append("' not found, using '")
-                                .append(candidate)
-                                .append('\'');
-                    }
-                    pb.directory(candidate.toFile());
-                    used = true;
-                    break;
-                }
-                skipped = candidate;
-            }
-            if (!used && skipped != null) {
-                workdirNotice
-                        .append("workdir '")
-                        .append(skipped)
-                        .append("' not found, using the JVM working directory");
-            }
+        final var dir = workdir == null || workdir.isBlank()
+                ? context.projectDir()
+                : context.resolvePath(workdir).normalize();
+        if (!Files.isDirectory(dir)) {
+            return ToolResult.error("workdir '" + dir + "' does not exist");
         }
+        pb.directory(dir.toFile());
         // In-process read-only survey rewrite (yca.tools.bashOverrides): when the command is entirely made
         // of supported read-only survey commands, run it through the Java* reimplementations instead of a
         // real shell - output stays byte-faithful (only capped) and does not spawn a subprocess. Anything
         // not confidently recognized falls back to the real shell below.
         if (bashOverride != null && !command.isBlank()) {
-            final var baseDir = pb.directory() == null
-                    ? Path.of(".").toAbsolutePath().normalize()
-                    : pb.directory().toPath().toAbsolutePath().normalize();
+            final var baseDir = dir;
             final var rewritten = bashOverride.tryRewrite(command, baseDir);
             if (rewritten.isPresent()) {
                 final var output = rewritten.get();
@@ -229,7 +180,8 @@ public class BashTool implements EmbeddedTool {
                 context.ordinal(),
                 context.sessionId(),
                 context.subagentId(),
-                context.subagentName()));
+                context.subagentName(),
+                context.projectDir()));
         final var out = new StringBuilder();
         final var streamed = new AtomicInteger();
         final var reader = new Thread(() -> {
@@ -249,7 +201,8 @@ public class BashTool implements EmbeddedTool {
                                 context.ordinal(),
                                 context.sessionId(),
                                 context.subagentId(),
-                                context.subagentName()));
+                                context.subagentName(),
+                                context.projectDir()));
                     }
                 }
             } catch (final IOException e) {
@@ -306,17 +259,6 @@ public class BashTool implements EmbeddedTool {
      * no explicit {@code workdir} arg: the session's project root, then the configured working directory.
      * Missing or null candidates are skipped by the caller via {@link java.nio.file.Files#isDirectory}.
      */
-    private List<Path> candidateDirectories(final ToolContext context) {
-        final var candidates = new ArrayList<Path>(2);
-        if (context.projectDir() != null) {
-            candidates.add(context.projectDir().toAbsolutePath().normalize());
-        }
-        if (fallbackDir != null) {
-            candidates.add(fallbackDir.toAbsolutePath().normalize());
-        }
-        return candidates;
-    }
-
     /** Prepends the (shell/workdir) deviation notice (when any) as the first line of the tool output. */
     private static String withNotice(final StringBuilder notice, final String output) {
         return notice.length() == 0 ? output : notice + "\n" + output;

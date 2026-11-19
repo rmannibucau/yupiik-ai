@@ -210,7 +210,8 @@ public class WebSessionManager implements AutoCloseable {
     }
 
     private WebSession createAttached(final String sessionId) {
-        final var runtime = sessionRuntimeFactory.create(sessionId);
+        final var workdir = sessionRuntimeFactory.resolveWorkdir(null, sessionId);
+        final var runtime = sessionRuntimeFactory.create(sessionId, workdir);
         final var transcript = new ConversationTranscript();
         final var frontend = new WebShellFrontend(sessionId, broker, transcript, mapper);
         final var session = new ShellSession().sessionId(sessionId).runtime(runtime);
@@ -221,10 +222,7 @@ public class WebSessionManager implements AutoCloseable {
                                 identity == null ? chatClient.model(settings) : identity.model(),
                                 identity == null ? chatClient.providerId(settings) : identity.provider(),
                                 identity == null ? session.activeAgent() : identity.agent(),
-                                session.runtime() == null
-                                        ? null
-                                        : String.valueOf(
-                                                session.runtime().permissions().mode()),
+                                String.valueOf(runtime.permissions().mode()),
                                 sessionId,
                                 null)
                         .at(at);
@@ -373,12 +371,15 @@ public class WebSessionManager implements AutoCloseable {
                 .ask(
                         question,
                         session.sessionId(),
-                        runtime == null ? null : runtime.usage(),
-                        cancelled::get,
+                        runtime.usage(),
+                        () -> cancelled.get() || session.closed || session.runtime != runtime,
                         session.io.approvalGate(id, cancelled::get),
-                        runtime == null ? null : runtime.chatSettings(),
-                        runtime == null ? null : runtime.systemPromptBuilder(),
-                        session.io.feedback(id, cancelled::get))
+                        runtime.chatSettings(),
+                        runtime.systemPromptBuilder(),
+                        session.io.feedback(id, cancelled::get),
+                        runtime.workdir(),
+                        runtime.loop().effectiveToolRegistry(),
+                        runtime.loop().availableToolNames())
                 .whenComplete((answer, error) -> onBtwAnswer(session, state, answer, error));
         return CompletableFuture.completedFuture(true);
     }
@@ -646,7 +647,8 @@ public class WebSessionManager implements AutoCloseable {
                             null,
                             null,
                             quota,
-                            usage.lastContextMeasurement()));
+                            usage.lastContextMeasurement(),
+                            webSession.runtime.workdir()));
                     final var data = new LinkedHashMap<String, Object>(usagePayload.data());
                     // Keep the explicit cumulative full-input total, without narrowing it to Usage's int.
                     data.put("contextInputTokens", usage.contextInputTokens());

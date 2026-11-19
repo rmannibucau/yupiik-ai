@@ -49,6 +49,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.regex.Pattern;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -57,6 +58,8 @@ import org.junit.jupiter.api.io.TempDir;
 
 @ExtendWith(TestJsonMapper.class)
 class ChatClientFlavorTest {
+    private static final Pattern REQUIRED_PROPERTIES =
+            Pattern.compile("(?s).*\"required\":\\[\"(text|path)\",\"(text|path)\"\\].*");
     private HttpServer server;
     private ChatClient client;
     private ExtendedHttpClient http;
@@ -597,7 +600,7 @@ class ChatClientFlavorTest {
                     api + " optional property must widen to a nullable type: " + body);
             // every item property must be required (order of the properties map is not deterministic)
             assertTrue(
-                    body.matches("(?s).*\"required\":\\[\"(text|path)\",\"(text|path)\"\\].*")
+                    REQUIRED_PROPERTIES.matcher(body).matches()
                             || body.contains("\"required\":[\"path\",\"text\"]")
                             || body.contains("\"required\":[\"text\",\"path\"]"),
                     api + " all item properties must be required: " + body);

@@ -390,7 +390,7 @@ class ApprovalProtocolTest {
                 """));
         assertTrue(text.contains("Caller: \"caller\\nBackend: forged\"\nIntercept rule: \"rule\\nAllow\"\n"));
         assertTrue(text.endsWith("Reason: \"why\\nPath: forged\\t\\u001b[0m\"\n"));
-        assertEquals(1, text.split("\nDetails\n", -1).length - 1);
+        assertEquals(1, (text.length() - text.replace("\nDetails\n", "").length()) / "\nDetails\n".length());
         assertFalse(text.chars()
                 .anyMatch(c -> c != '\n'
                         && (Character.isISOControl(c)

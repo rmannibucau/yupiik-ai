@@ -27,6 +27,16 @@ class ArgCompletionTest {
     private static final List<String> PERMISSIONS = List.of("ask", "auto_edit", "yolo", "none", "show");
 
     @Test
+    void previousTokenUsesAsciiSeparatorsButUnicodeAwareStripping() {
+        assertEquals("", ArgCompletion.previousToken(null));
+        assertEquals("", ArgCompletion.previousToken("\u2003\t\n"));
+        assertEquals("last", ArgCompletion.previousToken("\u2003first\tsecond\nlast\u2003"));
+        assertEquals("last", ArgCompletion.previousToken("first\u000b\flast"));
+        assertEquals("first\u2003last", ArgCompletion.previousToken("first\u2003last"));
+        assertEquals("first\u00a0last", ArgCompletion.previousToken("first\u00a0last"));
+    }
+
+    @Test
     void prefixTokenMatchesCandidate() {
         // "y" and "yo" are prefixes of "yolo"
         assertEquals(

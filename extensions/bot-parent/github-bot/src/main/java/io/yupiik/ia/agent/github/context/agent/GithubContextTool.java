@@ -24,6 +24,7 @@ import io.yupiik.ia.agent.core.tools.ToolContext;
 import io.yupiik.ia.agent.core.tools.ToolResult;
 import io.yupiik.ia.agent.github.configuration.AgentContextConfiguration;
 import java.math.BigDecimal;
+import java.nio.file.Path;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
@@ -64,7 +65,7 @@ public class GithubContextTool implements EmbeddedTool {
     }
 
     @Override
-    public String description() {
+    public String description(final Path workdir) {
         return "Read task-scoped GitHub context and request bounded source generations. prepare_source is asynchronous: retain operationId and query operation_status; pending is not failure. No upstream credentials or arbitrary URLs.";
     }
 
@@ -79,7 +80,7 @@ public class GithubContextTool implements EmbeddedTool {
     }
 
     @Override
-    public boolean usable() {
+    public boolean usable(final Path workdir) {
         return ContextClient.usable(configuration, sources);
     }
 
@@ -114,11 +115,6 @@ public class GithubContextTool implements EmbeddedTool {
                                 List.of("string", "null"),
                                 "description",
                                 "Previously observed Discussion top-level comment ID for discussionReplies only.")));
-    }
-
-    @Override
-    public ToolResult execute(final Map<String, Object> args) {
-        return execute(args, ToolContext.empty());
     }
 
     @Override

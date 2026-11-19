@@ -19,18 +19,25 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 
 import io.yupiik.ia.agent.core.agent.AgentEvent;
+import io.yupiik.ia.agent.core.context.CompactionResult.Mode;
 import io.yupiik.ia.agent.core.context.ContextMeasurement.Snapshot;
 import io.yupiik.ia.agent.core.llm.Usage;
+import java.nio.file.Path;
 import java.util.List;
+import java.util.Map;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 /** Mapping of the tool lifecycle events to the flat SSE DTO the browser consumes. */
 class WebEventDtoTest {
+    @TempDir
+    private static Path eventWorkdir;
 
     @Test
     void turnMetricsExposeRequestAndCoveredServerThroughput() {
         final var throughput = new AgentEvent.Throughput(300, 40, 2000, 500, 100, 3, 1, true);
-        final var dto = WebEventDto.of(new AgentEvent.TurnMetrics(3, 10, 20, 15, 2, 3000, throughput, "s1"));
+        final var dto =
+                WebEventDto.of(new AgentEvent.TurnMetrics(3, 10, 20, 15, 2, 3000, throughput, "s1", eventWorkdir));
         assertEquals("turn-metrics", dto.type());
         assertEquals(3, dto.data().get("llmCalls"));
         assertEquals(10L, dto.data().get("thinkingDurationMs"));
@@ -53,7 +60,7 @@ class WebEventDtoTest {
 
     @Test
     void missingThroughputExposesZeroMetrics() {
-        final var data = WebEventDto.of(new AgentEvent.TurnMetrics(0, 0, 0, 0, 0, 0, null, "s1"))
+        final var data = WebEventDto.of(new AgentEvent.TurnMetrics(0, 0, 0, 0, 0, 0, null, "s1", eventWorkdir))
                 .data();
         assertEquals(0.0, data.get("tokensPerSecond"));
         assertEquals(0.0, data.get("requestTokensPerSecond"));
@@ -68,7 +75,7 @@ class WebEventDtoTest {
 
     @Test
     void toolStreamCarriesNameAndFragment() {
-        final var dto = WebEventDto.of(new AgentEvent.ToolStream("bash", "line 1", "s1", null, null));
+        final var dto = WebEventDto.of(new AgentEvent.ToolStream("bash", "line 1", "s1", null, null, eventWorkdir));
         assertEquals("tool-stream", dto.type());
         // message = tool name (the frontend binds stream fragments to the running card by name)
         assertEquals("bash", dto.message());
@@ -79,8 +86,10 @@ class WebEventDtoTest {
 
     @Test
     void toolStartedAndFinishedCarryTheSameName() {
-        final var started = WebEventDto.of(new AgentEvent.ToolStarted("write_file", "{}", 1, "s1", null, null));
-        final var finished = WebEventDto.of(new AgentEvent.ToolFinished("write_file", "ok", true, "s1", null, null));
+        final var started =
+                WebEventDto.of(new AgentEvent.ToolStarted("write_file", "{}", 1, "s1", null, null, eventWorkdir));
+        final var finished =
+                WebEventDto.of(new AgentEvent.ToolFinished("write_file", "ok", true, "s1", null, null, eventWorkdir));
         assertEquals("tool-started", started.type());
         assertEquals("write_file", started.message());
         assertEquals(1L, started.data().get("ordinal"));
@@ -95,8 +104,8 @@ class WebEventDtoTest {
     void pendingToolFinishedCarriesThePendingFlag() {
         // a pending tool (e.g. a collect wait that timed out) must surface as pending so the web chip
         // renders it neutral rather than a hard failure
-        final var finished = WebEventDto.of(
-                new AgentEvent.ToolFinished("check_subagents", "pending", false, true, 3, "s1", null, null));
+        final var finished = WebEventDto.of(new AgentEvent.ToolFinished(
+                "check_subagents", "pending", false, true, 3, "s1", null, null, eventWorkdir));
         assertEquals("tool-finished", finished.type());
         assertEquals(false, finished.data().get("success"));
         assertEquals(true, finished.data().get("pending"));
@@ -104,7 +113,8 @@ class WebEventDtoTest {
 
     @Test
     void subagentEventsCarryIdentityAndModel() {
-        final var started = WebEventDto.of(new AgentEvent.SubagentStarted("do the thing", "s1", "sub-1", "child"));
+        final var started =
+                WebEventDto.of(new AgentEvent.SubagentStarted("do the thing", "s1", "sub-1", "child", eventWorkdir));
         assertEquals("subagent-started", started.type());
         assertEquals("do the thing", started.message());
         assertEquals("sub-1", started.data().get("subagentId"));
@@ -112,7 +122,7 @@ class WebEventDtoTest {
         assertNull(started.data().get("model"), "the model is unresolved at spawn");
 
         final var completed = WebEventDto.of(
-                new AgentEvent.SubagentCompleted("done", true, false, "s1", "sub-1", "child", "gpt-5.5"));
+                new AgentEvent.SubagentCompleted("done", true, false, "s1", "sub-1", "child", "gpt-5.5", eventWorkdir));
         assertEquals("subagent-completed", completed.type());
         assertEquals("done", completed.message());
         assertEquals(true, completed.data().get("success"));
@@ -135,7 +145,8 @@ class WebEventDtoTest {
                 null,
                 null,
                 AgentEvent.UsageUpdated.Quota.NONE,
-                new Snapshot(50, 52, "provider-anchored", 40, 10, 1.0)));
+                new Snapshot(50, 52, "provider-anchored", 40, 10, 1.0),
+                eventWorkdir));
         assertEquals("usage-updated", dto.type());
         assertEquals("model-x", dto.message());
         assertEquals(120, dto.data().get("completionTokens"));
@@ -149,11 +160,26 @@ class WebEventDtoTest {
     }
 
     @Test
+    void compactionPassAddsNoOperationPayloadToTheLegacyWebTransport() {
+        for (final var status : AgentEvent.CompactionPass.Status.values()) {
+            final var dto = WebEventDto.of(new AgentEvent.CompactionPass(
+                    "pass", status, Mode.SUMMARY, "operation detail", "s1", "child", "Worker", eventWorkdir));
+            assertEquals("compaction-pass", dto.type());
+            assertEquals("s1", dto.sessionId());
+            assertEquals("child", dto.subagentId());
+            assertEquals("Worker", dto.subagentName());
+            assertNull(dto.message());
+            assertEquals(Map.of(), dto.data(), "no detail, root, digest or invented summary/counts are exposed");
+        }
+    }
+
+    @Test
     void compactedCarriesTheMergedKindsAndMode() {
         // several reductions of the same checkpoint are merged into one event: the message keeps
         // the flat "kinds|mode" shape with the comma-joined kinds, so the web frontend can split
         // on the pipe without re-parsing per-kind payloads
-        final var dto = WebEventDto.of(new AgentEvent.Compacted(List.of("dedup", "prune"), "CLEARED", "s1"));
+        final var dto =
+                WebEventDto.of(new AgentEvent.Compacted(List.of("dedup", "prune"), "CLEARED", "s1", eventWorkdir));
         assertEquals("compacted", dto.type());
         assertEquals("dedup,prune|CLEARED", dto.message());
         assertNull(dto.data().get("tokensBefore"), "no tokens carried -> no before key");
@@ -167,8 +193,9 @@ class WebEventDtoTest {
                 new Usage(0, 0, 0, 500, 0, 0, 0, 500),
                 new Usage(0, 25, 25, 0, 0, 0, 0, 0),
                 new Usage(100, 25, 125))) {
-            final var updated = WebEventDto.of(new AgentEvent.UsageUpdated(usage, 0, 0, "s1"));
-            final var completed = WebEventDto.of(new AgentEvent.LlmRequestCompleted(usage, null, 1, "s1"));
+            final var updated = WebEventDto.of(new AgentEvent.UsageUpdated(usage, 0, 0, "s1", eventWorkdir));
+            final var completed =
+                    WebEventDto.of(new AgentEvent.LlmRequestCompleted(usage, null, 1, "s1", eventWorkdir));
             for (final var dto : List.of(updated, completed)) {
                 assertEquals(usage.promptTokens(), dto.data().get("promptTokens"));
                 assertEquals(usage.contextInputTokens(), dto.data().get("contextInputTokens"));
@@ -181,12 +208,12 @@ class WebEventDtoTest {
     void absentUsageHasZeroFullInput() {
         assertEquals(
                 0,
-                WebEventDto.of(new AgentEvent.UsageUpdated(null, 0, 0, "s1"))
+                WebEventDto.of(new AgentEvent.UsageUpdated(null, 0, 0, "s1", eventWorkdir))
                         .data()
                         .get("contextInputTokens"));
         assertEquals(
                 0,
-                WebEventDto.of(new AgentEvent.LlmRequestCompleted(null, null, 1, "s1"))
+                WebEventDto.of(new AgentEvent.LlmRequestCompleted(null, null, 1, "s1", eventWorkdir))
                         .data()
                         .get("contextInputTokens"));
     }
@@ -201,7 +228,8 @@ class WebEventDtoTest {
                 "s1",
                 null,
                 null,
-                new AgentEvent.Compacted.CompactionTokens(513_000, 87_000)));
+                new AgentEvent.Compacted.CompactionTokens(513_000, 87_000),
+                eventWorkdir));
         assertEquals(513_000, dto.data().get("tokensBefore"));
         assertEquals(87_000, dto.data().get("tokensAfter"));
     }
@@ -210,21 +238,22 @@ class WebEventDtoTest {
     void compactionNoticesCarryTheLifecycleMarker() {
         // the compaction lifecycle (core A) surfaces to the browser as a compacting flag on the
         // notice frames: the start notice arms it, the result notices (compacted/gate) clear it.
-        final var start = WebEventDto.of(
-                AgentEvent.Notice.compactionStart("Compaction in progress... (\u2248 51234 estimated tokens)", "s1"));
+        final var start = WebEventDto.of(AgentEvent.Notice.compactionStart(
+                "Compaction in progress... (\u2248 51234 estimated tokens)", "s1", eventWorkdir));
         assertEquals("notice", start.type());
         assertEquals(true, start.data().get("compacting"));
 
-        final var done = WebEventDto.of(AgentEvent.Notice.compacted("Compacted: context 68% -> 41%", "s1"));
+        final var done =
+                WebEventDto.of(AgentEvent.Notice.compacted("Compacted: context 68% -> 41%", "s1", eventWorkdir));
         assertEquals(false, done.data().get("compacting"));
 
         final var gate = WebEventDto.of(AgentEvent.Notice.compactionGateEscalated(
-                "Compaction gate: the context cannot be compacted below the trigger.", "s1"));
+                "Compaction gate: the context cannot be compacted below the trigger.", "s1", eventWorkdir));
         assertEquals(false, gate.data().get("compacting"), "an escalation must clear the flag");
 
         // a non-compaction notice never flips the flag (absent, not false)
-        final var unrelated =
-                WebEventDto.of(new AgentEvent.Notice(AgentEvent.Notice.Level.WARN, "retrying (1/3)", "s1"));
+        final var unrelated = WebEventDto.of(
+                new AgentEvent.Notice(AgentEvent.Notice.Level.WARN, "retrying (1/3)", "s1", eventWorkdir));
         assertNull(unrelated.data().get("compacting"));
     }
 }

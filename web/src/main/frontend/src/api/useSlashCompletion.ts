@@ -35,7 +35,7 @@ export function useSlashCompletion(text: string, cursor: number, sessionId: stri
       return;
     }
     const handle = setTimeout(() => {
-      call<SlashSuggestion[]>('slash.complete', { text, cursor })
+      call<SlashSuggestion[]>('slash.complete', { id: sessionId, text, cursor })
         .then((results) => {
           // drop stale/late responses (a newer keystroke superseded this one)
           if (sequenceRef.current !== seq || sessionRef.current !== sessionId) {

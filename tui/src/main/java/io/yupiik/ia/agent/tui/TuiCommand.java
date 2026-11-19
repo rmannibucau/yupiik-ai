@@ -519,7 +519,11 @@ public class TuiCommand implements Runnable {
 
             @Override
             public List<String> paths(final String token) {
-                return CompletionEngine.pathCandidates(token);
+                final var current = active();
+                return current == null
+                        ? List.of()
+                        : CompletionEngine.pathCandidates(
+                                token, current.runtime().workdir());
             }
         });
         this.promptHistory = new PromptHistory();
@@ -995,7 +999,8 @@ public class TuiCommand implements Runnable {
         state.showThinking = conf.showThinking();
         state.runner = tui;
         state.session.sessionId(state.sessionId).activeAgent(state.activeAgent);
-        final var runtime = sessionRuntimeFactory.create(state.sessionId);
+        final var workdir = sessionRuntimeFactory.resolveWorkdir(null, state.sessionId);
+        final var runtime = sessionRuntimeFactory.create(state.sessionId, workdir);
         state.runtime(runtime);
         state.session.runtime(runtime);
         state.model.bindCompression(runtime.compression());
@@ -1079,7 +1084,8 @@ public class TuiCommand implements Runnable {
         if (tui != null) {
             shellRegistry.unregister(env(tui, state));
         }
-        final var runtime = sessionRuntimeFactory.create(state.sessionId);
+        final var workdir = sessionRuntimeFactory.resolveWorkdir(null, state.sessionId);
+        final var runtime = sessionRuntimeFactory.create(state.sessionId, workdir);
         state.runtime(runtime);
         state.session.runtime(runtime);
         state.model.bindCompression(runtime.compression());
@@ -2657,20 +2663,20 @@ public class TuiCommand implements Runnable {
         final var cancelled = new AtomicBoolean(false);
         state.btw = new UiState.BtwOverlay(ordinal, question, "", null, true, false, 0, cancelled);
         final var sessionId = state.session.sessionId();
+        final var runtime = state.session.runtime();
         btwAnswerer
                 .ask(
                         question,
                         sessionId == null ? "" : sessionId,
-                        state.session.runtime() != null
-                                ? state.session.runtime().usage()
-                                : null,
-                        cancelled::get,
+                        runtime.usage(),
+                        () -> cancelled.get() || state.session.runtime() != runtime,
                         btwGate(runner, state, ordinal),
-                        state.session == null ? null : state.session.chatSettings(),
-                        state.session.runtime() != null
-                                ? state.session.runtime().systemPromptBuilder()
-                                : null,
-                        btwFeedback(runner, state, ordinal))
+                        runtime.chatSettings(),
+                        runtime.systemPromptBuilder(),
+                        btwFeedback(runner, state, ordinal),
+                        runtime.workdir(),
+                        runtime.loop().effectiveToolRegistry(),
+                        runtime.loop().availableToolNames())
                 .whenComplete((answer, error) ->
                         runLater(state, () -> onBtwAnswer(state, ordinal, answer, error, cancelled)));
     }

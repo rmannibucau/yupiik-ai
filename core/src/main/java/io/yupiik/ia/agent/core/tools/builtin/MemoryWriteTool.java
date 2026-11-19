@@ -27,11 +27,14 @@ import io.yupiik.ia.agent.core.tools.ToolArgs;
 import io.yupiik.ia.agent.core.tools.ToolCategory;
 import io.yupiik.ia.agent.core.tools.ToolContext;
 import io.yupiik.ia.agent.core.tools.ToolResult;
+import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
+import java.util.regex.Pattern;
 
 @ApplicationScoped
 public class MemoryWriteTool implements EmbeddedTool {
+    private static final Pattern WHITESPACE = Pattern.compile("\\s+");
     private final MemoryStore memoryStore;
     private final MemoryProductionPolicy memoryProductionPolicy;
 
@@ -50,7 +53,7 @@ public class MemoryWriteTool implements EmbeddedTool {
     }
 
     @Override
-    public String description() {
+    public String description(final Path workdir) {
         return "Persist a durable fact, decision or user preference to memory (global or project scope). "
                 + "By default the fact is stored as an explicit keep directive (importance 5, never auto-pruned); "
                 + "set keep=false for an ordinary lower-priority observation.";
@@ -81,11 +84,6 @@ public class MemoryWriteTool implements EmbeddedTool {
     }
 
     @Override
-    public ToolResult execute(final Map<String, Object> args) {
-        return execute(args, ToolContext.empty());
-    }
-
-    @Override
     public ToolResult execute(final Map<String, Object> args, final ToolContext context) {
         final var fact = arg(args, "fact");
         if (fact == null || fact.isBlank()) {
@@ -107,7 +105,7 @@ public class MemoryWriteTool implements EmbeddedTool {
         if (stored == null) {
             return ToolResult.error("fact is required");
         }
-        final var added = memoryStore.append(global, List.of(stored));
+        final var added = memoryStore.append(global, List.of(stored), context.projectDir());
         return added.isEmpty()
                 ? ToolResult.ok("Already remembered (or skipped).")
                 : ToolResult.ok("Remembered (" + (global ? "global" : "project") + "): " + added.get(0));
@@ -117,9 +115,8 @@ public class MemoryWriteTool implements EmbeddedTool {
         if (topic == null || topic.isBlank()) {
             return List.of();
         }
-        return topic.trim().split("\\s+").length == 0
-                ? List.of()
-                : List.of(topic.trim().split("\\s+"));
+        final var tokens = WHITESPACE.split(topic.trim());
+        return tokens.length == 0 ? List.of() : List.of(tokens);
     }
 
     private static String optional(final String value) {

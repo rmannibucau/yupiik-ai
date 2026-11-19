@@ -40,6 +40,8 @@ import io.yupiik.ia.agent.core.llm.ChatClient;
 import io.yupiik.ia.agent.core.llm.ToolCall$FunctionCall$FusionJsonCodec;
 import io.yupiik.ia.agent.core.llm.ToolCall$FusionJsonCodec;
 import io.yupiik.ia.agent.core.mcp.McpManager;
+import io.yupiik.ia.agent.core.mcp.McpWire$Content$FusionJsonCodec;
+import io.yupiik.ia.agent.core.mcp.McpWire$Result$FusionJsonCodec;
 import io.yupiik.ia.agent.core.mcp.WebSearchManager;
 import io.yupiik.ia.agent.core.permissions.PermissionService;
 import io.yupiik.ia.agent.core.runtime.StatusReporter;
@@ -489,6 +491,8 @@ class SlackThreadAgentLoopTest {
                 new ToolCall$FunctionCall$FusionJsonCodec(),
                 new SlackContextMailbox$Request$FusionJsonCodec(),
                 new SlackContextMailbox$Response$FusionJsonCodec(),
+                new McpWire$Content$FusionJsonCodec(),
+                new McpWire$Result$FusionJsonCodec(),
                 new ModelsResponse$FusionJsonCodec(),
                 new ModelsResponse$Model$FusionJsonCodec(),
                 new ChatCompletionRequest$FusionJsonCodec(),
@@ -606,7 +610,7 @@ class SlackThreadAgentLoopTest {
                     try (final var chat = new ChatClient(configuration, json, providers, clock, http)) {
                         final var sessions = new FileSessionStore(configuration, json, clock);
                         final var sessionId = sessions.create();
-                        final var permissions = new PermissionService(configuration);
+                        final var permissions = new PermissionService(configuration, workdir);
                         final var usage = new UsageTracker(
                                 providers, chat, new ContextWindowCache(configuration, json, clock), clock);
                         final var todos = new InMemoryTodoStore();
@@ -621,8 +625,8 @@ class SlackThreadAgentLoopTest {
                         };
                         final var agents = new AgentProvider(configuration);
                         final var system = new SystemPromptBuilder(
-                                configuration, null, todos, permissions, agents, providers, null, null, null);
-                        system.workdir(workdir);
+                                configuration, null, todos, permissions, agents, providers, null, null, null, workdir);
+
                         final var tool = new SlackContextTool(new SlackContextClient(
                                 new AgentSlackContextConfiguration(
                                         true, mailbox.toString(), (String) context.get("channel"), 15),
@@ -632,7 +636,7 @@ class SlackThreadAgentLoopTest {
                                 configuration,
                                 json,
                                 List.of(tool, new WebSearchTool(websearch, configuration)),
-                                http,
+                                null,
                                 null);
                         try {
                             final var loop = new AgentLoop(
@@ -660,7 +664,8 @@ class SlackThreadAgentLoopTest {
                                             sessionId,
                                             null,
                                             null,
-                                            null),
+                                            null,
+                                            workdir),
                                     new StatusReporter(),
                                     emitter,
                                     json,
@@ -672,9 +677,10 @@ class SlackThreadAgentLoopTest {
                                     null,
                                     todos,
                                     null,
-                                    null);
+                                    null,
+                                    workdir);
                             try {
-                                loop.sessionWorkdir(workdir);
+
                                 final var answer = loop.run(prompt, "build", sessionId, List.of(), () -> false);
                                 assertEquals(
                                         FINAL + " " + permalink,

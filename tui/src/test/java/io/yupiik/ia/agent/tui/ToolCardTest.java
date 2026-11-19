@@ -22,9 +22,14 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.ia.agent.core.agent.AgentEvent;
 import io.yupiik.ia.agent.core.shell.ConversationTranscript;
+import java.nio.file.Path;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 class ToolCardTest {
+    @TempDir
+    private static Path eventWorkdir;
+
     private final DiffRenderer diffRenderer = new DiffRenderer();
 
     @Test
@@ -116,8 +121,9 @@ class ToolCardTest {
         t.onEvent(new AgentEvent.ToolStarted(
                 "bash",
                 "{\"command\":\"cat <<'SQL'\nALTER TABLE T LOCATION ('part_*.csv.gz');\nSELECT COUNT(*) FROM T;\nSQL\"}",
-                "s1"));
-        t.onEvent(new AgentEvent.ToolFinished("bash", "ok", true, "s1"));
+                "s1",
+                eventWorkdir));
+        t.onEvent(new AgentEvent.ToolFinished("bash", "ok", true, "s1", eventWorkdir));
 
         String cardArgs = null;
         for (final var region : ConversationTranscript.regions(t.markdown("|", "busy"))) {

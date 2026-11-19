@@ -21,6 +21,7 @@ import io.yupiik.ia.agent.core.tools.ToolCategory;
 import io.yupiik.ia.agent.core.tools.ToolContext;
 import io.yupiik.ia.agent.core.tools.ToolResult;
 import java.math.BigDecimal;
+import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -46,7 +47,7 @@ public class SlackContextTool implements EmbeddedTool {
     }
 
     @Override
-    public String description() {
+    public String description(final Path workdir) {
         return "Read bounded Slack context in the task's trusted originating channel: summary returns channel, thread and limits; "
                 + "thread reads the current thread, including prior bot replies, with limit (1-20) and opaque pageToken. "
                 + "Continue beyond the initial snapshot with pageToken until the host budget ends. Optional threadTs must be "
@@ -69,7 +70,7 @@ public class SlackContextTool implements EmbeddedTool {
     }
 
     @Override
-    public boolean usable() {
+    public boolean usable(final Path workdir) {
         return client.usable();
     }
 
@@ -145,11 +146,6 @@ public class SlackContextTool implements EmbeddedTool {
                 USER_ID.pattern(),
                 "description",
                 description);
-    }
-
-    @Override
-    public ToolResult execute(final Map<String, Object> args) {
-        return execute(args, ToolContext.empty());
     }
 
     @Override

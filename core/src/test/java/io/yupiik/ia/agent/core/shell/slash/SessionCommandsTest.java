@@ -48,6 +48,9 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 class SessionCommandsTest {
+    @TempDir
+    private static Path testWorkdir;
+
     private final List<String> picked = new ArrayList<>();
 
     private ShellEnv env() {
@@ -367,7 +370,7 @@ class SessionCommandsTest {
         env.session().sessionId("s1");
         env.session()
                 .runtime(new SessionRuntime(
-                        new AgentLoop() {
+                        new AgentLoop(testWorkdir) {
                             {
                                 lastLlmPayload = payload;
                             }
@@ -378,7 +381,8 @@ class SessionCommandsTest {
                         null,
                         null,
                         null,
-                        null));
+                        null,
+                        testWorkdir));
         return env;
     }
 

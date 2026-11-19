@@ -27,6 +27,7 @@ import io.yupiik.ia.agent.core.runtime.Cancellations;
 import io.yupiik.ia.agent.core.tools.ToolContext;
 import io.yupiik.ia.agent.core.tools.ToolResult;
 import io.yupiik.ia.agent.test.TestJsonMapper;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -34,9 +35,13 @@ import java.util.Map;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.api.io.TempDir;
 
 @ExtendWith(TestJsonMapper.class)
 class AskUserToolTest {
+    @TempDir
+    private static Path testWorkdir;
+
     private JsonMapper mapper;
     private UserFeedbackService feedback;
     private AskUserTool tool;
@@ -58,7 +63,8 @@ class AskUserToolTest {
     }
 
     private ToolContext context() {
-        return new ToolContext("s1", null, null, null, feedback, null, null, null, null, Cancellations.NEVER);
+        return new ToolContext(
+                "s1", null, null, null, feedback, null, null, null, null, Cancellations.NEVER, null, null, testWorkdir);
     }
 
     @Test
@@ -245,7 +251,10 @@ class AskUserToolTest {
                 null,
                 null,
                 null,
-                Cancellations.NEVER);
+                Cancellations.NEVER,
+                null,
+                null,
+                testWorkdir);
         final var args = Map.<String, Object>of("questions", List.of(Map.of("id", "q1", "prompt", "Pick?")));
         final ToolResult result = tool.execute(args, rejecting);
         assertNotNull(result);
@@ -257,7 +266,8 @@ class AskUserToolTest {
     @Test
     void executeReturnsErrorWhenNoFeedbackGateIsInstalled() {
         // genuinely gate-less (no interactive feedback service): keeps the hard error.
-        final var gateLess = new ToolContext("s1", null, null, null, null, null, null, null, null, Cancellations.NEVER);
+        final var gateLess = new ToolContext(
+                "s1", null, null, null, null, null, null, null, null, Cancellations.NEVER, null, null, testWorkdir);
         final var args = Map.<String, Object>of("questions", List.of(Map.of("id", "q1", "prompt", "Pick?")));
         final ToolResult result = tool.execute(args, gateLess);
         assertNotNull(result);

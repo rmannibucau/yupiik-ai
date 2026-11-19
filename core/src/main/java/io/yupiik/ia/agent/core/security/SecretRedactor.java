@@ -246,19 +246,14 @@ public class SecretRedactor {
     }
 
     private String redactCustomPatterns(final String text, final String sessionId) {
-        final var patterns = registry.config() == null
-                ? List.<String>of()
-                : registry.config().patterns();
-        if (patterns == null || patterns.isEmpty()) {
+        final var patterns = registry.customPatterns();
+        if (patterns.isEmpty()) {
             return text;
         }
         String out = text;
-        for (final var regex : patterns) {
-            if (regex == null || regex.isBlank()) {
-                continue;
-            }
+        for (final var pattern : patterns) {
             try {
-                final var m = Pattern.compile(regex).matcher(out);
+                final var m = pattern.matcher(out);
                 final var res = new StringBuilder();
                 int last = 0;
                 while (m.find()) {
@@ -273,7 +268,7 @@ public class SecretRedactor {
                 res.append(out, last, out.length());
                 out = res.toString();
             } catch (final RuntimeException ignored) {
-                // invalid regex logged at startup by the registry; skip here
+                // Keep a failed custom pattern from aborting the remaining redaction passes.
             }
         }
         return out;

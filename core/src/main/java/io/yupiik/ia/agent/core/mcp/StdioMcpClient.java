@@ -19,21 +19,25 @@ import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.maven.knowledge.process.ProcessService;
 import java.io.BufferedReader;
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.util.ArrayList;
-import java.util.LinkedHashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.logging.Level;
-import java.util.logging.Logger;
+import java.util.concurrent.locks.ReentrantLock;
 
 class StdioMcpClient implements McpClient {
-    private static final Logger LOGGER = Logger.getLogger(StdioMcpClient.class.getName());
-
     private final String name;
     private final List<String> command;
     private final List<String> env;
@@ -41,10 +45,14 @@ class StdioMcpClient implements McpClient {
     private final JsonMapper mapper;
     private final ProcessService processes;
     private final AtomicLong ids = new AtomicLong();
-
+    private final Map<Long, CompletableFuture<McpWire.Envelope>> pending = new ConcurrentHashMap<>();
+    private final ReentrantLock writeLock = new ReentrantLock();
     private volatile Process process;
-    private volatile BufferedReader reader;
     private volatile OutputStream writer;
+    private final AtomicBoolean closed = new AtomicBoolean();
+    private final AtomicBoolean started = new AtomicBoolean();
+    private static final long TIMEOUT_NANOS = TimeUnit.SECONDS.toNanos(60);
+    private static final int MAX_DISCOVERY_PAGES = 128;
 
     StdioMcpClient(
             final String name,
@@ -54,192 +62,276 @@ class StdioMcpClient implements McpClient {
             final JsonMapper mapper,
             final ProcessService processes) {
         this.name = name;
-        this.command = command;
-        this.env = env;
+        this.command = List.copyOf(command);
+        this.env = List.copyOf(env);
         this.dir = dir;
         this.mapper = mapper;
         this.processes = processes;
     }
 
     @Override
-    public synchronized void initialize() throws IOException, InterruptedException {
-        final var pb = new ProcessBuilder(command);
-        pb.redirectErrorStream(false);
-        if (dir != null && !dir.isBlank()) {
-            pb.directory(Path.of(dir).toAbsolutePath().normalize().toFile());
+    public void initialize() throws IOException, InterruptedException {
+        if (closed.get() || !started.compareAndSet(false, true)) {
+            throw new IOException("MCP connection closed or already started");
         }
-        for (final var kv : env) {
-            final var i = kv.indexOf('=');
-            if (i > 0) {
+        Process launched = null;
+        try {
+            final var pb = new ProcessBuilder(command).redirectErrorStream(false);
+            if (dir != null && !dir.isBlank()) {
+                pb.directory(Path.of(dir).toFile());
+            }
+            for (final var kv : env) {
+                final var i = kv.indexOf('=');
+                if (i <= 0) {
+                    throw new IOException("Invalid MCP environment variable");
+                }
                 pb.environment().put(kv.substring(0, i), kv.substring(i + 1));
             }
-        }
-        process = pb.start();
-        reader = new BufferedReader(new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8));
-        writer = process.getOutputStream();
-        if (processes != null) {
-            processes.track(process);
-        }
-        // drain stderr on a daemon thread: an MCP server that logs to stderr must not wedge
-        // the request/response loop on a full pipe (the pipe is drained, the log is tail-logged)
-        final var stderr = process.getErrorStream();
-        final var stderrReader = new BufferedReader(new InputStreamReader(stderr, StandardCharsets.UTF_8));
-        Thread.ofVirtual().start(() -> {
-            try {
-                String line;
-                while ((line = stderrReader.readLine()) != null) {
-                    final var captured = line;
-                    LOGGER.log(Level.FINE, () -> "MCP " + StdioMcpClient.this.name + " stderr: " + captured);
-                }
-            } catch (final IOException e) {
-                // process exit closed the stream: nothing to do
+            // No lifecycle lock spans start(), tracking, pipe I/O, or protocol initialization.
+            // Until publication/registration completes, the initializer still owns cleanup.
+            launched = pb.start();
+            process = launched;
+            if (processes != null) {
+                processes.track(launched);
             }
-        });
-        IOException last = null;
-        for (final var candidate : SUPPORTED_PROTOCOL_VERSIONS) {
-            try {
-                final var res = request(
-                        "initialize",
-                        Map.of(
-                                "protocolVersion", candidate,
-                                "capabilities", Map.of(),
-                                "clientInfo", Map.of("name", "yca", "version", "1.0.0")));
-                if (res instanceof Map<?, ?> r
-                        && r.get("protocolVersion") instanceof String echoed
-                        && !echoed.isBlank()) {
-                    protocolVersion = echoed;
+            if (closed.get()) {
+                throw new IOException("MCP connection closed");
+            }
+            writer = launched.getOutputStream();
+            // Untrusted stderr can contain supplied credentials. Drain bytes, never log or persist them.
+            final var stderr = launched.getErrorStream();
+            Thread.ofVirtual().name("mcp-stderr").start(() -> {
+                try (stderr) {
+                    stderr.transferTo(OutputStream.nullOutputStream());
+                } catch (final IOException ignored) {
+                    // Process teardown.
+                }
+            });
+            final var input = launched.getInputStream();
+            Thread.ofVirtual().name("mcp-reader").start(() -> read(input));
+            final var result = request(
+                    "initialize",
+                    new McpWire.Initialize(
+                            SUPPORTED_PROTOCOL_VERSIONS.getFirst(),
+                            new McpWire.Empty(),
+                            new McpWire.Info("yca", "1.0.0")),
+                    McpWire.Initialized.class);
+            if (!SUPPORTED_PROTOCOL_VERSIONS.contains(result.protocolVersion())) {
+                throw new IOException("Unsupported MCP protocol version");
+            }
+            send(new McpWire.Envelope("2.0", null, "notifications/initialized", null, null, null));
+        } catch (final IOException | InterruptedException | RuntimeException e) {
+            close();
+            // close() may already have run before publication or before track() returned.
+            if (launched != null) {
+                dispose(launched);
+            }
+            if (e instanceof InterruptedException interrupted) {
+                throw interrupted;
+            }
+            throw new IOException("MCP initialization failed");
+        }
+    }
+
+    @Override
+    public List<McpServerTool> listTools() throws IOException, InterruptedException {
+        final var deadline = System.nanoTime() + TIMEOUT_NANOS;
+        try {
+            final var out = new ArrayList<McpServerTool>();
+            final var cursors = new HashSet<String>();
+            String cursor = null;
+            int pages = 0;
+            do {
+                if (++pages > MAX_DISCOVERY_PAGES) {
+                    throw new IOException("Too many MCP discovery pages");
+                }
+                final var result = request("tools/list", new McpWire.ListParams(cursor), McpWire.Tools.class, deadline);
+                if (result.tools() == null) {
+                    throw new IOException("Invalid MCP tool list");
+                }
+                for (final var t : result.tools()) {
+                    if (t.name() == null || t.name().isBlank() || out.size() >= 10000) {
+                        throw new IOException("Invalid MCP tool descriptor or too many tools");
+                    }
+                    out.add(new McpServerTool(t.name(), t.description(), t.inputSchema()));
+                }
+                cursor = result.nextCursor();
+                if (cursor != null && !cursors.add(cursor)) {
+                    throw new IOException("Repeated MCP pagination cursor");
+                }
+            } while (cursor != null);
+            return List.copyOf(out);
+        } catch (final IOException | InterruptedException | RuntimeException e) {
+            close();
+            throw e;
+        }
+    }
+
+    private void read(final InputStream input) {
+        try (final var reader = new BufferedReader(new InputStreamReader(input, StandardCharsets.UTF_8.newDecoder()))) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                final var message = McpWire.envelope(mapper, line);
+                if (message.method() != null) {
+                    if (message.id() != null) {
+                        // No sampling/roots/elicitation capability is negotiated.
+                        send(new McpWire.Envelope(
+                                "2.0",
+                                message.id(),
+                                null,
+                                null,
+                                "ping".equals(message.method()) ? new McpWire.Empty() : null,
+                                "ping".equals(message.method())
+                                        ? null
+                                        : new McpWire.Error(-32601, "Method not supported")));
+                    }
                 } else {
-                    protocolVersion = candidate;
-                }
-                notify("notifications/initialized", null);
-                return;
-            } catch (final IOException e) {
-                last = e;
-            }
-        }
-        dispose(process);
-        throw last == null ? new IOException("MCP " + name + ": empty initialize response") : last;
-    }
-
-    private String protocolVersion;
-
-    @Override
-    public synchronized List<McpServerTool> listTools() throws IOException, InterruptedException {
-        final var res = request("tools/list", Map.of());
-        final var out = new ArrayList<McpServerTool>();
-        if (res instanceof Map<?, ?> m && m.get("tools") instanceof List<?> tools) {
-            for (final var t : tools) {
-                if (t instanceof Map<?, ?> tool) {
-                    out.add(new McpServerTool(
-                            String.valueOf(tool.get("name")),
-                            tool.get("description") == null ? "" : String.valueOf(tool.get("description")),
-                            tool.get("inputSchema") instanceof Map<?, ?> s ? castMap(s) : Map.of()));
-                }
-            }
-        }
-        return out;
-    }
-
-    @Override
-    public synchronized String callTool(final String toolName, final Map<String, Object> arguments)
-            throws IOException, InterruptedException {
-        final var res = request("tools/call", Map.of("name", toolName, "arguments", arguments));
-        if (res instanceof Map<?, ?> m) {
-            if (Boolean.parseBoolean(String.valueOf(m.get("isError")))) {
-                throw new IOException("MCP tool " + toolName + " failed: " + m.get("content"));
-            }
-            final var sb = new StringBuilder();
-            if (m.get("content") instanceof List<?> content) {
-                for (final var c : content) {
-                    if (c instanceof Map<?, ?> cm && "text".equals(String.valueOf(cm.get("type")))) {
-                        if (sb.length() > 0) {
-                            sb.append('\n');
-                        }
-                        sb.append(cm.get("text"));
+                    final var id = McpWire.numericId(message.id());
+                    final var future = id == null ? null : pending.remove(id);
+                    if (future != null) {
+                        future.complete(message);
                     }
                 }
             }
-            return sb.toString();
+        } catch (final IOException | RuntimeException ignored) {
+            // Never include untrusted server messages or launch environment in diagnostics.
+        } finally {
+            close();
         }
-        return String.valueOf(res);
-    }
-
-    private Object request(final String method, final Map<String, Object> params)
-            throws IOException, InterruptedException {
-        final var id = ids.incrementAndGet();
-        send(Map.of("jsonrpc", "2.0", "id", id, "method", method, "params", params));
-        String line;
-        while ((line = reader.readLine()) != null) {
-            if (line.isBlank()) {
-                continue;
-            }
-            final Object json;
-            try {
-                json = mapper.fromString(Object.class, line);
-            } catch (final RuntimeException e) {
-                continue;
-            }
-            if (json instanceof Map<?, ?> m && m.get("id") instanceof Number n && n.longValue() == id) {
-                if (m.get("error") instanceof Map<?, ?> err) {
-                    throw new IOException("MCP " + name + " " + method + " error: " + err.get("message"));
-                }
-                return m.get("result");
-            }
-        }
-        throw new IOException("MCP " + name + " closed the stream during " + method);
-    }
-
-    private void notify(final String method, final Map<String, Object> params) throws IOException {
-        final var m = new LinkedHashMap<String, Object>();
-        m.put("jsonrpc", "2.0");
-        m.put("method", method);
-        if (params != null) {
-            m.put("params", params);
-        }
-        send(m);
-    }
-
-    private void send(final Map<String, Object> message) throws IOException {
-        writer.write(mapper.toString(message).getBytes(StandardCharsets.UTF_8));
-        writer.write('\n');
-        writer.flush();
-    }
-
-    @SuppressWarnings("unchecked")
-    private static Map<String, Object> castMap(final Map<?, ?> m) {
-        return (Map<String, Object>) m;
     }
 
     @Override
-    public synchronized void close() {
-        final var current = process;
-        if (current != null && current.isAlive()) {
-            dispose(current);
-        }
-        closeQuietly(reader);
-        closeQuietly(writer);
-        process = null;
-        reader = null;
-        writer = null;
+    public String callTool(final String toolName, final Map<String, Object> arguments)
+            throws IOException, InterruptedException {
+        return McpWire.text(mapper, request("tools/call", new McpWire.Call(toolName, arguments), McpWire.Result.class));
     }
 
-    /** Kills and reaps the whole subprocess tree through the shared service. */
-    private void dispose(final Process process) {
-        if (processes != null) {
-            processes.dispose(process);
-        } else if (process != null && process.isAlive()) {
-            process.destroyForcibly();
+    private <T> T request(final String method, final Object params, final Class<T> type)
+            throws IOException, InterruptedException {
+        return request(method, params, type, System.nanoTime() + TIMEOUT_NANOS);
+    }
+
+    private <T> T request(final String method, final Object params, final Class<T> type, final long deadline)
+            throws IOException, InterruptedException {
+        if (closed.get() || process == null || !process.isAlive()) {
+            throw new IOException("MCP connection closed");
+        }
+        final var id = ids.incrementAndGet();
+        final var future = new CompletableFuture<McpWire.Envelope>();
+        pending.put(id, future);
+        try {
+            if (closed.get()) {
+                throw new IOException("MCP connection closed");
+            }
+            send(new McpWire.Envelope("2.0", id, method, params, null, null), deadline);
+            final var response = future.get(remaining(deadline), TimeUnit.NANOSECONDS);
+            if (response.error() != null || response.result() == null) {
+                throw new IOException("MCP request failed: " + method);
+            }
+            try {
+                return McpWire.payload(mapper, response.result(), type);
+            } catch (final IOException e) {
+                close();
+                throw e;
+            }
+        } catch (final ExecutionException | TimeoutException e) {
+            close();
+            throw new IOException("MCP request failed: " + method);
+        } catch (final InterruptedException e) {
+            // Interrupting a call destroys the owned connection so a blocked server/process cannot leak.
+            close();
+            throw e;
+        } finally {
+            pending.remove(id);
         }
     }
 
-    private static void closeQuietly(final AutoCloseable resource) {
-        if (resource == null) {
+    private void send(final McpWire.Envelope message) throws IOException {
+        try {
+            send(message, System.nanoTime() + TIMEOUT_NANOS);
+        } catch (final InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IOException("MCP write interrupted");
+        }
+    }
+
+    private long remaining(final long deadline) throws TimeoutException {
+        final var remaining = deadline - System.nanoTime();
+        if (remaining <= 0) {
+            throw new TimeoutException();
+        }
+        return remaining;
+    }
+
+    private void send(final McpWire.Envelope message, final long deadline) throws IOException, InterruptedException {
+        final var sent = new CompletableFuture<Void>();
+        // Pipe writes are not reliably interruptible. Keep the caller interruptible and able to
+        // kill the transport even while the writer is blocked in the OS or waiting for writeLock.
+        final var task = Thread.ofVirtual().name("mcp-writer").start(() -> {
+            try {
+                write(message);
+                sent.complete(null);
+            } catch (final IOException | RuntimeException e) {
+                sent.completeExceptionally(e);
+            }
+        });
+        try {
+            sent.get(remaining(deadline), TimeUnit.NANOSECONDS);
+        } catch (final ExecutionException | TimeoutException e) {
+            close();
+            throw new IOException("MCP write failed");
+        } catch (final InterruptedException e) {
+            close();
+            throw e;
+        } finally {
+            task.interrupt();
+        }
+    }
+
+    private void write(final McpWire.Envelope message) throws IOException {
+        final var bytes = mapper.toString(message).getBytes(StandardCharsets.UTF_8);
+        writeLock.lock();
+        try {
+            if (closed.get() || writer == null) {
+                throw new IOException("MCP connection closed");
+            }
+            writer.write(bytes);
+            writer.write('\n');
+            writer.flush();
+        } finally {
+            writeLock.unlock();
+        }
+    }
+
+    private void failPending() {
+        pending.values().forEach(f -> f.completeExceptionally(new IOException("MCP connection closed")));
+        pending.clear();
+    }
+
+    @Override
+    public void close() {
+        if (!closed.compareAndSet(false, true)) {
             return;
         }
-        try {
-            resource.close();
-        } catch (final Exception e) {
-            // best-effort: the process is already destroyed
+        failPending();
+        final var current = process;
+        if (current != null) {
+            dispose(current);
+        }
+    }
+
+    private void dispose(final Process current) {
+        // Terminate before touching stream locks: a blocked pipe write may hold one.
+        current.descendants().forEach(ProcessHandle::destroyForcibly);
+        current.destroyForcibly();
+        if (processes != null) {
+            processes.dispose(current);
+        } else {
+            try {
+                current.waitFor(3, TimeUnit.SECONDS);
+            } catch (final InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
         }
     }
 }

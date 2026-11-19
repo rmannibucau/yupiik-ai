@@ -28,6 +28,7 @@ import io.yupiik.ia.agent.core.tools.Schemas;
 import io.yupiik.ia.agent.core.tools.ToolCategory;
 import io.yupiik.ia.agent.core.tools.ToolContext;
 import io.yupiik.ia.agent.core.tools.ToolResult;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
@@ -57,7 +58,7 @@ public class WriteTodoTool implements EmbeddedTool {
     }
 
     @Override
-    public String description() {
+    public String description(final Path workdir) {
         return "Create and maintain the session's structured todo list (content + status) for multi-step work "
                 + "(3+ distinct steps). Status: pending/in_progress/completed/cancelled. In PLAN mode new items "
                 + "stay 'pending' (the list IS the plan); in BUILD mode mark in_progress as you start, completed "
@@ -93,11 +94,6 @@ public class WriteTodoTool implements EmbeddedTool {
                                         "content",
                                         "status"))),
                 "todos");
-    }
-
-    @Override
-    public ToolResult execute(final Map<String, Object> args) {
-        return ToolResult.error("write_todo requires an active session context.");
     }
 
     /**
@@ -191,10 +187,10 @@ public class WriteTodoTool implements EmbeddedTool {
         final EventContext eventContext;
         if (contextBuilder == null) {
             eventContext = new EventContext(
-                    context == null ? null : context.sessionId(),
-                    context == null ? null : context.subagentId(),
-                    context == null ? null : context.subagentName(),
-                    null,
+                    context.sessionId(),
+                    context.subagentId(),
+                    context.subagentName(),
+                    context.projectDir().toString(),
                     null,
                     null,
                     null,
@@ -203,10 +199,10 @@ public class WriteTodoTool implements EmbeddedTool {
             eventContext = contextBuilder.build(
                     null,
                     null,
-                    context == null ? null : context.sessionId(),
-                    context == null ? null : context.subagentId(),
-                    context == null ? null : context.subagentName(),
-                    null);
+                    context.sessionId(),
+                    context.subagentId(),
+                    context.subagentName(),
+                    context.projectDir());
         }
         emitter.emit(new TodoUpdatedEvent(eventContext, before, store.all()));
     }

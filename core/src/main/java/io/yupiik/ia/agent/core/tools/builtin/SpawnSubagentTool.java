@@ -33,6 +33,7 @@ import io.yupiik.ia.agent.core.tools.ToolCategory;
 import io.yupiik.ia.agent.core.tools.ToolContext;
 import io.yupiik.ia.agent.core.tools.ToolResult;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
+import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -100,7 +101,7 @@ public class SpawnSubagentTool implements EmbeddedTool {
     }
 
     @Override
-    public String description() {
+    public String description(final Path workdir) {
         return "Launch a sub-agent to work on a task in parallel with isolated state. "
                 + "It inherits the parent's project context and permission ceiling, and has its own "
                 + "conversation history, permission grants, todo list, and snapshots. Optional agent profiles "
@@ -145,11 +146,6 @@ public class SpawnSubagentTool implements EmbeddedTool {
                                                 + "for the sub-agent; an empty list allows no tools.",
                                         Schemas.str("Tool name"))),
                 "task");
-    }
-
-    @Override
-    public ToolResult execute(final Map<String, Object> args) {
-        return ToolResult.error("spawn_subagent requires an active session context.");
     }
 
     /**

@@ -36,6 +36,7 @@ import io.yupiik.ia.agent.core.context.UsageTracker;
 import io.yupiik.ia.agent.core.events.EventContext;
 import io.yupiik.ia.agent.core.events.SessionStartedEvent;
 import io.yupiik.ia.agent.core.llm.ChatClient;
+import io.yupiik.ia.agent.core.llm.ChatSettings;
 import io.yupiik.ia.agent.core.maven.MavenRepositoryKnowledgeService;
 import io.yupiik.ia.agent.core.memory.MemoryCompactor;
 import io.yupiik.ia.agent.core.memory.MemoryProductionPolicy;
@@ -46,6 +47,7 @@ import io.yupiik.ia.agent.core.permissions.PermissionService;
 import io.yupiik.ia.agent.core.question.UserFeedbackService;
 import io.yupiik.ia.agent.core.runtime.StatusReporter;
 import io.yupiik.ia.agent.core.security.SecretRedactor;
+import io.yupiik.ia.agent.core.session.SessionMetadata;
 import io.yupiik.ia.agent.core.session.SessionStore;
 import io.yupiik.ia.agent.core.snapshot.SnapshotStore;
 import io.yupiik.ia.agent.core.todo.TodoStore;
@@ -55,8 +57,11 @@ import io.yupiik.ia.agent.core.usage.QuotaSnapshotStore;
 import io.yupiik.ia.agent.core.wiring.PrecisionDurationMarkerProvider;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import java.nio.file.Files;
+import java.nio.file.InvalidPathException;
 import java.nio.file.Path;
 import java.time.Clock;
+import java.util.List;
+import java.util.Objects;
 import java.util.concurrent.ExecutorService;
 
 /**
@@ -147,8 +152,18 @@ public class SessionRuntimeFactory {
      *                   usually the session id at tab creation
      * @param sessionId  the initial chat session id owned by the runtime
      */
-    public SessionRuntime create(final String sessionKey, final String sessionId) {
-        final var permissions = new PermissionService(configuration, emitter, bashRulesRegistry);
+    public SessionRuntime create(final String sessionKey, final String sessionId, final Path workdir) {
+        return create(sessionKey, sessionId, toolRegistry, workdir);
+    }
+
+    /** Creates a runtime with an isolated tool registry for this session's loop. */
+    public SessionRuntime create(
+            final String sessionKey, final String sessionId, final ToolRegistry sessionTools, final Path workdir) {
+        Objects.requireNonNull(workdir, "workdir");
+        if (!workdir.isAbsolute() || !workdir.equals(workdir.normalize())) {
+            throw new IllegalArgumentException("workdir must be absolute and normalized: " + workdir);
+        }
+        final var permissions = new PermissionService(configuration, emitter, bashRulesRegistry, workdir);
         final var feedback = new UserFeedbackService();
         final var usage = new UsageTracker(providerManager, chatClient, contextWindowCache, clock);
         final var todos = new TodoStore(configuration, mapper, sessionKey);
@@ -156,7 +171,7 @@ public class SessionRuntimeFactory {
         final var status = new StatusReporter();
         final var contextView = new ContextView(configuration.compression());
         final var compactionCoordinator = new CompactionCoordinator(
-                configuration, chatClient, usage, providerManager, emitter, sessionId, backoffSleeper);
+                configuration, chatClient, usage, providerManager, emitter, sessionId, backoffSleeper, workdir);
         final var contextManager = new ContextManager(configuration, usage, compactionCoordinator);
         final var memoryCompactor =
                 new MemoryCompactor(chatClient, configuration, memoryStore, providerManager, usage, emitter, sessionId);
@@ -173,7 +188,8 @@ public class SessionRuntimeFactory {
                 sessionId,
                 memoryCompactor,
                 memoryProductionPolicy,
-                secretRedactor);
+                secretRedactor,
+                workdir);
         final var systemPromptBuilder = new SystemPromptBuilder(
                 configuration,
                 memoryStore,
@@ -183,10 +199,11 @@ public class SessionRuntimeFactory {
                 providerManager,
                 todoPromptResolver,
                 mavenRepositoryKnowledge,
-                secretRedactor);
+                secretRedactor,
+                workdir);
         final var loop = new AgentLoop(
                 chatClient,
-                toolRegistry,
+                sessionTools,
                 toolExecutionService,
                 configuration,
                 permissions,
@@ -216,18 +233,13 @@ public class SessionRuntimeFactory {
                 notificationService,
                 null,
                 null,
-                null);
+                null,
+                workdir);
         // bounded initialization telemetry: mark the runtime wiring window so pre-first-request
         // startup is decomposable (runtime creation -> model resolution -> prompt build -> initial prompt)
-        emitPhase(emitter, sessionId, AgentEvent.Phase.RUNTIME_CREATE_START);
-        // resolve the session's working directory once (explicit override > recorded project marker >
-        // process default) and freeze it in the loop + system prompt builder: the stable system-prompt
-        // core must stay byte-identical across turns, so this is never re-read mid-conversation.
-        final var workdir = resolveSessionWorkdir(sessionId);
-        if (workdir != null) {
-            loop.sessionWorkdir(workdir);
-            systemPromptBuilder.workdir(workdir);
-            permissions.projectDir(workdir);
+        emitPhase(emitter, sessionId, AgentEvent.Phase.RUNTIME_CREATE_START, workdir);
+        if (mavenRepositoryKnowledge != null) {
+            mavenRepositoryKnowledge.warmUp(workdir);
         }
         // per-session sub-agent admission budget: the yca.subagents.maxConcurrent cap, owned by the
         // session object (dies with it, no registry-side map to clean up). Sub-agent child loops
@@ -237,12 +249,11 @@ public class SessionRuntimeFactory {
         }
         if (emitter != null) {
             emitter.emit(new SessionStartedEvent(
-                    new EventContext(
-                            null, null, null, configuration.resolveProjectDir().toString(), null, null, null, null),
+                    new EventContext(null, null, null, workdir.toString(), null, null, null, null),
                     sessionId,
                     sessionKey));
         }
-        emitPhase(emitter, sessionId, AgentEvent.Phase.RUNTIME_CREATE_END);
+        emitPhase(emitter, sessionId, AgentEvent.Phase.RUNTIME_CREATE_END, workdir);
         return new SessionRuntime(
                 loop,
                 permissions,
@@ -253,40 +264,62 @@ public class SessionRuntimeFactory {
                 contextManager,
                 systemPromptBuilder,
                 memoryProductionPolicy,
-                sessionId);
+                sessionId,
+                workdir);
     }
 
     /** Convenience: the key and the initial session id are the same value. */
-    public SessionRuntime create(final String sessionId) {
-        return create(sessionId, sessionId);
+    public SessionRuntime create(final String sessionId, final Path workdir) {
+        return create(sessionId, sessionId, workdir);
+    }
+
+    /** Validate prompt budget/context before a frontend allocates a persistent session or publishes resources. */
+    public void validateSessionContext(
+            final ChatSettings settings,
+            final Path workdir,
+            final List<Path> additionalDirectories,
+            final SessionMetadata.Instructions instructions) {
+        final var builder = new SystemPromptBuilder(
+                configuration,
+                memoryStore,
+                null,
+                null,
+                agentProvider,
+                providerManager,
+                todoPromptResolver,
+                mavenRepositoryKnowledge,
+                secretRedactor,
+                workdir);
+        builder.attach(settings);
+        builder.configureSessionContext(additionalDirectories, instructions);
     }
 
     /**
-     * Resolves a session's working directory to a canonical absolute {@link Path}, or {@code null}
-     * when none can be established (the process default then applies downstream). Prefers the recorded
-     * project marker so a persisted session survives restarts on its own root, but only while that
-     * marker still points at an existing directory: a stale marker (project moved/renamed/deleted since
-     * the session was recorded) must never hand a dead path to tools, so it falls back to the configured
-     * working directory instead.
+     * Resolves frontend input once: explicit cwd, eligible resumed metadata, then the configured default.
+     * Relative frontend paths are normalized here, without resolving symlinks.
+     * An invalid explicit cwd fails rather than selecting another directory.
      */
-    protected Path resolveSessionWorkdir(final String sessionId) {
-        if (sessionStore == null || sessionId == null) {
-            return null;
-        }
-        final var recorded = sessionStore.projectDirOf(sessionId);
-        if (recorded != null && !recorded.isBlank()) {
-            try {
-                final var dir = Path.of(recorded).toAbsolutePath().normalize();
-                if (Files.isDirectory(dir)) {
-                    return dir;
+    public Path resolveWorkdir(final Path explicitWorkdir, final String resumedSessionId) {
+        if (explicitWorkdir == null && sessionStore != null && resumedSessionId != null) {
+            final var recorded = sessionStore.projectDirOf(resumedSessionId);
+            if (recorded != null && !recorded.isBlank()) {
+                try {
+                    final var candidate = Path.of(recorded);
+                    if (candidate.isAbsolute() && Files.isDirectory(candidate)) {
+                        return candidate.normalize();
+                    }
+                } catch (final InvalidPathException ignored) {
+                    // Malformed or stale metadata is ineligible; explicit input never falls back.
                 }
-            } catch (final RuntimeException e) {
-                // malformed recorded marker: fall through to the configured working directory
             }
         }
-        // no record, a malformed one, or a stale one that no longer exists on disk: use the configured
-        // working directory so the session still gets a live cwd (never error just because the marker is dead).
-        return configuration == null ? null : configuration.resolveWorkingDir();
+        final var root = (explicitWorkdir == null ? configuration.resolveWorkingDir() : explicitWorkdir)
+                .toAbsolutePath()
+                .normalize();
+        if (!Files.isDirectory(root)) {
+            throw new IllegalArgumentException("workdir is not an existing directory: " + root);
+        }
+        return root;
     }
 
     /** For subclasses wiring a fake session (tests). */
@@ -317,9 +350,9 @@ public class SessionRuntimeFactory {
         this.notificationService = null;
     }
 
-    private static void emitPhase(final Emitter emitter, final String sessionId, final String name) {
+    private void emitPhase(final Emitter emitter, final String sessionId, final String name, final Path workdir) {
         if (emitter != null) {
-            emitter.emit(new AgentEvent.Phase(name, sessionId));
+            emitter.emit(new AgentEvent.Phase(name, sessionId, workdir));
         }
     }
 }

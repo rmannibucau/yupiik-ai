@@ -25,16 +25,20 @@ import io.yupiik.fusion.framework.api.event.Emitter;
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.agent.AgentEvent;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
+import io.yupiik.ia.agent.core.configuration.TestConfigs;
 import io.yupiik.ia.agent.core.llm.ChatClient;
 import io.yupiik.ia.agent.core.llm.ChatCompletionRequest;
 import io.yupiik.ia.agent.core.llm.ChatResult;
 import io.yupiik.ia.agent.core.llm.ChatSettings;
 import io.yupiik.ia.agent.core.llm.Message;
+import io.yupiik.ia.agent.core.llm.PauseEvent;
 import io.yupiik.ia.agent.core.llm.ToolCall;
+import io.yupiik.ia.agent.core.llm.ToolCall.FunctionCall;
 import io.yupiik.ia.agent.core.llm.Usage;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import io.yupiik.ia.agent.test.TestJsonMapper;
 import java.io.IOException;
+import java.nio.file.Path;
 import java.time.Clock;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -43,12 +47,19 @@ import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
+import java.util.regex.Pattern;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.api.io.TempDir;
 
 @ExtendWith(TestJsonMapper.class)
 class ContextManagerTest {
+    private static final Pattern COMPACTION_PROGRESS =
+            Pattern.compile("Compaction in progress... \\(≈[0-9]+ estimated tokens; [a-z-]+\\)");
+
+    @TempDir
+    private static Path eventWorkdir;
 
     private JsonMapper mapper;
 
@@ -80,7 +91,7 @@ class ContextManagerTest {
         entries.put("yca.provider.providers.0.timeoutSeconds", "120");
         entries.put("yca.pruning.keepRecent", String.valueOf(keepRecent));
         entries.putAll(extra);
-        return io.yupiik.ia.agent.core.configuration.TestConfigs.codingAgent(entries);
+        return TestConfigs.codingAgent(entries);
     }
 
     @Test
@@ -96,7 +107,8 @@ class ContextManagerTest {
                         providerManager(cfg),
                         null,
                         "s1",
-                        new BackoffSleeper()));
+                        new BackoffSleeper(),
+                        (cfg).resolveWorkingDir()));
         final var messages = new ArrayList<Message>();
         messages.add(Message.system("system"));
         for (var i = 0; i < 3; i++) {
@@ -116,7 +128,7 @@ class ContextManagerTest {
             @Override
             public ChatResult chat(
                     final ChatCompletionRequest request,
-                    final Consumer<io.yupiik.ia.agent.core.llm.PauseEvent> listener,
+                    final Consumer<PauseEvent> listener,
                     final BooleanSupplier cancelled) {
                 return new ChatResult(Message.assistant(digest, null), Usage.EMPTY);
             }
@@ -131,7 +143,8 @@ class ContextManagerTest {
                         providerManager(cfg),
                         null,
                         "s1",
-                        new BackoffSleeper()));
+                        new BackoffSleeper(),
+                        (cfg).resolveWorkingDir()));
         final var messages = new ArrayList<Message>();
         messages.add(Message.system("system"));
         for (var i = 0; i < 5; i++) {
@@ -167,7 +180,7 @@ class ContextManagerTest {
             @Override
             public ChatResult chat(
                     final ChatCompletionRequest request,
-                    final Consumer<io.yupiik.ia.agent.core.llm.PauseEvent> listener,
+                    final Consumer<PauseEvent> listener,
                     final BooleanSupplier cancelled) {
                 return new ChatResult(Message.assistant("folded-into-previous + new tool work", null), Usage.EMPTY);
             }
@@ -182,7 +195,8 @@ class ContextManagerTest {
                         providerManager(cfg),
                         null,
                         "s1",
-                        new BackoffSleeper()));
+                        new BackoffSleeper(),
+                        (cfg).resolveWorkingDir()));
         final var messages = new ArrayList<Message>();
         messages.add(Message.system("system"));
         // the previous digest as the only real user content
@@ -233,7 +247,7 @@ class ContextManagerTest {
             @Override
             public ChatResult chat(
                     final ChatCompletionRequest request,
-                    final Consumer<io.yupiik.ia.agent.core.llm.PauseEvent> listener,
+                    final Consumer<PauseEvent> listener,
                     final BooleanSupplier cancelled) {
                 captured.add(List.copyOf(request.messages()));
                 return new ChatResult(Message.assistant("merged", null), Usage.EMPTY);
@@ -294,7 +308,7 @@ class ContextManagerTest {
             @Override
             public ChatResult chat(
                     final ChatCompletionRequest request,
-                    final Consumer<io.yupiik.ia.agent.core.llm.PauseEvent> listener,
+                    final Consumer<PauseEvent> listener,
                     final BooleanSupplier cancelled) {
                 calls.incrementAndGet();
                 return new ChatResult(Message.assistant("x", null), Usage.EMPTY);
@@ -328,7 +342,7 @@ class ContextManagerTest {
             @Override
             public ChatResult chat(
                     final ChatCompletionRequest request,
-                    final Consumer<io.yupiik.ia.agent.core.llm.PauseEvent> listener,
+                    final Consumer<PauseEvent> listener,
                     final BooleanSupplier cancelled) {
                 captured.add(List.copyOf(request.messages()));
                 return new ChatResult(Message.assistant("summarized", null), Usage.EMPTY);
@@ -371,7 +385,7 @@ class ContextManagerTest {
             @Override
             public ChatResult chat(
                     final ChatCompletionRequest request,
-                    final Consumer<io.yupiik.ia.agent.core.llm.PauseEvent> listener,
+                    final Consumer<PauseEvent> listener,
                     final BooleanSupplier cancelled) {
                 return new ChatResult(Message.assistant(digest, null), Usage.EMPTY);
             }
@@ -386,7 +400,8 @@ class ContextManagerTest {
                         providerManager(cfg),
                         null,
                         "s1",
-                        new BackoffSleeper()));
+                        new BackoffSleeper(),
+                        (cfg).resolveWorkingDir()));
         final var messages = new ArrayList<Message>();
         messages.add(Message.system("system"));
         for (var i = 0; i < 5; i++) {
@@ -416,7 +431,7 @@ class ContextManagerTest {
             @Override
             public ChatResult chat(
                     final ChatCompletionRequest request,
-                    final Consumer<io.yupiik.ia.agent.core.llm.PauseEvent> listener,
+                    final Consumer<PauseEvent> listener,
                     final BooleanSupplier cancelled) {
                 captured.add(List.copyOf(request.messages()));
                 return new ChatResult(Message.assistant("digest: custom focus", null), Usage.EMPTY);
@@ -432,7 +447,8 @@ class ContextManagerTest {
                         providerManager(cfg),
                         null,
                         "s1",
-                        new BackoffSleeper()));
+                        new BackoffSleeper(),
+                        (cfg).resolveWorkingDir()));
         final var messages = new ArrayList<Message>();
         messages.add(Message.system("system"));
         for (var i = 0; i < 5; i++) {
@@ -466,7 +482,7 @@ class ContextManagerTest {
             @Override
             public ChatResult chat(
                     final ChatCompletionRequest request,
-                    final Consumer<io.yupiik.ia.agent.core.llm.PauseEvent> listener,
+                    final Consumer<PauseEvent> listener,
                     final BooleanSupplier cancelled) {
                 return new ChatResult(Message.assistant(digest, null), Usage.EMPTY);
             }
@@ -481,7 +497,8 @@ class ContextManagerTest {
                         providerManager(cfg),
                         null,
                         "s1",
-                        new BackoffSleeper()));
+                        new BackoffSleeper(),
+                        (cfg).resolveWorkingDir()));
         final var messages = new ArrayList<Message>();
         messages.add(Message.system("system"));
         for (var i = 0; i < 7; i++) {
@@ -532,7 +549,7 @@ class ContextManagerTest {
             @Override
             public ChatResult chat(
                     final ChatCompletionRequest request,
-                    final Consumer<io.yupiik.ia.agent.core.llm.PauseEvent> listener,
+                    final Consumer<PauseEvent> listener,
                     final BooleanSupplier cancelled) {
                 captured.add(request);
                 return new ChatResult(Message.assistant(digest, null), Usage.EMPTY);
@@ -548,7 +565,8 @@ class ContextManagerTest {
                         providerManager(cfg),
                         null,
                         "s1",
-                        new BackoffSleeper()));
+                        new BackoffSleeper(),
+                        (cfg).resolveWorkingDir()));
         final var messages = new ArrayList<Message>();
         messages.add(Message.system("system"));
         for (var i = 0; i < 5; i++) {
@@ -582,7 +600,7 @@ class ContextManagerTest {
             @Override
             public ChatResult chat(
                     final ChatCompletionRequest request,
-                    final Consumer<io.yupiik.ia.agent.core.llm.PauseEvent> listener,
+                    final Consumer<PauseEvent> listener,
                     final BooleanSupplier cancelled) {
                 return new ChatResult(Message.assistant(digest, null), new Usage(11, 7, 18));
             }
@@ -591,7 +609,15 @@ class ContextManagerTest {
         final var manager = new ContextManager(
                 cfg,
                 tracker,
-                new CompactionCoordinator(cfg, chat, tracker, providerManager(cfg), null, "s1", new BackoffSleeper()));
+                new CompactionCoordinator(
+                        cfg,
+                        chat,
+                        tracker,
+                        providerManager(cfg),
+                        null,
+                        "s1",
+                        new BackoffSleeper(),
+                        (cfg).resolveWorkingDir()));
         final var messages = new ArrayList<Message>();
         messages.add(Message.system("system"));
         for (var i = 0; i < 9; i++) {
@@ -618,7 +644,8 @@ class ContextManagerTest {
                         providerManager(cfg),
                         null,
                         "s1",
-                        new BackoffSleeper()));
+                        new BackoffSleeper(),
+                        (cfg).resolveWorkingDir()));
         final var messages = new ArrayList<Message>();
         messages.add(Message.system("system"));
         for (var i = 0; i < 3; i++) {
@@ -844,9 +871,7 @@ class ContextManagerTest {
         messages.add(Message.assistant("ack", null));
         messages.add(Message.user("next step"));
         messages.add(Message.assistant(
-                "calling tools",
-                List.of(new io.yupiik.ia.agent.core.llm.ToolCall(
-                        "t1", "function", new io.yupiik.ia.agent.core.llm.ToolCall.FunctionCall("bash", "{}"), 0))));
+                "calling tools", List.of(new ToolCall("t1", "function", new FunctionCall("bash", "{}"), 0))));
         messages.add(Message.tool("t1", "tool result " + "b".repeat(2_000)));
         messages.add(Message.tool("t2", "tool result " + "c".repeat(2_000)));
         messages.add(Message.user("third step"));
@@ -1055,7 +1080,15 @@ class ContextManagerTest {
         final var manager = new ContextManager(
                 cfg,
                 new UsageTracker(providerManager(cfg), chat, null, Clock.systemUTC()),
-                new CompactionCoordinator(cfg, chat, tracker, providerManager(cfg), null, "s1", new BackoffSleeper()));
+                new CompactionCoordinator(
+                        cfg,
+                        chat,
+                        tracker,
+                        providerManager(cfg),
+                        null,
+                        "s1",
+                        new BackoffSleeper(),
+                        (cfg).resolveWorkingDir()));
         assertEquals(334_800, manager.compactionTriggerTokens(), "trigger = 90% of the usable window");
 
         // a heavy history: many tool outputs in the middle so compaction has something to summarize,
@@ -1094,7 +1127,7 @@ class ContextManagerTest {
             @Override
             public ChatResult chat(
                     final ChatCompletionRequest request,
-                    final Consumer<io.yupiik.ia.agent.core.llm.PauseEvent> listener,
+                    final Consumer<PauseEvent> listener,
                     final BooleanSupplier cancelled)
                     throws IOException {
                 throw new IOException("upstream 500");
@@ -1142,7 +1175,8 @@ class ContextManagerTest {
                             }
                         },
                         "s1",
-                        new BackoffSleeper()));
+                        new BackoffSleeper(),
+                        (cfg).resolveWorkingDir()));
 
         final var messages = new ArrayList<Message>();
         messages.add(Message.system("system"));
@@ -1166,7 +1200,7 @@ class ContextManagerTest {
                 progress.message().startsWith("Compaction in progress... (\u2248"),
                 "progress notice must carry the estimated token count: " + progress.message());
         assertTrue(
-                progress.message().matches("Compaction in progress... \\(≈[0-9]+ estimated tokens; [a-z-]+\\)"),
+                COMPACTION_PROGRESS.matcher(progress.message()).matches(),
                 "progress notice must carry a numeric estimate: " + progress.message());
         assertTrue(
                 notices.stream()
@@ -1198,7 +1232,8 @@ class ContextManagerTest {
                             }
                         },
                         "s1",
-                        new BackoffSleeper()));
+                        new BackoffSleeper(),
+                        (cfg).resolveWorkingDir()));
 
         final var messages = new ArrayList<Message>();
         messages.add(Message.system("system"));
@@ -1228,7 +1263,7 @@ class ContextManagerTest {
                 .toList();
         final var progress = notices.get(0);
         assertTrue(
-                progress.message().matches("Compaction in progress... \\(≈[0-9]+ estimated tokens; [a-z-]+\\)"),
+                COMPACTION_PROGRESS.matcher(progress.message()).matches(),
                 "progress notice must carry a numeric estimate: " + progress.message());
         final var real = Math.max(1, rawAtAnchor / 4);
         final var expected = (int) Math.round(real + ((double) real / rawAtAnchor) * (raw - rawAtAnchor));
@@ -1264,7 +1299,8 @@ class ContextManagerTest {
                             }
                         },
                         "s1",
-                        new BackoffSleeper()));
+                        new BackoffSleeper(),
+                        (cfg).resolveWorkingDir()));
 
         final var messages = new ArrayList<Message>();
         messages.add(Message.system("system"));
@@ -1293,23 +1329,29 @@ class ContextManagerTest {
                 false,
                 () -> false,
                 ChatSettings.EMPTY,
-                new CompactionCoordinator.CompactionProgress(toolTokens, effective -> {
-                    published.add(effective);
-                    // in production the tokensPublished hook routes through
-                    // SessionUsageReporter.pushUsageContext -> the same Emitter feeding
-                    // `ordered`: mirror that so the ordering assertion below is meaningful
-                    ordered.add(new AgentEvent.UsageUpdated(
-                            Usage.EMPTY,
-                            effective,
-                            tracker.contextPercent(effective),
-                            -1,
-                            -1,
-                            null,
-                            "s1",
-                            null,
-                            null,
-                            AgentEvent.UsageUpdated.Quota.NONE));
-                }));
+                new CompactionCoordinator.CompactionProgress(
+                        toolTokens,
+                        effective -> {
+                            published.add(effective);
+                            // in production the tokensPublished hook routes through
+                            // SessionUsageReporter.pushUsageContext -> the same Emitter feeding
+                            // `ordered`: mirror that so the ordering assertion below is meaningful
+                            ordered.add(new AgentEvent.UsageUpdated(
+                                    Usage.EMPTY,
+                                    effective,
+                                    tracker.contextPercent(effective),
+                                    -1,
+                                    -1,
+                                    null,
+                                    "s1",
+                                    null,
+                                    null,
+                                    AgentEvent.UsageUpdated.Quota.NONE,
+                                    eventWorkdir));
+                        },
+                        null,
+                        null,
+                        eventWorkdir));
         assertEquals(CompactionResult.Mode.SUMMARY, result.mode());
 
         final var notices = ordered.stream()
@@ -1318,7 +1360,7 @@ class ContextManagerTest {
                 .toList();
         final var progress = notices.get(0);
         assertTrue(
-                progress.message().matches("Compaction in progress... \\(≈[0-9]+ estimated tokens; [a-z-]+\\)"),
+                COMPACTION_PROGRESS.matcher(progress.message()).matches(),
                 "progress notice must carry a numeric estimate: " + progress.message());
         assertTrue(
                 progress.message().contains("≈" + expected + " estimated tokens"),
@@ -1364,7 +1406,8 @@ class ContextManagerTest {
                         providerManager(cfg),
                         null,
                         "s1",
-                        new BackoffSleeper()));
+                        new BackoffSleeper(),
+                        (cfg).resolveWorkingDir()));
     }
 
     private static ChatClient chatReturning(final String digest) {
@@ -1372,7 +1415,7 @@ class ContextManagerTest {
             @Override
             public ChatResult chat(
                     final ChatCompletionRequest request,
-                    final Consumer<io.yupiik.ia.agent.core.llm.PauseEvent> listener,
+                    final Consumer<PauseEvent> listener,
                     final BooleanSupplier cancelled) {
                 return new ChatResult(Message.assistant(digest, null), Usage.EMPTY);
             }
@@ -1384,7 +1427,7 @@ class ContextManagerTest {
             @Override
             public ChatResult chat(
                     final ChatCompletionRequest request,
-                    final Consumer<io.yupiik.ia.agent.core.llm.PauseEvent> listener,
+                    final Consumer<PauseEvent> listener,
                     final BooleanSupplier cancelled) {
                 captured.add(List.copyOf(request.messages()));
                 return new ChatResult(Message.assistant(digest, null), Usage.EMPTY);
@@ -1418,7 +1461,8 @@ class ContextManagerTest {
                         providerManager(cfg),
                         null,
                         "s1",
-                        new BackoffSleeper()));
+                        new BackoffSleeper(),
+                        (cfg).resolveWorkingDir()));
         assertFalse(manager.speculationEnabled(), "speculation must be off under ignoreLlm");
         final var messages = new ArrayList<Message>();
         messages.add(Message.system("system"));

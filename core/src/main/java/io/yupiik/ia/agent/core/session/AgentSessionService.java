@@ -33,6 +33,7 @@ import io.yupiik.ia.agent.core.snapshot.SnapshotStore;
 import io.yupiik.ia.agent.core.todo.PlanFileService;
 import io.yupiik.ia.agent.core.todo.PlanTodoSeeder;
 import io.yupiik.ia.agent.core.tools.EmbeddedTool;
+import io.yupiik.ia.agent.core.tools.ToolContext;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -40,6 +41,7 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Locale;
+import java.util.Objects;
 import java.util.TreeMap;
 
 /**
@@ -129,7 +131,7 @@ public class AgentSessionService {
      * tells whether the MCP layer reported any server at all, letting the
      * frontend distinguish "no tools available" from "no tool matches".
      */
-    public ToolListing tools(final String arg) {
+    public ToolListing tools(final String arg, final Path root) {
         final var filters = new ArrayList<String>();
         for (final var token : arg.split(" ")) {
             final var filter = token.strip().toLowerCase(Locale.ROOT);
@@ -147,7 +149,7 @@ public class AgentSessionService {
                         final var rootKey = (server.getKey() + '_' + tool.name()).toLowerCase(Locale.ROOT);
                         return rootKey.contains(filter);
                     }))
-                    .map(tool -> new ToolInfo(tool.name(), toolDescription(server.getKey(), tool)))
+                    .map(tool -> new ToolInfo(tool.name(), toolDescription(server.getKey(), tool, root)))
                     .toList();
             if (tools.isEmpty()) {
                 continue;
@@ -158,8 +160,9 @@ public class AgentSessionService {
         return new ToolListing(!byServer.isEmpty(), servers, count);
     }
 
-    private String toolDescription(final String server, final EmbeddedTool tool) {
-        var description = tool.description() == null ? "" : tool.description().strip();
+    private String toolDescription(final String server, final EmbeddedTool tool, final Path root) {
+        var description =
+                tool.description(root) == null ? "" : tool.description(root).strip();
         final var prefix = '[' + server + "] ";
         if (description.startsWith(prefix)) {
             description = description.substring(prefix.length()).strip();
@@ -211,6 +214,9 @@ public class AgentSessionService {
             // plan -> build: build means "apply the work" by default; edits become silent until
             // the next build -> plan round-trip restores the configured default.
             runtime.permissions().setPermissionMode(PermissionMode.AUTO_EDIT);
+        }
+        if (mode != previousMode && runtime.loop() != null) {
+            runtime.loop().notifyModeChanged(mode);
         }
         String seedMessage = null;
         String seedError = null;
@@ -395,7 +401,10 @@ public class AgentSessionService {
                         runtime.chatSettings(),
                         new CompactionCoordinator.CompactionProgress(
                                 runtime.loop().estimateWireToolTokens(),
-                                effective -> runtime.loop().publishUsageContext(effective)));
+                                effective -> runtime.loop().publishUsageContext(effective),
+                                null,
+                                null,
+                                runtime.workdir()));
         if (!result.changed()) {
             return new CompactionApplied(false, "context already within budget", null);
         }
@@ -466,8 +475,8 @@ public class AgentSessionService {
      * Resyncs the structural code graph index. Throws when the resync fails so
      * the caller can surface the error.
      */
-    public String resyncGraph() {
-        return structuralCodeGraph.resync();
+    public String resyncGraph(final Path root) {
+        return structuralCodeGraph.resync(root);
     }
 
     public record PlanExport(Path path, String original, String error) {}
@@ -492,10 +501,12 @@ public class AgentSessionService {
                         Path.of(configuration.resolveStorageHome()),
                         titleFallback == null ? "" : titleFallback,
                         sessionId)
-                : Path.of(arg).toAbsolutePath();
+                : ToolContext.empty(runtime.workdir()).resolvePath(arg);
         final var content = planFileService.render(plan, runtime.todos().all());
         try {
-            Files.createDirectories(path.getParent() == null ? Path.of(".") : path.getParent());
+            if (path.getParent() != null) {
+                Files.createDirectories(path.getParent());
+            }
             Files.writeString(path, content);
             return new PlanExport(path, content, null);
         } catch (final IOException e) {
@@ -542,16 +553,14 @@ public class AgentSessionService {
      * file paths and whether each file exists, so UIs can show exactly where the memory is read
      * from and distinguish "no facts yet" from "file not found".
      */
-    public MemoryContent memory() {
-        final var globalFile = Path.of(configuration.resolveStorageHome(), "memory", "MEMORY.md");
-        final var projectFile = configuration
-                .resolveWorkingDir()
-                .resolve(".yca")
-                .resolve("memory")
-                .resolve("MEMORY.md");
+    /** Reads project memory from the session root, retaining the configured global memory. */
+    public MemoryContent memory(final Path root) {
+        Objects.requireNonNull(root, "workdir");
+        final var globalFile = memoryStore.globalFile();
+        final var projectFile = MemoryStore.projectFile(root);
         return new MemoryContent(
                 memoryStore.readGlobal(),
-                memoryStore.readProject(),
+                memoryStore.readProject(root),
                 globalFile.toAbsolutePath().normalize().toString(),
                 projectFile.toAbsolutePath().normalize().toString(),
                 Files.isRegularFile(globalFile),
@@ -570,22 +579,18 @@ public class AgentSessionService {
      * Aggregated memory statistics for the inspection command: sizes, bullet
      * counts, the effective injected budget and the last compaction state.
      */
-    public MemoryStats memoryStats() {
+    /** Returns statistics and compaction state for the selected session root. */
+    public MemoryStats memoryStats(final Path root) {
+        Objects.requireNonNull(root, "workdir");
+        final var global = memoryStore.readGlobal();
+        final var project = memoryStore.readProject(root);
         return new MemoryStats(
-                memoryStore.readGlobal().length(),
-                (int) memoryStore
-                        .readGlobal()
-                        .lines()
-                        .filter(l -> l.strip().startsWith("-"))
-                        .count(),
-                memoryStore.readProject().length(),
-                (int) memoryStore
-                        .readProject()
-                        .lines()
-                        .filter(l -> l.strip().startsWith("-"))
-                        .count(),
+                global.length(),
+                (int) global.lines().filter(l -> l.strip().startsWith("-")).count(),
+                project.length(),
+                (int) project.lines().filter(l -> l.strip().startsWith("-")).count(),
                 -1,
-                null);
+                memoryCompactor == null ? null : memoryCompactor.state(root));
     }
 
     /**
@@ -593,8 +598,10 @@ public class AgentSessionService {
      * Returns the status message from the compactor, or a hint when the compactor
      * is not wired.
      */
-    public String compactMemory() {
-        return memoryCompactor == null ? "memory compaction is not available" : memoryCompactor.compactNow();
+    /** Compacts project memory at the selected session root. */
+    public String compactMemory(final Path root) {
+        Objects.requireNonNull(root, "workdir");
+        return memoryCompactor == null ? "memory compaction is not available" : memoryCompactor.compactNow(root);
     }
 
     public record AgentOverride(String agentName, String prompt) {}

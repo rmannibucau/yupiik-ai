@@ -69,8 +69,9 @@ class OpenCodeLiveTest {
         final var messages = new ArrayList<Message>();
         // Exercise the real agent prompt, not a short stand-in or captured OpenCode instructions.
         final var providers = new ProviderManager(cfg, mapper);
-        messages.add(Message.system(
-                new SystemPromptBuilder(cfg, null, null, null, null, providers, null, null, null).build()));
+        messages.add(Message.system(new SystemPromptBuilder(
+                        cfg, null, null, null, null, providers, null, null, null, (cfg).resolveWorkingDir())
+                .build()));
         messages.add(
                 Message.user("Call read for " + fixture + ". Then reply only with the file content. Do not reason."));
         try (final var http = new HttpClientProducer().httpClient(cfg, new NativeProviderConfiguration(null, null));

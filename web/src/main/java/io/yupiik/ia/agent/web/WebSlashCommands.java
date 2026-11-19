@@ -37,10 +37,12 @@ import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.function.BiFunction;
+import java.util.regex.Pattern;
 
 /** Web overrides precede shared handlers; the resulting registry also drives help and completion. */
 @DefaultScoped
 public class WebSlashCommands {
+    private static final Pattern WHITESPACE = Pattern.compile("\\s+");
     private final SlashRegistry registry;
 
     public WebSlashCommands(final SlashRegistry shared, final SubagentRegistry subagents, final SessionStore store) {
@@ -87,7 +89,8 @@ public class WebSlashCommands {
                     }
                     return env.io()
                             .pick("resume session", ids)
-                            .thenApply(selected -> selected.map(value -> resume(store, env, value.split("\\s+", 2)[0]))
+                            .thenApply(selected -> selected.map(value ->
+                                            resume(store, env, WHITESPACE.split(value, 2)[0]))
                                     .orElseGet(() -> ShellOutcome.status("resume cancelled")));
                 }));
         commands.add(command(shared, "shortcuts", (arg, env) -> ShellOutcome.transcript("""

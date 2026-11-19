@@ -57,6 +57,9 @@ import org.junit.jupiter.params.provider.ValueSource;
 @ExtendWith(TestJsonMapper.class)
 class SubagentRoutePrivacyTest {
     @TempDir
+    private static Path testWorkdir;
+
+    @TempDir
     Path home;
 
     private JsonMapper mapper;
@@ -252,7 +255,7 @@ class SubagentRoutePrivacyTest {
         f.permissions.clearSessionGrants();
         assertTrue(f.spawn(Map.of("model", "$external/alt"), f.context("private", "unlisted"))
                 .success());
-        final var otherTab = new PermissionService(f.config);
+        final var otherTab = new PermissionService(f.config, (f.config).resolveWorkingDir());
         assertFalse(f.spawn(Map.of("model", "$external/alt"), f.context(otherTab, "private", "shared", () -> false))
                 .success());
         assertFalse(f.catalog(f.context(otherTab, "private", "shared", () -> false))
@@ -279,8 +282,8 @@ class SubagentRoutePrivacyTest {
     @Test
     void noSessionUnknownProviderAndStaleCatalogCannotBypassPolicy() {
         final var f = new Fixture(Map.of());
-        assertFalse(f.catalog.execute(Map.of()).success());
-        assertFalse(f.catalog.execute(Map.of(), ToolContext.empty()).success());
+        assertFalse(f.catalog.execute(Map.of(), ToolContext.empty(home)).success());
+        assertFalse(f.catalog.execute(Map.of(), ToolContext.empty(testWorkdir)).success());
         final var ctx = f.context("private", "shared");
         assertFalse(f.spawn(Map.of("model", "$missing/shared"), ctx).success());
         assertFalse(f.spawn(Map.of("model", "$external/"), ctx).success());
@@ -608,7 +611,7 @@ class SubagentRoutePrivacyTest {
             entries.putAll(overrides);
             config = TestConfigs.codingAgent(entries);
             manager = new ProviderManager(config, mapper);
-            permissions = new PermissionService(config);
+            permissions = new PermissionService(config, (config).resolveWorkingDir());
             final var registry = new SubagentRegistry(config, manager);
             final var runner =
                     new SubagentRunner(
@@ -672,7 +675,7 @@ class SubagentRoutePrivacyTest {
                     cancelled,
                     ChatSettings.EMPTY.withProviderId(provider).withModel(model),
                     null,
-                    null);
+                    testWorkdir);
         }
 
         private ToolResult spawn(final Map<String, Object> options, final ToolContext context) {

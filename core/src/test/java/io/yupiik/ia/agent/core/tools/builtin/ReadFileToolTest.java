@@ -19,6 +19,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import io.yupiik.ia.agent.core.tools.ToolContext;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -34,7 +35,7 @@ class ReadFileToolTest {
         Files.writeString(file, "one\ntwo\nthree\n");
         final var tool = new ReadFileTool();
 
-        final var result = tool.execute(Map.of("path", file.toString()));
+        final var result = tool.execute(Map.of("path", file.toString()), ToolContext.empty(root));
         assertTrue(result.success(), result.output());
         assertTrue(result.output().contains("     1\tone"), result.output());
         assertTrue(result.output().contains("     3\tthree"), result.output());
@@ -47,7 +48,8 @@ class ReadFileToolTest {
         Files.writeString(file, "l1\nl2\nl3\nl4\nl5\n");
         final var tool = new ReadFileTool();
 
-        final var slice = tool.execute(Map.of("path", file.toString(), "offset", "2", "limit", "2"));
+        final var slice =
+                tool.execute(Map.of("path", file.toString(), "offset", "2", "limit", "2"), ToolContext.empty(root));
         assertTrue(slice.success(), slice.output());
         assertTrue(slice.output().contains("     2\tl2"), slice.output());
         assertTrue(slice.output().contains("     3\tl3"), slice.output());
@@ -61,7 +63,7 @@ class ReadFileToolTest {
         Files.writeString(file, "l1\nl2\n");
         final var tool = new ReadFileTool();
 
-        final var tail = tool.execute(Map.of("path", file.toString(), "offset", "2"));
+        final var tail = tool.execute(Map.of("path", file.toString(), "offset", "2"), ToolContext.empty(root));
         assertTrue(tail.success());
         assertTrue(tail.output().contains("     2\tl2"), tail.output());
         assertFalse(tail.output().contains("more lines below"), tail.output());
@@ -74,7 +76,7 @@ class ReadFileToolTest {
         final var tool = new ReadFileTool();
 
         final var result = tool.execute(
-                Map.of("path", root.resolve("ProviderConfiguraion.java").toString()));
+                Map.of("path", root.resolve("ProviderConfiguraion.java").toString()), ToolContext.empty(root));
         assertFalse(result.success());
         assertTrue(result.output().contains("Did you mean:"), result.output());
         assertTrue(result.output().contains("ProviderConfiguration.java"), result.output());
@@ -84,7 +86,7 @@ class ReadFileToolTest {
     void missingFileWithoutCandidateStaysPlain(@TempDir final Path root) {
         final var tool = new ReadFileTool();
         final var result = tool.execute(
-                Map.of("path", root.resolve("zzz-does-not-exist.java").toString()));
+                Map.of("path", root.resolve("zzz-does-not-exist.java").toString()), ToolContext.empty(root));
         assertFalse(result.success());
         assertTrue(result.output().startsWith("File or directory not found:"), result.output());
         assertFalse(result.output().contains("Did you mean"), result.output());
@@ -103,8 +105,7 @@ class ReadFileToolTest {
         // a relative path must land under the session root, NOT the JVM working directory
         Files.writeString(projectDir.resolve("rel.txt"), "session content\n");
         final var tool = new ReadFileTool();
-        final var result =
-                tool.execute(Map.of("path", "rel.txt"), io.yupiik.ia.agent.core.tools.ToolContext.empty(projectDir));
+        final var result = tool.execute(Map.of("path", "rel.txt"), ToolContext.empty(projectDir));
         assertTrue(result.success(), result.output());
         assertTrue(result.output().contains("session content"), result.output());
     }
@@ -116,7 +117,7 @@ class ReadFileToolTest {
         Files.writeString(root.resolve("sub/b.txt"), "y");
         final var tool = new ReadFileTool();
 
-        final var result = tool.execute(Map.of("path", root.toString()));
+        final var result = tool.execute(Map.of("path", root.toString()), ToolContext.empty(root));
         assertTrue(result.success(), result.output());
         assertTrue(result.output().startsWith("Read directory " + root), result.output());
         assertTrue(result.output().contains("a.txt\n"), result.output());
@@ -129,7 +130,8 @@ class ReadFileToolTest {
             Files.writeString(root.resolve("f" + i + ".txt"), "x");
         }
         final var tool = new ReadFileTool();
-        final var result = tool.execute(Map.of("path", root.toString(), "offset", "2", "limit", "2"));
+        final var result =
+                tool.execute(Map.of("path", root.toString(), "offset", "2", "limit", "2"), ToolContext.empty(root));
         assertTrue(result.success(), result.output());
         assertTrue(result.output().startsWith("Read directory " + root + ", entries 2-3"), result.output());
         assertTrue(result.output().contains("f2.txt"), result.output());
@@ -139,9 +141,9 @@ class ReadFileToolTest {
     }
 
     @Test
-    void missingPathReturnsFriendlyErrorInsteadOfNpe() {
+    void missingPathReturnsFriendlyErrorInsteadOfNpe(@TempDir final Path dir) {
         // a null/missing "path" must surface a clear "path is required", never Path.of(null) -> NPE
-        final var result = new ReadFileTool().execute(Map.of());
+        final var result = new ReadFileTool().execute(Map.of(), ToolContext.empty(dir));
         assertFalse(result.success(), result.output());
         assertEquals("path is required", result.output());
     }

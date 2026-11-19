@@ -76,8 +76,10 @@ public class InspectCommands implements SlashCommandSet {
 
     private ShellOutcome memory(final String arg, final ShellEnv env) {
         final var option = arg == null ? "" : arg.strip();
+        final var runtime = env.session().runtime();
+        final var root = runtime.workdir();
         if ("compact".equalsIgnoreCase(option)) {
-            return ShellOutcome.transcript("**Memory compaction**\n\n" + agentSessionService.compactMemory());
+            return ShellOutcome.transcript("**Memory compaction**\n\n" + (agentSessionService.compactMemory(root)));
         }
         // toggle memory production for THIS tab (per-session): only stops producing new facts
         // (extraction + memory_write persist); the system prompt / injected memory are unchanged.
@@ -93,7 +95,7 @@ public class InspectCommands implements SlashCommandSet {
             return ShellOutcome.status(
                     "memory production is now " + (enabled ? "enabled" : "disabled") + " for this session");
         }
-        final var stats = agentSessionService.memoryStats();
+        final var stats = agentSessionService.memoryStats(root);
         final var sb = new StringBuilder("\n```text\n");
         if (memoryProductionPolicy != null) {
             sb.append("-- production: ")
@@ -120,7 +122,7 @@ public class InspectCommands implements SlashCommandSet {
                     .append(")\n");
         }
         sb.append("\n");
-        final var memory = agentSessionService.memory();
+        final var memory = agentSessionService.memory(root);
         if (!memory.global().isBlank()) {
             sb.append("-- global memory --\n").append(memory.global()).append('\n');
         }
@@ -132,7 +134,8 @@ public class InspectCommands implements SlashCommandSet {
     }
 
     private ShellOutcome tools(final String arg, final ShellEnv env) {
-        final var listing = agentSessionService.tools(arg);
+        final var listing =
+                agentSessionService.tools(arg, env.session().runtime().workdir());
         if (!listing.anyTool()) {
             return ShellOutcome.status("(no tools available)");
         }

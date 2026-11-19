@@ -23,6 +23,7 @@ import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.HookRegistration;
 import io.yupiik.ia.agent.core.configuration.HooksConfiguration;
 import io.yupiik.ia.agent.core.events.HookResponse;
+import io.yupiik.ia.agent.core.tools.ToolContext;
 import io.yupiik.maven.knowledge.process.ProcessService;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -33,6 +34,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
@@ -57,7 +59,7 @@ import java.util.logging.Logger;
  *
  * <p>Callbacks run concurrently on {@link ExecutorService} (never the caller's thread — in particular never
  * the TUI render thread) and each subprocess is tracked by {@link ProcessService} so a cancelled turn kills its
- * tree. {@link #run(String, Object, int)} blocks until every callback settles and returns their responses, so a
+ * tree. {@link #run(String, Object, int, Path)} blocks until every callback settles and returns their responses, so a
  * blocking event can gate on the aggregate verdict.</p>
  */
 @ApplicationScoped
@@ -121,7 +123,9 @@ public class CallbackRunner {
      * @param inheritedTimeoutSeconds the event's own budget used when a callback does not set its own
      *                                {@link HookRegistration#timeoutSeconds()}.
      */
-    public List<HookResponse> run(final String eventId, final Object input, final int inheritedTimeoutSeconds) {
+    public List<HookResponse> run(
+            final String eventId, final Object input, final int inheritedTimeoutSeconds, final Path workdir) {
+        Objects.requireNonNull(workdir, "workdir");
         final var calls =
                 eventId == null ? List.<HookRegistration>of() : registrations.getOrDefault(eventId, List.of());
         if (calls.isEmpty()) {
@@ -139,7 +143,7 @@ public class CallbackRunner {
         for (final var hook : calls) {
             final var timeoutSeconds = hook.effectiveTimeoutSeconds(inheritedTimeoutSeconds);
             try {
-                futures.add(executor.submit(() -> runOne(eventId, hook, timeoutSeconds, payload)));
+                futures.add(executor.submit(() -> runOne(eventId, hook, timeoutSeconds, payload, workdir)));
                 timeouts.add(timeoutSeconds);
             } catch (final RejectedExecutionException e) {
                 // the executor is shutting down (app close): no point retrying, do not fail the turn
@@ -177,13 +181,18 @@ public class CallbackRunner {
      * {@code null} (empty stdout → noop) — invalid JSON, non-zero exit or timeout raise (logged here by {@link #run}).
      */
     private HookResponse runOne(
-            final String eventId, final HookRegistration hook, final int timeoutSeconds, final byte[] payload)
+            final String eventId,
+            final HookRegistration hook,
+            final int timeoutSeconds,
+            final byte[] payload,
+            final Path workdir)
             throws InterruptedException {
         final var pb = new ProcessBuilder(hook.command());
         pb.redirectErrorStream(false);
-        if (hook.dir() != null && !hook.dir().isBlank()) {
-            pb.directory(Path.of(hook.dir()).toAbsolutePath().normalize().toFile());
-        }
+        final var directory = hook.dir() == null || hook.dir().isBlank()
+                ? workdir
+                : ToolContext.empty(workdir).resolvePath(hook.dir()).normalize();
+        pb.directory(directory.toFile());
         final Process process;
         try {
             process = pb.start();

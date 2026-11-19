@@ -499,7 +499,7 @@ public class AnsiShellFrontend implements ShellFrontend {
             }
         } else if (event
                 instanceof
-                AgentEvent.TextDelta(String delta, String sessionId, String subagentId, String subagentName)) {
+                AgentEvent.TextDelta(String delta, String sessionId, String subagentId, String subagentName, var _)) {
             stopSpinner();
             closeThinkingRound();
             if (!answerPrefix.equals(prefix)) {
@@ -508,12 +508,18 @@ public class AnsiShellFrontend implements ShellFrontend {
                 answerPrefix = prefix;
             }
             print(textBuffer.append(delta));
-        } else if (event instanceof AgentEvent.TextReset(String sessionId, String subagentId, String subagentName)) {
+        } else if (event
+                instanceof AgentEvent.TextReset(String sessionId, String subagentId, String subagentName, var _)) {
             textBuffer.reset();
             closeThinkingRound();
         } else if (event
                 instanceof
-                AgentEvent.ThinkingDelta(String delta, String sessionId, String subagentId, String subagentName)) {
+                AgentEvent.ThinkingDelta(
+                        String delta,
+                        String sessionId,
+                        String subagentId,
+                        String subagentName,
+                        var _)) {
             if (showThinking) {
                 // a second voice must not splice into the line the current one left
                 // open: close it so both thoughts stay readable
@@ -562,7 +568,8 @@ public class AnsiShellFrontend implements ShellFrontend {
                         String sessionId,
                         String subagentId,
                         String subagentName,
-                        AgentEvent.Compacted.CompactionTokens tokens)) {
+                        AgentEvent.Compacted.CompactionTokens tokens,
+                        var _)) {
             stopSpinner();
             ensureStderrNewline();
             final var shrink =
@@ -580,7 +587,8 @@ public class AnsiShellFrontend implements ShellFrontend {
                         String subagentId,
                         String subagentName,
                         Throwable cause,
-                        var compaction)) {
+                        var compaction,
+                        var _)) {
             notice(level, prefix + message);
         } else if (event
                 instanceof
@@ -590,7 +598,8 @@ public class AnsiShellFrontend implements ShellFrontend {
                         long durationMs,
                         String sessionId,
                         String subagentId,
-                        String subagentName)) {
+                        String subagentName,
+                        var _)) {
             stopSpinner();
             ensureStderrNewline();
             printlnErr(MarkdownColorizer.status(
@@ -598,7 +607,7 @@ public class AnsiShellFrontend implements ShellFrontend {
                             + " " + message));
         } else if (event
                 instanceof
-                AgentEvent.Status(String message, String sessionId, String subagentId, String subagentName)) {
+                AgentEvent.Status(String message, String sessionId, String subagentId, String subagentName, var _)) {
             status(prefix + message);
         } else if (event
                 instanceof
@@ -607,6 +616,7 @@ public class AnsiShellFrontend implements ShellFrontend {
                         String sessionId,
                         String subagentId,
                         String subagentName,
+                        var _,
                         var _)) {
             stopSpinner();
             closeThinkingRound();
@@ -621,7 +631,8 @@ public class AnsiShellFrontend implements ShellFrontend {
                         String sessionId,
                         String subagentId,
                         String subagentName,
-                        String model)) {
+                        String model,
+                        var _)) {
             stopSpinner();
             closeThinkingRound();
             final var state = success ? "completed" : cancelled ? "cancelled" : "failed";
@@ -637,7 +648,8 @@ public class AnsiShellFrontend implements ShellFrontend {
                 printlnErr(MarkdownColorizer.error(line));
             }
         } else if (event
-                instanceof AgentEvent.Error(String message, String sessionId, String subagentId, String subagentName)) {
+                instanceof
+                AgentEvent.Error(String message, String sessionId, String subagentId, String subagentName, var _)) {
             error(prefix + message);
         } else if (event instanceof final AgentEvent.UsageUpdated u) {
             stats.recordUsage(u);
@@ -659,47 +671,50 @@ public class AnsiShellFrontend implements ShellFrontend {
     private String subagentPrefix(final AgentEvent event) {
         String subagentId = null;
         String subagentName = null;
-        if (event instanceof AgentEvent.TextDelta(var _, var _, String id, String name)) {
+        if (event instanceof AgentEvent.TextDelta(var _, var _, String id, String name, var _)) {
             subagentId = id;
             subagentName = name;
-        } else if (event instanceof AgentEvent.TextReset(var _, String id, String name)) {
+        } else if (event instanceof AgentEvent.TextReset(var _, String id, String name, var _)) {
             subagentId = id;
             subagentName = name;
-        } else if (event instanceof AgentEvent.ThinkingDelta(var _, var _, String id, String name)) {
+        } else if (event instanceof AgentEvent.ThinkingDelta(var _, var _, String id, String name, var _)) {
             subagentId = id;
             subagentName = name;
-        } else if (event instanceof AgentEvent.ToolStarted(var _, var _, var _, var _, String id, String name)) {
+        } else if (event instanceof AgentEvent.ToolStarted(var _, var _, var _, var _, String id, String name, var _)) {
             subagentId = id;
             subagentName = name;
-        } else if (event instanceof AgentEvent.ToolStream(var _, var _, var _, var _, String id, String name)) {
-            subagentId = id;
-            subagentName = name;
-        } else if (event
-                instanceof AgentEvent.ToolFinished(var _, var _, var _, var _, var _, var _, String id, String name)) {
-            subagentId = id;
-            subagentName = name;
-        } else if (event instanceof AgentEvent.Compacted(var _, var _, var _, String id, String name, var _)) {
+        } else if (event instanceof AgentEvent.ToolStream(var _, var _, var _, var _, String id, String name, var _)) {
             subagentId = id;
             subagentName = name;
         } else if (event
-                instanceof AgentEvent.Notice(var _, var _, var _, var _, String id, String name, var _, var _)) {
+                instanceof
+                AgentEvent.ToolFinished(var _, var _, var _, var _, var _, var _, String id, String name, var _)) {
             subagentId = id;
             subagentName = name;
-        } else if (event instanceof AgentEvent.Status(var _, var _, String id, String name)) {
-            subagentId = id;
-            subagentName = name;
-        } else if (event instanceof AgentEvent.SubagentStarted(var _, var _, String id, String name, var _)) {
-            subagentId = id;
-            subagentName = name;
-        } else if (event
-                instanceof AgentEvent.SubagentCompleted(var _, var _, var _, var _, String id, String name, var _)) {
-            subagentId = id;
-            subagentName = name;
-        } else if (event instanceof AgentEvent.Error(var _, var _, String id, String name)) {
+        } else if (event instanceof AgentEvent.Compacted(var _, var _, var _, String id, String name, var _, var _)) {
             subagentId = id;
             subagentName = name;
         } else if (event
-                instanceof AgentEvent.Pause(var _, String message, long durationMs, String _, String id, String name)) {
+                instanceof AgentEvent.Notice(var _, var _, var _, var _, String id, String name, var _, var _, var _)) {
+            subagentId = id;
+            subagentName = name;
+        } else if (event instanceof AgentEvent.Status(var _, var _, String id, String name, var _)) {
+            subagentId = id;
+            subagentName = name;
+        } else if (event instanceof AgentEvent.SubagentStarted(var _, var _, String id, String name, var _, var _)) {
+            subagentId = id;
+            subagentName = name;
+        } else if (event
+                instanceof
+                AgentEvent.SubagentCompleted(var _, var _, var _, var _, String id, String name, var _, var _)) {
+            subagentId = id;
+            subagentName = name;
+        } else if (event instanceof AgentEvent.Error(var _, var _, String id, String name, var _)) {
+            subagentId = id;
+            subagentName = name;
+        } else if (event
+                instanceof
+                AgentEvent.Pause(var _, String message, long durationMs, String _, String id, String name, var _)) {
             subagentId = id;
             subagentName = name;
         } else if (event
@@ -714,14 +729,16 @@ public class AnsiShellFrontend implements ShellFrontend {
                         var _,
                         var _,
                         String id,
-                        String name)) {
+                        String name,
+                        var _)) {
             subagentId = id;
             subagentName = name;
-        } else if (event instanceof AgentEvent.TurnDone(var _, var _, String id, String name)) {
+        } else if (event instanceof AgentEvent.TurnDone(var _, var _, String id, String name, var _)) {
             subagentId = id;
             subagentName = name;
         } else if (event
-                instanceof AgentEvent.ToolTimingEvent(var _, var _, var _, var _, var _, String id, String name)) {
+                instanceof
+                AgentEvent.ToolTimingEvent(var _, var _, var _, var _, var _, String id, String name, var _)) {
             subagentId = id;
             subagentName = name;
         }

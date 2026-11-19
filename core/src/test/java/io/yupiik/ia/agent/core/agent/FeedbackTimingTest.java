@@ -22,6 +22,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.ia.agent.core.llm.LlmWire;
 import io.yupiik.ia.agent.core.llm.Message;
+import java.nio.file.Path;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
@@ -29,18 +30,22 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 class FeedbackTimingTest {
+    @TempDir
+    private static Path eventWorkdir;
+
     @Test
     void payloadSizeFollowsBlocksNotStreamedTextOrTokenCountAndCancellationReleasesIt() {
         final var timing = new FeedbackTiming();
         final var delta = "content that must not be retained by timing".repeat(1000);
         for (int i = 0; i < 1000; i++) {
-            timing.accept(new AgentEvent.TextDelta(delta, "s"), clock(i), ignored -> {});
+            timing.accept(new AgentEvent.TextDelta(delta, "s", eventWorkdir), clock(i), ignored -> {});
         }
         final var message = message(timing, "answer");
         assertEquals(List.of(Map.of("kind", "text", "at", 0L, "offset", 0)), FeedbackTiming.blocksOf(message));
-        timing.accept(new AgentEvent.TurnCancelled("s"), clock(2000), ignored -> {});
+        timing.accept(new AgentEvent.TurnCancelled("s", eventWorkdir), clock(2000), ignored -> {});
         assertTrue(timing.merge(null).isEmpty());
         assertEquals(0L, FeedbackTiming.startedAt(message, "text"));
     }
@@ -49,15 +54,17 @@ class FeedbackTimingTest {
     void capturesStructuralStartsOnceAndReplaysOrderedChannels() {
         final var timing = new FeedbackTiming();
         final var starts = new ArrayList<AgentEvent>();
-        timing.accept(new AgentEvent.TextDelta("one", "s", "child", "worker"), clock(1000), starts::add);
-        timing.accept(new AgentEvent.TextDelta(" two", "s", "child", "worker"), clock(2000), starts::add);
-        timing.accept(new AgentEvent.ThinkingDelta("why", "s", "child", "worker"), clock(3000), starts::add);
-        timing.accept(new AgentEvent.TextDelta("three", "s", "child", "worker"), clock(4000), starts::add);
+        timing.accept(new AgentEvent.TextDelta("one", "s", "child", "worker", eventWorkdir), clock(1000), starts::add);
+        timing.accept(new AgentEvent.TextDelta(" two", "s", "child", "worker", eventWorkdir), clock(2000), starts::add);
+        timing.accept(
+                new AgentEvent.ThinkingDelta("why", "s", "child", "worker", eventWorkdir), clock(3000), starts::add);
+        timing.accept(
+                new AgentEvent.TextDelta("three", "s", "child", "worker", eventWorkdir), clock(4000), starts::add);
         assertEquals(
                 List.of(
-                        new AgentEvent.FeedbackStarted("text", 1000, "s", "child", "worker"),
-                        new AgentEvent.FeedbackStarted("thinking", 3000, "s", "child", "worker"),
-                        new AgentEvent.FeedbackStarted("text", 4000, "s", "child", "worker")),
+                        new AgentEvent.FeedbackStarted("text", 1000, "s", "child", "worker", eventWorkdir),
+                        new AgentEvent.FeedbackStarted("thinking", 3000, "s", "child", "worker", eventWorkdir),
+                        new AgentEvent.FeedbackStarted("text", 4000, "s", "child", "worker", eventWorkdir)),
                 starts);
         final var message = new Message(
                 "assistant",
@@ -77,7 +84,7 @@ class FeedbackTimingTest {
         assertEquals("other", Message.identityOf(identified).provider());
         assertEquals(
                 Map.of("extension", "kept"), LlmWire.toLlmMessage(identified).extensions());
-        timing.accept(new AgentEvent.TurnDone("one twothree", "s"), clock(5000), starts::add);
+        timing.accept(new AgentEvent.TurnDone("one twothree", "s", eventWorkdir), clock(5000), starts::add);
         assertFalse(timing.has("text"));
         assertTrue(timing.merge(null).isEmpty());
         assertEquals(
@@ -89,10 +96,10 @@ class FeedbackTimingTest {
         final var timing = new FeedbackTiming();
         final var other = new FeedbackTiming();
         final var starts = new ArrayList<AgentEvent>();
-        timing.accept(new AgentEvent.TextDelta("failed", "s"), clock(1000), starts::add);
-        timing.accept(new AgentEvent.TextReset("s"), clock(2000), starts::add);
-        timing.accept(new AgentEvent.TextDelta("retry", "s"), clock(3000), starts::add);
-        other.accept(new AgentEvent.TextDelta("child", "s", "c", "child"), clock(4000), starts::add);
+        timing.accept(new AgentEvent.TextDelta("failed", "s", eventWorkdir), clock(1000), starts::add);
+        timing.accept(new AgentEvent.TextReset("s", eventWorkdir), clock(2000), starts::add);
+        timing.accept(new AgentEvent.TextDelta("retry", "s", eventWorkdir), clock(3000), starts::add);
+        other.accept(new AgentEvent.TextDelta("child", "s", "c", "child", eventWorkdir), clock(4000), starts::add);
         assertEquals(2, starts.stream().filter(it -> it.subagentId() == null).count());
         assertEquals(3000L, FeedbackTiming.startedAt(message(timing, "retry"), "text"));
         assertEquals(4000L, FeedbackTiming.startedAt(message(other, "child"), "text"));
@@ -103,9 +110,9 @@ class FeedbackTimingTest {
     @Test
     void finalSuffixKeepsItsOwnStartAndLegacyIsUnknown() {
         final var timing = new FeedbackTiming();
-        timing.accept(new AgentEvent.TextDelta("preface", "s"), clock(1000), ignored -> {});
-        timing.accept(new AgentEvent.ThinkingDelta("why", "s"), clock(2000), ignored -> {});
-        timing.accept(new AgentEvent.TextDelta("answer", "s"), clock(3000), ignored -> {});
+        timing.accept(new AgentEvent.TextDelta("preface", "s", eventWorkdir), clock(1000), ignored -> {});
+        timing.accept(new AgentEvent.ThinkingDelta("why", "s", eventWorkdir), clock(2000), ignored -> {});
+        timing.accept(new AgentEvent.TextDelta("answer", "s", eventWorkdir), clock(3000), ignored -> {});
         timing.reconcile("answer");
         assertEquals(3000L, FeedbackTiming.startedAt(message(timing, "answer"), "text"));
         assertEquals(

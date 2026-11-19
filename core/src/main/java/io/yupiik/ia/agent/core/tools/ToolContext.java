@@ -36,8 +36,7 @@ import java.util.function.BooleanSupplier;
  * simply forwarded to
  * {@link EmbeddedTool#execute(java.util.Map, ToolContext)}.
  *
- * <p>Stateless tools (file access, shell, code graph, ...) ignore it entirely
- * and only override {@link EmbeddedTool#execute(java.util.Map)}.</p>
+ * <p>Project-sensitive tools always resolve against the required session root.</p>
  *
  * @param sessionId      the session (tab) owning the running turn
  * @param subagentId     the subagent id when the turn runs in a subagent, else null
@@ -57,6 +56,8 @@ import java.util.function.BooleanSupplier;
  *                       {@code null}: standalone contexts report "not cancelled".
  * @param allowedTools   effective tool ceiling for the current agent; null means the registry and permission policy
  *                       determine availability.
+ * @param toolRegistry   borrowed registry of the owning loop, including session tools; null only for standalone
+ *                       contexts using the application's default registry. Never closed by delegated work.
  */
 public record ToolContext(
         String sessionId,
@@ -71,7 +72,7 @@ public record ToolContext(
         BooleanSupplier cancelled,
         ChatSettings settings,
         BooleanSupplier callCancelled,
-        // nullable per-session working/project directory the tools resolve file paths against
+        // required absolute normalized per-session working/project directory the tools resolve file paths against
         Path projectDir,
         // the per-call tool ordinal (the TUI/UI card number) when a turn owns this call; -1 when the
         // context is not tied to a specific running tool call (standalone/btw invocations). Tools that
@@ -82,38 +83,8 @@ public record ToolContext(
         Set<String> allowedTools,
         // the spawning session's sub-agent admission budget (per-session cap); null when the context
         // belongs to no session-capable owner (standalone/btw invocations, sub-agent child turns)
-        SubagentBudget subagentBudget) {
-
-    /** Backward-compatible convenience: builds a context without per-session provider/model settings. */
-    public ToolContext(
-            final String sessionId,
-            final String subagentId,
-            final String subagentName,
-            final PermissionService permissions,
-            final UserFeedbackService feedback,
-            final TodoStore todos,
-            final StatusReporter statusReporter,
-            final UsageTracker usage,
-            final ContextView contextView,
-            final BooleanSupplier cancelled) {
-        this(
-                sessionId,
-                subagentId,
-                subagentName,
-                permissions,
-                feedback,
-                todos,
-                statusReporter,
-                usage,
-                contextView,
-                cancelled,
-                null,
-                null,
-                null,
-                -1,
-                null,
-                null);
-    }
+        SubagentBudget subagentBudget,
+        ToolRegistry toolRegistry) {
 
     /** Convenience: a full context (per-session services + settings + project dir) for a non-tool context. */
     public ToolContext(
@@ -145,6 +116,7 @@ public record ToolContext(
                 callCancelled,
                 projectDir,
                 -1,
+                null,
                 null,
                 null);
     }
@@ -181,35 +153,20 @@ public record ToolContext(
                 projectDir,
                 -1,
                 null,
-                subagentBudget);
+                subagentBudget,
+                null);
     }
 
     public ToolContext {
+        Objects.requireNonNull(projectDir, "workdir");
+        if (!projectDir.isAbsolute() || !projectDir.equals(projectDir.normalize())) {
+            throw new IllegalArgumentException("workdir must be absolute and normalized: " + projectDir);
+        }
         // a probe is always a real supplier: polling a null one used to surface as an
         // "unexpected failure" NullPointerException in the middle of a turn
         cancelled = Objects.requireNonNull(cancelled, "cancelled");
         callCancelled = callCancelled == null ? cancelled : callCancelled;
-    }
-
-    /** A context without any session-scoped service, for standalone tool invocation. */
-    public static ToolContext empty() {
-        return new ToolContext(
-                null,
-                null,
-                null,
-                null,
-                null,
-                null,
-                null,
-                null,
-                null,
-                Cancellations.NEVER,
-                null,
-                null,
-                null,
-                -1,
-                null,
-                null);
+        allowedTools = allowedTools == null ? null : Set.copyOf(allowedTools);
     }
 
     /**
@@ -234,14 +191,9 @@ public record ToolContext(
                 projectDir,
                 -1,
                 null,
+                null,
                 null);
     }
-
-    /**
-     * The absolute project root this session's tools operate on, or {@code null} when the process
-     * default ({@code configuration.resolveProjectDir()}) applies. Tools that resolve file paths
-     * against a base directory check this first and fall back to the configured root.
-     */
 
     /** Cancellation probe, never {@code null}: standalone contexts report "not cancelled". */
     public boolean isCancelled() {
@@ -255,36 +207,25 @@ public record ToolContext(
 
     /**
      * Resolves a file-path tool argument against this session's root. Absolute paths pass through
-     * untouched; relative paths are anchored on {@link #projectDir()} when the session set one,
-     * else on {@code fallbackBase} (typically {@code configuration.resolveProjectDir()}), else kept
-     * relative (which resolves against the JVM working directory). This is how a session rooted on
+     * untouched; relative paths are anchored on the required {@link #projectDir()}. A session rooted on
      * project B writes {@code ./src/X.java} into B, not into the directory the process was launched
      * from - the cross-root split that only {@code bash}/{@code apply_patch} honoured before.
      */
-    public Path resolvePath(final String raw, final Path fallbackBase) {
+    public Path resolvePath(final String raw) {
         if (raw == null) {
             throw new IllegalArgumentException("path is required");
         }
         final var path = Path.of(raw);
-        if (path.isAbsolute()) {
-            return path;
-        }
-        final var base = projectDir != null ? projectDir : fallbackBase;
-        if (base == null) {
-            return path;
-        }
-        final var resolved = base.resolve(path).normalize();
-        // a bare "." base is the session root itself: keep it without a trailing segment
-        return path.toString().equals(".") ? base : resolved;
+        return path.isAbsolute() ? path : projectDir.resolve(path).normalize();
     }
 
     /**
      * Whether a relative {@code raw} argument was anchored on this session's {@link #projectDir()}
-     * (as opposed to the JVM working directory or the configured fallback). When true, a tool that
-     * resolves paths through {@link #resolvePath(String, Path)} is acting on the session root, and
+     * (as opposed to an absolute path). When true, a tool that
+     * resolves paths through {@link #resolvePath(String)} is acting on the session root, and
      * may surface that to the caller so the re-rooting is visible rather than silent.
      */
     public boolean reRoutedToSessionRoot(final String raw) {
-        return projectDir != null && !Path.of(raw).isAbsolute();
+        return !Path.of(raw).isAbsolute();
     }
 }

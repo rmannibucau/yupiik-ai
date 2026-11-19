@@ -33,12 +33,15 @@ import java.util.Comparator;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.regex.Pattern;
 
 public class PermissionService {
+    private static final Pattern WHITESPACE = Pattern.compile("\\s+");
     private final CodingAgentConfiguration configuration;
     private final Emitter emitter;
     private final BashRulesRegistry bashRulesRegistry;
@@ -62,25 +65,26 @@ public class PermissionService {
     private volatile PermissionMode permissionMode;
     private volatile RulesCache rulesCache;
     /**
-     * The session's resolved working/project directory, set once at session creation
-     * ({@code SessionRuntimeFactory}); {@code null} means the process default
-     * ({@code configuration.resolveProjectDir()}). Scope for the command allowlist hash.
+     * The session's required, immutable working/project directory, supplied at construction.
+     * Scopes the command allowlist hash to this session's project.
      */
-    private volatile Path projectDir;
+    private final Path projectDir;
 
-    public PermissionService(final CodingAgentConfiguration configuration) {
-        this(configuration, null, null);
+    public PermissionService(final CodingAgentConfiguration configuration, final Path projectDir) {
+        this(configuration, null, null, projectDir);
     }
 
-    public PermissionService(final CodingAgentConfiguration configuration, final Emitter emitter) {
-        this(configuration, emitter, null);
+    public PermissionService(
+            final CodingAgentConfiguration configuration, final Emitter emitter, final Path projectDir) {
+        this(configuration, emitter, null, projectDir);
     }
 
     public PermissionService(
             final CodingAgentConfiguration configuration,
             final Emitter emitter,
-            final BashRulesRegistry bashRulesRegistry) {
-        this(configuration, emitter, bashRulesRegistry, List.of());
+            final BashRulesRegistry bashRulesRegistry,
+            final Path projectDir) {
+        this(configuration, emitter, bashRulesRegistry, List.of(), projectDir);
     }
 
     /** Full constructor: session services created by the runtime factory pass the shared registry + SPI beans. */
@@ -88,7 +92,9 @@ public class PermissionService {
             final CodingAgentConfiguration configuration,
             final Emitter emitter,
             final BashRulesRegistry bashRulesRegistry,
-            final List<PermissionGrantingMatcherService> grantingMatchers) {
+            final List<PermissionGrantingMatcherService> grantingMatchers,
+            final Path projectDir) {
+        this.projectDir = Objects.requireNonNull(projectDir, "workdir");
         this.configuration = configuration;
         this.emitter = emitter;
         this.bashRulesRegistry = bashRulesRegistry;
@@ -100,16 +106,12 @@ public class PermissionService {
                         .toList();
     }
 
-    protected PermissionService() {
+    protected PermissionService(final Path projectDir) {
+        this.projectDir = Objects.requireNonNull(projectDir, "workdir");
         this.configuration = null;
         this.emitter = null;
         this.bashRulesRegistry = null;
         this.grantingMatchers = List.of();
-    }
-
-    /** Set once when the session runtime is created so allowlist hashing scopes to the session's project. */
-    public void projectDir(final Path dir) {
-        this.projectDir = dir == null ? null : dir.toAbsolutePath().normalize();
     }
 
     /**
@@ -237,8 +239,8 @@ public class PermissionService {
      * copied, and any approval granted to the child is recorded only on the returned instance.
      */
     public PermissionService forkForChild() {
-        final var child = new PermissionService(configuration, emitter, bashRulesRegistry, grantingMatchers);
-        child.projectDir(projectDir);
+        final var child =
+                new PermissionService(configuration, emitter, bashRulesRegistry, grantingMatchers, projectDir);
         child.mode = mode();
         child.permissionMode = permissionMode();
         child.gate = gate;
@@ -604,7 +606,7 @@ public class PermissionService {
         }
         // quote-aware-ish split: bash segment tokens are space separated; embedded quotes are rare
         // in command names and the rule/SPI fallbacks tolerate them (the first token is preserved)
-        final var parts = trimmed.split("\\s+");
+        final var parts = WHITESPACE.split(trimmed);
         return List.of(parts);
     }
 
@@ -621,10 +623,7 @@ public class PermissionService {
     }
 
     private String projectDir() {
-        return (projectDir != null
-                        ? projectDir
-                        : configuration.resolveProjectDir().normalize())
-                .toString();
+        return projectDir.toString();
     }
 
     private static String describe(final String toolName, final Map<String, Object> args) {

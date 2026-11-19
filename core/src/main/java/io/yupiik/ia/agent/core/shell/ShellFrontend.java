@@ -96,7 +96,7 @@ public interface ShellFrontend {
     default void onEvent(final AgentEvent event) {
         if (event
                 instanceof
-                AgentEvent.Status(String message, String sessionId, String subagentId, String subagentName)) {
+                AgentEvent.Status(String message, String sessionId, String subagentId, String subagentName, var _)) {
             status(message);
         } else if (event
                 instanceof
@@ -106,7 +106,8 @@ public interface ShellFrontend {
                         long durationMs,
                         String sessionId,
                         String subagentId,
-                        String subagentName)) {
+                        String subagentName,
+                        var _)) {
             status(message);
         } else if (event
                 instanceof
@@ -118,10 +119,12 @@ public interface ShellFrontend {
                         String subagentId,
                         String subagentName,
                         Throwable cause,
-                        var compaction)) {
+                        var compaction,
+                        var _)) {
             notice(level, message);
         } else if (event
-                instanceof AgentEvent.Error(String message, String sessionId, String subagentId, String subagentName)) {
+                instanceof
+                AgentEvent.Error(String message, String sessionId, String subagentId, String subagentName, var _)) {
             error(message);
         }
     }

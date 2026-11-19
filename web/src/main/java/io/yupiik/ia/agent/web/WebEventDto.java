@@ -49,6 +49,7 @@ public record WebEventDto(
             case AgentEvent.ToolStarted _ -> "tool-started";
             case AgentEvent.ToolStream _ -> "tool-stream";
             case AgentEvent.ToolFinished _ -> "tool-finished";
+            case AgentEvent.ToolFilesChanged _ -> "tool-files-changed";
             case AgentEvent.UsageUpdated _ -> "usage-updated";
             case AgentEvent.LlmRequestCompleted _ -> "llm-request-completed";
             case AgentEvent.Status _ -> "status";
@@ -57,6 +58,7 @@ public record WebEventDto(
             case AgentEvent.TurnMetrics _ -> "turn-metrics";
             case AgentEvent.TurnDone _ -> "turn-done";
             case AgentEvent.TurnCancelled _ -> "turn-cancelled";
+            case AgentEvent.CompactionPass _ -> "compaction-pass";
             case AgentEvent.Compacted _ -> "compacted";
             case AgentEvent.Error _ -> "error";
             case AgentEvent.SubagentStarted _ -> "subagent-started";
@@ -77,6 +79,7 @@ public record WebEventDto(
             case AgentEvent.ToolStarted t -> t.name();
             case AgentEvent.ToolStream t -> t.name();
             case AgentEvent.ToolFinished t -> t.name();
+            case AgentEvent.ToolFilesChanged _ -> null; // UI-only file data is not part of this transport.
             case AgentEvent.UsageUpdated t -> t.model();
             case AgentEvent.LlmRequestCompleted t -> t.model();
             case AgentEvent.Status t -> t.message();
@@ -85,6 +88,7 @@ public record WebEventDto(
             case AgentEvent.TurnMetrics _ -> null;
             case AgentEvent.TurnDone t -> t.content();
             case AgentEvent.TurnCancelled _ -> null;
+            case AgentEvent.CompactionPass _ -> null; // Legacy notices still drive this UI; no operation payload here.
             case AgentEvent.Compacted t -> t.kinds().isEmpty() ? "" : String.join(",", t.kinds()) + '|' + t.mode();
             case AgentEvent.Error t -> t.message();
             case AgentEvent.SubagentStarted t -> t.task();

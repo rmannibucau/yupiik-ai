@@ -22,6 +22,7 @@ import io.yupiik.ia.agent.core.tools.Schemas;
 import io.yupiik.ia.agent.core.tools.ToolCategory;
 import io.yupiik.ia.agent.core.tools.ToolContext;
 import io.yupiik.ia.agent.core.tools.ToolResult;
+import java.nio.file.Path;
 import java.util.ArrayDeque;
 import java.util.Arrays;
 import java.util.Deque;
@@ -49,7 +50,7 @@ public class CodeTraceCallsTool implements EmbeddedTool {
     }
 
     @Override
-    public String description() {
+    public String description(final Path workdir) {
         return "Trace relations of a symbol in the structural code graph (breadth-first, optional depth limit): "
                 + "callers/callees via calls, implementors (edgeTypes=implements), extensions (extends), usages (uses) "
                 + "or imports. Default follows calls; narrow with the edgeTypes parameter (eg. edgeTypes=implements). "
@@ -91,11 +92,6 @@ public class CodeTraceCallsTool implements EmbeddedTool {
     }
 
     @Override
-    public ToolResult execute(final Map<String, Object> args) {
-        return execute(args, ToolContext.empty());
-    }
-
-    @Override
     public ToolResult execute(final Map<String, Object> args, final ToolContext ctx) {
         final var symbol = arg(args, "symbol");
         if (symbol == null || symbol.isBlank()) {
@@ -105,7 +101,7 @@ public class CodeTraceCallsTool implements EmbeddedTool {
         final var edgeTypes = parseEdgeTypes(arg(args, "edgeTypes"));
         final var depth = optInt(args, "depth", 0);
         final var max = Math.clamp(optInt(args, "max", 80), 1, 500);
-        final var idx = codeGraph.queryIndex(ctx == null ? null : ctx.projectDir());
+        final var idx = codeGraph.queryIndex(ctx.projectDir());
         if (idx == null || idx.symbolCount() == 0) {
             return ToolResult.ok("Structural code graph is empty.");
         }

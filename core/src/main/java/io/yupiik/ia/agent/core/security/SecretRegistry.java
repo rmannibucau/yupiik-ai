@@ -167,6 +167,12 @@ public class SecretRegistry {
         return matchers;
     }
 
+    /** Custom substring patterns compiled for the current configuration scan, in declaration order. */
+    public List<Pattern> customPatterns() {
+        ensureScanned();
+        return customPatterns;
+    }
+
     /** True when {@code segment} is excluded from redaction by the allowlist. */
     public boolean inExclude(final String segment) {
         if (segment == null || excludes.isEmpty()) {

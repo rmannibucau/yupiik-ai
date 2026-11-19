@@ -23,6 +23,7 @@ import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfigurations;
 import io.yupiik.ia.agent.core.mcp.McpManager;
+import io.yupiik.ia.agent.core.shell.SessionRuntimeFactory;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -142,6 +143,24 @@ class WebMcpStatusTest {
     }
 
     private WebJsonRpc rpc(final CodingAgentConfiguration configuration, final McpManager manager) {
-        return new WebJsonRpc(null, null, null, null, null, manager, configuration, null, null, null, null, null);
+        return new WebJsonRpc(
+                null,
+                null,
+                null,
+                null,
+                null,
+                manager,
+                configuration,
+                null,
+                null,
+                null,
+                null,
+                null,
+                new SessionRuntimeFactory() {
+                    @Override
+                    public Path resolveWorkdir(final Path explicitWorkdir, final String resumedSessionId) {
+                        return home;
+                    }
+                });
     }
 }

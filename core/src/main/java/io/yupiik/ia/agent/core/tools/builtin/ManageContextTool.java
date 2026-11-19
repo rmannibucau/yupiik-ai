@@ -28,6 +28,7 @@ import io.yupiik.ia.agent.core.tools.ToolCategory;
 import io.yupiik.ia.agent.core.tools.ToolContext;
 import io.yupiik.ia.agent.core.tools.ToolResult;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -72,12 +73,12 @@ public class ManageContextTool implements EmbeddedTool {
     }
 
     @Override
-    public boolean usable() {
+    public boolean usable(final Path workdir) {
         return compressionEnabled();
     }
 
     @Override
-    public String description() {
+    public String description(final Path workdir) {
         return "Manage conversation context. action=compress (default) summarizes finished work only;"
                 + " never compress ongoing work. Historical user turns carry compactIds=A-B: inclusive"
                 + " numeric ids from the opening user message through the last message before the next"
@@ -138,11 +139,6 @@ public class ManageContextTool implements EmbeddedTool {
                         "keep_last",
                         Schemas.intProp("Optional minimum number of recent messages to keep verbatim (compact only).")),
                 "action");
-    }
-
-    @Override
-    public ToolResult execute(final Map<String, Object> args) {
-        return ToolResult.error("compress requires an active session context.");
     }
 
     @Override

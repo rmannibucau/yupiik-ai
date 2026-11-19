@@ -41,6 +41,11 @@ import io.yupiik.ia.agent.core.context.ContextManager;
 import io.yupiik.ia.agent.core.context.ContextView;
 import io.yupiik.ia.agent.core.context.TokenEstimator;
 import io.yupiik.ia.agent.core.context.UsageTracker;
+import io.yupiik.ia.agent.core.events.ModelSwitchedEvent;
+import io.yupiik.ia.agent.core.events.ModelSwitchingEvent;
+import io.yupiik.ia.agent.core.events.SessionEndedEvent;
+import io.yupiik.ia.agent.core.events.UserPromptSubmitEvent;
+import io.yupiik.ia.agent.core.events.YcaEvent;
 import io.yupiik.ia.agent.core.llm.ChatClient;
 import io.yupiik.ia.agent.core.llm.ChatCompletionRequest;
 import io.yupiik.ia.agent.core.llm.ChatSettings;
@@ -54,9 +59,12 @@ import io.yupiik.ia.agent.core.memory.MemoryStore;
 import io.yupiik.ia.agent.core.permissions.PermissionService;
 import io.yupiik.ia.agent.core.runtime.Cancellations;
 import io.yupiik.ia.agent.core.runtime.StatusReporter;
+import io.yupiik.ia.agent.core.session.AgentSessionService;
 import io.yupiik.ia.agent.core.session.SessionEntry;
 import io.yupiik.ia.agent.core.session.SessionStore;
+import io.yupiik.ia.agent.core.shell.SessionRuntime;
 import io.yupiik.ia.agent.core.shell.ThinkTagSplitter;
+import io.yupiik.ia.agent.core.todo.PlanTodoSeeder;
 import io.yupiik.ia.agent.core.todo.TodoItem;
 import io.yupiik.ia.agent.core.todo.TodoStore;
 import io.yupiik.ia.agent.core.tools.EmbeddedTool;
@@ -119,6 +127,9 @@ import org.junit.jupiter.api.io.TempDir;
 
 @ExtendWith(TestJsonMapper.class)
 class AgentLoopTest {
+    @TempDir
+    private static Path testWorkdir;
+
     private static final ExecutorService EXECUTOR = Executors.newVirtualThreadPerTaskExecutor();
 
     @TempDir
@@ -138,6 +149,275 @@ class AgentLoopTest {
     private ProviderManager providerManagerOverride;
     private FakeClock throughputClock;
     private Consumer<AgentEvent> eventObserver;
+    private Consumer<Object> emittedObserver;
+    private Consumer<ChatSettings> usageAttachmentObserver;
+
+    @Test
+    void cancellationWhileModelSwitchingHookIsBlockedPreventsCommitButNotAnAdmittedSwitch() throws Exception {
+        final var loop = loop(null, null, config(1_000_000));
+        final var original = ChatSettings.EMPTY.withModel("original");
+        loop.updateChatSettings(original);
+        final var entered = new CountDownLatch(1);
+        final var release = new CountDownLatch(1);
+        final var cancelled = new AtomicBoolean();
+        final var switched = new AtomicInteger();
+        final var attached = new AtomicInteger();
+        usageAttachmentObserver = ignored -> attached.incrementAndGet();
+        emittedObserver = event -> {
+            if (event instanceof ModelSwitchingEvent) {
+                entered.countDown();
+                try {
+                    assertTrue(release.await(5, TimeUnit.SECONDS));
+                } catch (final InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new IllegalStateException(e);
+                }
+            } else if (event instanceof ModelSwitchedEvent) {
+                switched.incrementAndGet();
+            }
+        };
+        final var pending =
+                EXECUTOR.submit(() -> loop.updateChatSettings(original.withModel("rejected"), cancelled::get));
+        try {
+            assertTrue(entered.await(5, TimeUnit.SECONDS));
+            cancelled.set(true);
+        } finally {
+            release.countDown();
+        }
+        assertFalse(pending.get(5, TimeUnit.SECONDS));
+        assertEquals(original, loop.chatSettings());
+        assertEquals(0, attached.get());
+        assertEquals(0, switched.get());
+        cancelled.set(false);
+        assertTrue(loop.updateChatSettings(original.withModel("committed"), cancelled::get));
+        cancelled.set(true);
+        assertEquals("committed", loop.chatSettings().model());
+        assertEquals(1, attached.get());
+        assertEquals(1, switched.get());
+        loop.close();
+    }
+
+    @Test
+    void cancellationDuringVetoedModelSwitchDoesNotPublishRejectionOrCommitSettings() {
+        final var loop = loop(null, null, config(1_000_000));
+        final var original = ChatSettings.EMPTY.withModel("original");
+        loop.updateChatSettings(original);
+        final var cancelled = new AtomicBoolean();
+        final var emitted = new ArrayList<Object>();
+        final var attached = new AtomicInteger();
+        usageAttachmentObserver = ignored -> attached.incrementAndGet();
+        emittedObserver = event -> {
+            emitted.add(event);
+            if (event instanceof ModelSwitchingEvent switching) {
+                cancelled.set(true);
+                switching.result().forbid("late rejection");
+            }
+        };
+        try {
+            assertFalse(loop.updateChatSettings(original.withModel("rejected"), cancelled::get));
+            assertEquals(original, loop.chatSettings());
+            assertEquals(0, attached.get());
+            assertEquals(1, emitted.size());
+            assertInstanceOf(ModelSwitchingEvent.class, emitted.getFirst());
+        } finally {
+            loop.close();
+        }
+    }
+
+    @Test
+    void closeWhileModelSwitchingHookIsBlockedPreventsSettingsCommit() throws Exception {
+        final var loop = loop(null, null, config(1_000_000));
+        final var original = ChatSettings.EMPTY.withModel("original");
+        loop.updateChatSettings(original);
+        final var switching = new CountDownLatch(1);
+        final var release = new CountDownLatch(1);
+        final var switched = new AtomicInteger();
+        final var ended = new AtomicInteger();
+        final var attachments = new AtomicInteger();
+        usageAttachmentObserver = ignored -> attachments.incrementAndGet();
+        emittedObserver = event -> {
+            if (event instanceof ModelSwitchingEvent) {
+                switching.countDown();
+                try {
+                    assertTrue(release.await(5, TimeUnit.SECONDS), "switch hook was not released");
+                } catch (final InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new IllegalStateException(e);
+                }
+            } else if (event instanceof ModelSwitchedEvent) {
+                switched.incrementAndGet();
+            } else if (event instanceof SessionEndedEvent) {
+                ended.incrementAndGet();
+            }
+        };
+
+        final var update = EXECUTOR.submit(() -> loop.updateChatSettings(original.withModel("replacement")));
+        try {
+            assertTrue(switching.await(5, TimeUnit.SECONDS), "switch hook was not entered");
+            // close must return without waiting for the model-switch hook.
+            EXECUTOR.submit(loop::close).get(5, TimeUnit.SECONDS);
+            assertEquals(1, ended.get());
+        } finally {
+            release.countDown();
+        }
+        update.get(5, TimeUnit.SECONDS);
+        loop.close();
+
+        assertEquals(original, loop.chatSettings());
+        assertEquals(0, attachments.get(), "a closed session must not reattach usage");
+        assertEquals(0, switched.get(), "an abandoned switch must not fire ModelSwitched");
+        assertEquals(1, ended.get());
+    }
+
+    @Test
+    void hookContextsFollowSessionRootsForSwitchPromptAndClose(@TempDir final Path tmp) {
+        final var config = config(
+                1_000_000, Map.of("yca.projectDir", tmp.resolve("default").toString()));
+        final var hooks = new ArrayList<YcaEvent>();
+        emittedObserver = event -> {
+            if (event instanceof final YcaEvent hook) {
+                hooks.add(hook);
+            }
+        };
+        for (final var root : List.of(tmp.resolve("b"), tmp.resolve("a"))) {
+            hooks.clear();
+            final var sessionConfig = config(
+                    1_000_000,
+                    Map.of(
+                            "yca.workingDir",
+                            root.toString(),
+                            "yca.projectDir",
+                            tmp.resolve("default").toString()));
+            final var replies = new ArrayDeque<>(List.of(new ScriptedReply("done", "stop", false)));
+            final var loop = loop(
+                    chatClient(replies, new ArrayList<>()),
+                    null,
+                    sessionConfig,
+                    noContextManager(),
+                    noSessionStore(),
+                    null,
+                    registryOf(),
+                    null,
+                    null,
+                    new SystemPromptBuilder(sessionConfig, null, null, null, null, null, null, null, null, root));
+
+            loop.updateChatSettings(ChatSettings.EMPTY.withModel("replacement"));
+            assertEquals("done", loop.run("check", null, "session", null, () -> false));
+            loop.close();
+
+            assertTrue(hooks.stream().anyMatch(ModelSwitchingEvent.class::isInstance));
+            assertTrue(hooks.stream().anyMatch(ModelSwitchedEvent.class::isInstance));
+            assertTrue(hooks.stream().anyMatch(UserPromptSubmitEvent.class::isInstance));
+            assertTrue(hooks.stream().anyMatch(SessionEndedEvent.class::isInstance));
+            hooks.forEach(
+                    hook -> assertEquals(root.toString(), hook.eventContext().cwd(), hook.id()));
+        }
+        hooks.clear();
+        loop(null, null, config).close();
+        assertEquals(
+                config.resolveWorkingDir().toString(),
+                hooks.getLast().eventContext().cwd());
+    }
+
+    @Test
+    void settingsUpdateAfterCloseDoesNotRunHooksOrAttachUsage() {
+        final var loop = loop(null, null, config(1_000_000));
+        final var original = loop.chatSettings();
+        loop.close();
+        final var emitted = new ArrayList<Object>();
+        emittedObserver = emitted::add;
+        final var attachments = new AtomicInteger();
+        usageAttachmentObserver = ignored -> attachments.incrementAndGet();
+
+        loop.updateChatSettings(ChatSettings.EMPTY.withModel("replacement"));
+        loop.updateChatSettings(null);
+
+        assertEquals(original, loop.chatSettings());
+        assertEquals(0, attachments.get());
+        assertTrue(emitted.isEmpty(), "closed settings updates must not fire any hooks or events");
+    }
+
+    @Test
+    void concurrentCloseFiresSessionEndedOnlyOnceWithoutHoldingLifecycleLockInHook() throws Exception {
+        final var loop = loop(null, null, config(1_000_000));
+        final var ending = new CountDownLatch(1);
+        final var release = new CountDownLatch(1);
+        final var ended = new AtomicInteger();
+        emittedObserver = event -> {
+            if (event instanceof SessionEndedEvent) {
+                ended.incrementAndGet();
+                ending.countDown();
+                try {
+                    assertTrue(release.await(5, TimeUnit.SECONDS), "end hook was not released");
+                } catch (final InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new IllegalStateException(e);
+                }
+            }
+        };
+        final var firstClose = EXECUTOR.submit(loop::close);
+        try {
+            assertTrue(ending.await(5, TimeUnit.SECONDS), "end hook was not entered");
+            EXECUTOR.submit(loop::close).get(5, TimeUnit.SECONDS);
+            assertEquals(1, ended.get());
+        } finally {
+            release.countDown();
+        }
+        firstClose.get(5, TimeUnit.SECONDS);
+        assertEquals(1, ended.get());
+    }
+
+    @Test
+    void realIdleModeChangesEmitSessionTaggedNoticesOnlyForEffectiveChanges() {
+        final var configuration = config(1_000_000, Map.of("yca.mode", "plan"));
+        final var loop = loop(
+                null,
+                null,
+                configuration,
+                noContextManager(),
+                noSessionStore(),
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                "idle-session");
+        final var runtime = new SessionRuntime(
+                loop, loop.permissionService, null, loop.usageTracker, null, null, null, null, testWorkdir);
+        final var service = new AgentSessionService(
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                new PlanTodoSeeder(null, null, mapper),
+                configuration,
+                null,
+                null);
+        eventObserver = event -> {
+            if (event instanceof AgentEvent.Notice notice) {
+                assertEquals("mode: " + runtime.permissions().mode().name().toLowerCase(Locale.ROOT), notice.message());
+            }
+        };
+
+        service.setMode("build", "idle-session", runtime);
+        service.setMode("build", "idle-session", runtime);
+        service.setMode("plan", "idle-session", runtime);
+        service.setMode("plan", "idle-session", runtime);
+
+        final var notices = events.stream()
+                .filter(AgentEvent.Notice.class::isInstance)
+                .map(AgentEvent.Notice.class::cast)
+                .toList();
+        assertEquals(
+                List.of("mode: build", "mode: plan"),
+                notices.stream().map(AgentEvent.Notice::message).toList());
+        assertTrue(notices.stream().allMatch(notice -> "idle-session".equals(notice.sessionId())));
+        assertEquals(AgentMode.PLAN, runtime.permissions().mode());
+    }
 
     @Test
     void unknownToolDiagnosticNamesOffendingToolAndPointsToTools() throws Exception {
@@ -182,17 +462,17 @@ class AgentLoopTest {
         final var candidates = List.of(allowedTool, blockedTool);
         final var registry = new ToolRegistry(null) {
             @Override
-            public List<Tool> toWireTools() {
+            public List<Tool> toWireTools(final Path workdir) {
                 return candidates.stream().map(this::wireTool).toList();
             }
 
             @Override
-            public List<Tool> toWireTools(final Predicate<EmbeddedTool> filter) {
+            public List<Tool> toWireTools(final Path workdir, final Predicate<EmbeddedTool> filter) {
                 return candidates.stream().filter(filter).map(this::wireTool).toList();
             }
 
             private Tool wireTool(final EmbeddedTool tool) {
-                return Tool.function(tool.name(), tool.description(), tool.schema());
+                return Tool.function(tool.name(), tool.description(storageHome), tool.schema());
             }
 
             @Override
@@ -246,13 +526,13 @@ class AgentLoopTest {
         final var tool = testTool("crashy", executed);
         final var registry = new ToolRegistry(null) {
             @Override
-            public List<Tool> toWireTools() {
-                return List.of(Tool.function(tool.name(), tool.description(), tool.schema()));
+            public List<Tool> toWireTools(final Path workdir) {
+                return List.of(Tool.function(tool.name(), tool.description(storageHome), tool.schema()));
             }
 
             @Override
-            public List<Tool> toWireTools(final Predicate<EmbeddedTool> filter) {
-                return List.of(Tool.function(tool.name(), tool.description(), tool.schema()));
+            public List<Tool> toWireTools(final Path workdir, final Predicate<EmbeddedTool> filter) {
+                return List.of(Tool.function(tool.name(), tool.description(storageHome), tool.schema()));
             }
 
             @Override
@@ -318,7 +598,7 @@ class AgentLoopTest {
             }
 
             @Override
-            public String description() {
+            public String description(final Path workdir) {
                 return "test tool";
             }
 
@@ -333,7 +613,7 @@ class AgentLoopTest {
             }
 
             @Override
-            public ToolResult execute(final Map<String, Object> args) {
+            public ToolResult execute(final Map<String, Object> args, final ToolContext context) {
                 executed.add(name);
                 return ToolResult.ok("ran " + name);
             }
@@ -417,6 +697,7 @@ class AgentLoopTest {
                 events.stream().filter(AgentEvent.Notice.class::isInstance).toList();
         assertEquals(4, notices.size(), "3 continuation warnings then the give-up error");
         assertEquals(AgentEvent.Notice.Level.ERROR, ((AgentEvent.Notice) notices.getLast()).level());
+        assertEquals("length", ((AgentEvent.Notice) notices.getLast()).finishReason());
         assertTrue(((AgentEvent.Notice) notices.getLast()).message().contains("Gave up after 3 continuations"));
         assertInstanceOf(AgentEvent.TurnDone.class, events.getLast());
     }
@@ -434,6 +715,7 @@ class AgentLoopTest {
                 events.stream().filter(AgentEvent.Notice.class::isInstance).toList();
         assertEquals(1, notices.size());
         assertEquals(AgentEvent.Notice.Level.ERROR, ((AgentEvent.Notice) notices.getFirst()).level());
+        assertEquals("length", ((AgentEvent.Notice) notices.getFirst()).finishReason());
         assertTrue(((AgentEvent.Notice) notices.getFirst()).message().contains("continueOnTruncation"));
     }
 
@@ -975,7 +1257,7 @@ class AgentLoopTest {
                         "yca.permissions.mode", "yolo",
                         "yca.todos.continueOnUnfinished", "true",
                         "yca.llm.truncationContinuesMax", "1"));
-        permissionServiceOverride = new PermissionService(config);
+        permissionServiceOverride = new PermissionService(config, (config).resolveWorkingDir());
         permissionServiceOverride.setMode(AgentMode.BUILD);
         try {
             final var todoStore =
@@ -1461,7 +1743,8 @@ class AgentLoopTest {
     void turnEndingWithPendingTodosIsWarnedAbout() {
         // the default (unconfigured) permission mode is PLAN where pending todos are expected:
         // opt into BUILD explicitly so the warning still applies
-        permissionServiceOverride = new PermissionService(configuration(true));
+        permissionServiceOverride =
+                new PermissionService(configuration(true), (configuration(true)).resolveWorkingDir());
         permissionServiceOverride.setMode(AgentMode.BUILD);
         final var todoStore = new TodoStore() {
             private List<TodoItem> todos = List.of(
@@ -1532,7 +1815,7 @@ class AgentLoopTest {
                         "yca.provider.providers.0.models.length", "1",
                         "yca.provider.providers.0.models.0.model", "test-model",
                         "yca.provider.providers.0.models.0.behavior.turnContinuesOnTextEnd", "true"));
-        permissionServiceOverride = new PermissionService(config);
+        permissionServiceOverride = new PermissionService(config, (config).resolveWorkingDir());
         permissionServiceOverride.setMode(AgentMode.BUILD);
         providerManagerOverride = new ProviderManager(config, mapper);
         try {
@@ -1596,7 +1879,7 @@ class AgentLoopTest {
                         "yca.provider.providers.0.model", "test-model",
                         "yca.provider.providers.0.models.length", "1",
                         "yca.provider.providers.0.models.0.model", "test-model"));
-        permissionServiceOverride = new PermissionService(config);
+        permissionServiceOverride = new PermissionService(config, (config).resolveWorkingDir());
         permissionServiceOverride.setMode(AgentMode.BUILD);
         providerManagerOverride = new ProviderManager(config, mapper);
         try {
@@ -1643,7 +1926,7 @@ class AgentLoopTest {
                         "yca.mode", "build",
                         "yca.permissions.mode", "yolo",
                         "yca.todos.continueOnUnfinished", "true"));
-        permissionServiceOverride = new PermissionService(config);
+        permissionServiceOverride = new PermissionService(config, (config).resolveWorkingDir());
         permissionServiceOverride.setMode(AgentMode.BUILD);
         try {
             final var todoStore = mutableTodoStore(
@@ -1703,7 +1986,7 @@ class AgentLoopTest {
                         "yca.mode", "build",
                         "yca.permissions.mode", "yolo",
                         "yca.todos.continueOnUnfinished", "true"));
-        permissionServiceOverride = new PermissionService(config);
+        permissionServiceOverride = new PermissionService(config, (config).resolveWorkingDir());
         permissionServiceOverride.setMode(AgentMode.BUILD);
         try {
             final var todoStore = mutableTodoStore(new TodoItem("running step", "in_progress"));
@@ -1748,7 +2031,7 @@ class AgentLoopTest {
                         "yca.permissions.mode", "yolo",
                         "yca.todos.continueOnUnfinished", "true",
                         "yca.todos.maxContinues", "2"));
-        permissionServiceOverride = new PermissionService(config);
+        permissionServiceOverride = new PermissionService(config, (config).resolveWorkingDir());
         permissionServiceOverride.setMode(AgentMode.BUILD);
         try {
             final var todoStore = mutableTodoStore(
@@ -1803,7 +2086,7 @@ class AgentLoopTest {
                         "yca.mode", "build",
                         "yca.permissions.mode", "yolo",
                         "yca.todos.continueOnUnfinished", "true"));
-        permissionServiceOverride = new PermissionService(config);
+        permissionServiceOverride = new PermissionService(config, (config).resolveWorkingDir());
         permissionServiceOverride.setMode(AgentMode.BUILD);
         try {
             final var todoStore = mutableTodoStore(new TodoItem("later step", "pending"));
@@ -1903,7 +2186,7 @@ class AgentLoopTest {
                         "yca.permissions.mode", "yolo",
                         "yca.todos.continueOnUnfinished", "true",
                         "yca.llm.emptyCompletionRetriesMax", "1"));
-        permissionServiceOverride = new PermissionService(config);
+        permissionServiceOverride = new PermissionService(config, (config).resolveWorkingDir());
         permissionServiceOverride.setMode(AgentMode.BUILD);
         try {
             final var todoStore =
@@ -2353,7 +2636,7 @@ class AgentLoopTest {
                             }
 
                             @Override
-                            public String description() {
+                            public String description(final Path workdir) {
                                 return "always fails";
                             }
 
@@ -2368,7 +2651,7 @@ class AgentLoopTest {
                             }
 
                             @Override
-                            public ToolResult execute(final Map<String, Object> args) {
+                            public ToolResult execute(final Map<String, Object> args, final ToolContext context) {
                                 executions.incrementAndGet();
                                 return new ToolResult(false, "boom");
                             }
@@ -2412,7 +2695,7 @@ class AgentLoopTest {
                             }
 
                             @Override
-                            public String description() {
+                            public String description(final Path workdir) {
                                 return "returns fresh content";
                             }
 
@@ -2427,7 +2710,7 @@ class AgentLoopTest {
                             }
 
                             @Override
-                            public ToolResult execute(final Map<String, Object> args) {
+                            public ToolResult execute(final Map<String, Object> args, final ToolContext context) {
                                 return ToolResult.ok("value#" + counter.incrementAndGet());
                             }
                         }),
@@ -2469,7 +2752,7 @@ class AgentLoopTest {
                             }
 
                             @Override
-                            public String description() {
+                            public String description(final Path workdir) {
                                 return "output with a changing timestamp";
                             }
 
@@ -2484,7 +2767,7 @@ class AgentLoopTest {
                             }
 
                             @Override
-                            public ToolResult execute(final Map<String, Object> args) {
+                            public ToolResult execute(final Map<String, Object> args, final ToolContext context) {
                                 executions.incrementAndGet();
                                 // an ISO-8601 date+time that the date-aware comparison strips, so every
                                 // output differs only by its embedded timestamp
@@ -2531,7 +2814,7 @@ class AgentLoopTest {
                             }
 
                             @Override
-                            public String description() {
+                            public String description(final Path workdir) {
                                 return "a build-like state-changing tool";
                             }
 
@@ -2546,7 +2829,7 @@ class AgentLoopTest {
                             }
 
                             @Override
-                            public ToolResult execute(final Map<String, Object> args) {
+                            public ToolResult execute(final Map<String, Object> args, final ToolContext context) {
                                 executions.incrementAndGet();
                                 // only the elapsed duration differs between runs
                                 return ToolResult.ok("BUILD SUCCESSFUL in " + executions.get() + "s");
@@ -2591,7 +2874,7 @@ class AgentLoopTest {
                             }
 
                             @Override
-                            public String description() {
+                            public String description(final Path workdir) {
                                 return "returns incrementing version-like digits";
                             }
 
@@ -2606,7 +2889,7 @@ class AgentLoopTest {
                             }
 
                             @Override
-                            public ToolResult execute(final Map<String, Object> args) {
+                            public ToolResult execute(final Map<String, Object> args, final ToolContext context) {
                                 executions.incrementAndGet();
                                 // semantically different digits each run - must NOT be conflated
                                 return ToolResult.ok(
@@ -2654,7 +2937,7 @@ class AgentLoopTest {
                                     }
 
                                     @Override
-                                    public String description() {
+                                    public String description(final Path workdir) {
                                         return "a";
                                     }
 
@@ -2669,7 +2952,8 @@ class AgentLoopTest {
                                     }
 
                                     @Override
-                                    public ToolResult execute(final Map<String, Object> args) {
+                                    public ToolResult execute(
+                                            final Map<String, Object> args, final ToolContext context) {
                                         return ToolResult.ok("shared result");
                                     }
                                 },
@@ -2680,7 +2964,7 @@ class AgentLoopTest {
                                     }
 
                                     @Override
-                                    public String description() {
+                                    public String description(final Path workdir) {
                                         return "b";
                                     }
 
@@ -2695,7 +2979,8 @@ class AgentLoopTest {
                                     }
 
                                     @Override
-                                    public ToolResult execute(final Map<String, Object> args) {
+                                    public ToolResult execute(
+                                            final Map<String, Object> args, final ToolContext context) {
                                         return ToolResult.ok("shared result");
                                     }
                                 }),
@@ -2781,7 +3066,7 @@ class AgentLoopTest {
                             }
 
                             @Override
-                            public String description() {
+                            public String description(final Path workdir) {
                                 return "echoes";
                             }
 
@@ -2796,7 +3081,7 @@ class AgentLoopTest {
                             }
 
                             @Override
-                            public ToolResult execute(final Map<String, Object> args) {
+                            public ToolResult execute(final Map<String, Object> args, final ToolContext context) {
                                 executions.incrementAndGet();
                                 return ToolResult.ok("done");
                             }
@@ -3223,7 +3508,7 @@ class AgentLoopTest {
                         "yca.permissions.mode", "yolo",
                         "yca.llm.maxIterations", "50",
                         "yca.llm.explorationNudgeRounds", "4"));
-        permissionServiceOverride = new PermissionService(config);
+        permissionServiceOverride = new PermissionService(config, (config).resolveWorkingDir());
         permissionServiceOverride.setMode(AgentMode.BUILD);
         try {
             final var result = loop(
@@ -3277,7 +3562,7 @@ class AgentLoopTest {
                         "yca.permissions.mode", "yolo",
                         "yca.llm.maxIterations", "50",
                         "yca.llm.explorationNudgeRounds", "4"));
-        permissionServiceOverride = new PermissionService(config);
+        permissionServiceOverride = new PermissionService(config, (config).resolveWorkingDir());
         permissionServiceOverride.setMode(AgentMode.BUILD);
         try {
             final var result = loop(
@@ -3713,7 +3998,7 @@ class AgentLoopTest {
                         "yca.mode", "build",
                         "yca.permissions.mode", "yolo",
                         "yca.todos.continueOnUnfinished", "true"));
-        permissionServiceOverride = new PermissionService(config);
+        permissionServiceOverride = new PermissionService(config, (config).resolveWorkingDir());
         permissionServiceOverride.setMode(AgentMode.BUILD);
         try {
             final var todoStore =
@@ -3768,7 +4053,7 @@ class AgentLoopTest {
                         "yca.mode", "build",
                         "yca.permissions.mode", "yolo",
                         "yca.todos.continueOnUnfinished", "true"));
-        permissionServiceOverride = new PermissionService(config);
+        permissionServiceOverride = new PermissionService(config, (config).resolveWorkingDir());
         permissionServiceOverride.setMode(AgentMode.BUILD);
         try {
             final var todoStore =
@@ -3887,7 +4172,7 @@ class AgentLoopTest {
             }
 
             @Override
-            public String description() {
+            public String description(final Path workdir) {
                 return "read a file";
             }
 
@@ -3907,7 +4192,7 @@ class AgentLoopTest {
             }
 
             @Override
-            public ToolResult execute(final Map<String, Object> args) {
+            public ToolResult execute(final Map<String, Object> args, final ToolContext context) {
                 return fixtureRead(args);
             }
         });
@@ -3935,7 +4220,7 @@ class AgentLoopTest {
                     }
 
                     @Override
-                    public String description() {
+                    public String description(final Path workdir) {
                         return "read a file";
                     }
 
@@ -3955,7 +4240,7 @@ class AgentLoopTest {
                     }
 
                     @Override
-                    public ToolResult execute(final Map<String, Object> args) {
+                    public ToolResult execute(final Map<String, Object> args, final ToolContext context) {
                         return fixtureRead(args);
                     }
                 },
@@ -3966,7 +4251,7 @@ class AgentLoopTest {
                     }
 
                     @Override
-                    public String description() {
+                    public String description(final Path workdir) {
                         return "write a file";
                     }
 
@@ -3988,7 +4273,7 @@ class AgentLoopTest {
                     }
 
                     @Override
-                    public ToolResult execute(final Map<String, Object> args) {
+                    public ToolResult execute(final Map<String, Object> args, final ToolContext context) {
                         return ToolResult.ok("written");
                     }
                 });
@@ -4021,8 +4306,8 @@ class AgentLoopTest {
     private static ToolRegistry todoToolsRegistry(final TodoStore todoStore) {
         return new ToolRegistry(null) {
             @Override
-            public List<Tool> toWireTools() {
-                return List.of();
+            public List<EmbeddedTool> tools() {
+                return List.of(tool("noop"), tool("close_todos"));
             }
 
             @Override
@@ -4037,7 +4322,7 @@ class AgentLoopTest {
                     }
 
                     @Override
-                    public String description() {
+                    public String description(final Path workdir) {
                         return "test tool";
                     }
 
@@ -4056,7 +4341,7 @@ class AgentLoopTest {
                     }
 
                     @Override
-                    public ToolResult execute(final Map<String, Object> args) {
+                    public ToolResult execute(final Map<String, Object> args, final ToolContext context) {
                         if ("close_todos".equals(name)) {
                             todoStore.replace(List.of(new TodoItem("done step", "completed")));
                         }
@@ -4095,7 +4380,7 @@ class AgentLoopTest {
             }
 
             @Override
-            public String description() {
+            public String description(final Path workdir) {
                 return "counted test tool";
             }
 
@@ -4115,7 +4400,7 @@ class AgentLoopTest {
             }
 
             @Override
-            public ToolResult execute(final Map<String, Object> args) {
+            public ToolResult execute(final Map<String, Object> args, final ToolContext context) {
                 executions.incrementAndGet();
                 return ToolResult.ok("ran");
             }
@@ -4173,7 +4458,7 @@ class AgentLoopTest {
                 },
                 new ScriptedReply("made progress", "stop", false)));
         final var config = configuration(true);
-        permissionServiceOverride = new PermissionService(config);
+        permissionServiceOverride = new PermissionService(config, (config).resolveWorkingDir());
         permissionServiceOverride.setMode(AgentMode.PLAN);
         try {
             loop(chatClient(replies, new ArrayList<>()), todoStore, config).run("do it", null, "s1", null, () -> false);
@@ -4394,7 +4679,7 @@ class AgentLoopTest {
             }
 
             @Override
-            public String description() {
+            public String description(final Path workdir) {
                 return "returns a distinct result on every call";
             }
 
@@ -4409,7 +4694,7 @@ class AgentLoopTest {
             }
 
             @Override
-            public ToolResult execute(final Map<String, Object> args) {
+            public ToolResult execute(final Map<String, Object> args, final ToolContext context) {
                 return ToolResult.ok("tick " + calls.incrementAndGet());
             }
         };
@@ -5137,8 +5422,8 @@ class AgentLoopTest {
                         new ToolCall("t3", "function", new ToolCall.FunctionCall("read_b", "{}"), 2)));
         final var registry = new ToolRegistry(null) {
             @Override
-            public List<Tool> toWireTools() {
-                return List.of();
+            public List<EmbeddedTool> tools() {
+                return List.of(tool("read_a"), tool("agent_x"), tool("read_b"));
             }
 
             @Override
@@ -5154,7 +5439,7 @@ class AgentLoopTest {
                     }
 
                     @Override
-                    public String description() {
+                    public String description(final Path workdir) {
                         return "test tool";
                     }
 
@@ -5176,7 +5461,7 @@ class AgentLoopTest {
                     }
 
                     @Override
-                    public ToolResult execute(final Map<String, Object> args) {
+                    public ToolResult execute(final Map<String, Object> args, final ToolContext context) {
                         order.add(name);
                         return ToolResult.ok("ran " + name);
                     }
@@ -5233,8 +5518,8 @@ class AgentLoopTest {
         };
         final var registry = new ToolRegistry(null) {
             @Override
-            public List<Tool> toWireTools() {
-                return List.of();
+            public List<EmbeddedTool> tools() {
+                return List.of(tool("probe"));
             }
 
             @Override
@@ -5249,7 +5534,7 @@ class AgentLoopTest {
                     }
 
                     @Override
-                    public String description() {
+                    public String description(final Path workdir) {
                         return "test tool";
                     }
 
@@ -5269,7 +5554,7 @@ class AgentLoopTest {
                     }
 
                     @Override
-                    public ToolResult execute(final Map<String, Object> args) {
+                    public ToolResult execute(final Map<String, Object> args, final ToolContext context) {
                         executions.incrementAndGet();
                         return ToolResult.ok("probe result");
                     }
@@ -5467,8 +5752,8 @@ class AgentLoopTest {
     private ToolRegistry fileToolsRegistry() {
         return new ToolRegistry(null) {
             @Override
-            public List<Tool> toWireTools() {
-                return List.of();
+            public List<EmbeddedTool> tools() {
+                return List.of(tool("read"), tool("write_file"));
             }
 
             @Override
@@ -5484,7 +5769,7 @@ class AgentLoopTest {
                     }
 
                     @Override
-                    public String description() {
+                    public String description(final Path workdir) {
                         return "test tool";
                     }
 
@@ -5504,7 +5789,7 @@ class AgentLoopTest {
                     }
 
                     @Override
-                    public ToolResult execute(final Map<String, Object> args) {
+                    public ToolResult execute(final Map<String, Object> args, final ToolContext context) {
                         return ToolResult.ok(read ? "old content" : "written");
                     }
                 };
@@ -5516,8 +5801,8 @@ class AgentLoopTest {
     private ToolRegistry barrierRegistry(final CyclicBarrier barrier, final String... names) {
         return new ToolRegistry(null) {
             @Override
-            public List<Tool> toWireTools() {
-                return List.of();
+            public List<EmbeddedTool> tools() {
+                return Arrays.stream(names).map(this::tool).toList();
             }
 
             @Override
@@ -5532,7 +5817,7 @@ class AgentLoopTest {
                     }
 
                     @Override
-                    public String description() {
+                    public String description(final Path workdir) {
                         return "test tool";
                     }
 
@@ -5552,7 +5837,7 @@ class AgentLoopTest {
                     }
 
                     @Override
-                    public ToolResult execute(final Map<String, Object> args) {
+                    public ToolResult execute(final Map<String, Object> args, final ToolContext context) {
                         try {
                             barrier.await(250, TimeUnit.MILLISECONDS);
                         } catch (final Exception e) {
@@ -5619,8 +5904,8 @@ class AgentLoopTest {
         final var secondExecutions = new AtomicInteger();
         final var registry = new ToolRegistry(null) {
             @Override
-            public List<Tool> toWireTools() {
-                return List.of();
+            public List<EmbeddedTool> tools() {
+                return List.of(tool("blocking"), tool("simple"));
             }
 
             @Override
@@ -5634,7 +5919,7 @@ class AgentLoopTest {
                             }
 
                             @Override
-                            public String description() {
+                            public String description(final Path workdir) {
                                 return "blocks";
                             }
 
@@ -5646,11 +5931,6 @@ class AgentLoopTest {
                             @Override
                             public ToolCategory category() {
                                 return ToolCategory.AGENT;
-                            }
-
-                            @Override
-                            public ToolResult execute(final Map<String, Object> args) {
-                                throw new UnsupportedOperationException();
                             }
 
                             @Override
@@ -5673,7 +5953,7 @@ class AgentLoopTest {
                             }
 
                             @Override
-                            public String description() {
+                            public String description(final Path workdir) {
                                 return "simple";
                             }
 
@@ -5685,11 +5965,6 @@ class AgentLoopTest {
                             @Override
                             public ToolCategory category() {
                                 return ToolCategory.AGENT;
-                            }
-
-                            @Override
-                            public ToolResult execute(final Map<String, Object> args) {
-                                throw new UnsupportedOperationException();
                             }
 
                             @Override
@@ -5817,8 +6092,8 @@ class AgentLoopTest {
         final var seenCancelled = new AtomicBoolean();
         final var registry = new ToolRegistry(null) {
             @Override
-            public List<Tool> toWireTools() {
-                return List.of();
+            public List<EmbeddedTool> tools() {
+                return List.of(tool("hanging"));
             }
 
             @Override
@@ -5830,7 +6105,7 @@ class AgentLoopTest {
                     }
 
                     @Override
-                    public String description() {
+                    public String description(final Path workdir) {
                         return "hangs until its per-call probe flips";
                     }
 
@@ -5842,11 +6117,6 @@ class AgentLoopTest {
                     @Override
                     public ToolCategory category() {
                         return ToolCategory.AGENT;
-                    }
-
-                    @Override
-                    public ToolResult execute(final Map<String, Object> args) {
-                        throw new UnsupportedOperationException();
                     }
 
                     @Override
@@ -5957,8 +6227,8 @@ class AgentLoopTest {
                         "yca.permissions.mode", "yolo"));
         final var registry = new ToolRegistry(null) {
             @Override
-            public List<Tool> toWireTools() {
-                return List.of();
+            public List<EmbeddedTool> tools() {
+                return List.of(tool("ping"));
             }
 
             @Override
@@ -5973,7 +6243,7 @@ class AgentLoopTest {
                     }
 
                     @Override
-                    public String description() {
+                    public String description(final Path workdir) {
                         return "ping";
                     }
 
@@ -5985,11 +6255,6 @@ class AgentLoopTest {
                     @Override
                     public ToolCategory category() {
                         return ToolCategory.AGENT;
-                    }
-
-                    @Override
-                    public ToolResult execute(final Map<String, Object> args) {
-                        throw new UnsupportedOperationException();
                     }
 
                     @Override
@@ -6690,7 +6955,7 @@ class AgentLoopTest {
     void memoryIsNotResentInEveryRoundTail() {
         final var cfg = configuration(true);
         final var memory = new MemoryStore(cfg);
-        memory.append(true, List.of("a durable fact"));
+        memory.append(true, List.of("a durable fact"), cfg.resolveWorkingDir());
         final var requests = new ArrayList<List<Message>>();
         final var client = scriptedToolClient(
                 requests,
@@ -6702,7 +6967,7 @@ class AgentLoopTest {
             }
 
             @Override
-            public String description() {
+            public String description(final Path workdir) {
                 return "read a file";
             }
 
@@ -6722,16 +6987,18 @@ class AgentLoopTest {
             }
 
             @Override
-            public ToolResult execute(final Map<String, Object> args) {
+            public ToolResult execute(final Map<String, Object> args, final ToolContext context) {
                 return ToolResult.ok("file content");
             }
         });
-        final var builder = new SystemPromptBuilder(cfg, memory, null, null, null, null, null, null, null) {
-            @Override
-            public String build(final String prompt, final AgentConfiguration agent) {
-                return "system\n\n" + memorySection(prompt);
-            }
-        };
+        final var builder =
+                new SystemPromptBuilder(
+                        cfg, memory, null, null, null, null, null, null, null, (cfg).resolveWorkingDir()) {
+                    @Override
+                    public String build(final String prompt, final AgentConfiguration agent) {
+                        return "system\n\n" + memorySection(prompt);
+                    }
+                };
         final var loop = loop(
                 client,
                 null,
@@ -6757,7 +7024,7 @@ class AgentLoopTest {
     void memoryWriteMidTurnPersistsToDiskButDoesNotRefreshTheTail() {
         final var cfg = configuration(true);
         final var memory = new MemoryStore(cfg);
-        memory.append(true, List.of("fact before"));
+        memory.append(true, List.of("fact before"), cfg.resolveWorkingDir());
         final var requests = new ArrayList<List<Message>>();
         final var client = scriptedToolClient(
                 requests,
@@ -6767,12 +7034,14 @@ class AgentLoopTest {
                         new ToolCall.FunctionCall("memory_write", "{\"fact\":\"fact after\",\"scope\":\"global\"}"),
                         0)));
         final var registry = registryOf(new MemoryWriteTool(memory));
-        final var builder = new SystemPromptBuilder(cfg, memory, null, null, null, null, null, null, null) {
-            @Override
-            public String build(final String prompt, final AgentConfiguration agent) {
-                return "system\n\n" + memorySection(prompt);
-            }
-        };
+        final var builder =
+                new SystemPromptBuilder(
+                        cfg, memory, null, null, null, null, null, null, null, (cfg).resolveWorkingDir()) {
+                    @Override
+                    public String build(final String prompt, final AgentConfiguration agent) {
+                        return "system\n\n" + memorySection(prompt);
+                    }
+                };
         final var loop = loop(
                 client,
                 null,
@@ -6814,7 +7083,7 @@ class AgentLoopTest {
     private ToolRegistry wireToolsRegistry() {
         return new ToolRegistry(null) {
             @Override
-            public List<Tool> toWireTools() {
+            public List<Tool> toWireTools(final Path workdir) {
                 return List.of(Tool.function(
                         "read",
                         "read a file from disk",
@@ -6832,7 +7101,12 @@ class AgentLoopTest {
     private ToolRegistry readWriteWireToolsRegistry() {
         return new ToolRegistry(null) {
             @Override
-            public List<Tool> toWireTools() {
+            public List<EmbeddedTool> tools() {
+                return List.of(tool("read"), tool("write_file"));
+            }
+
+            @Override
+            public List<Tool> toWireTools(final Path workdir) {
                 return List.of(
                         Tool.function(
                                 "read",
@@ -6857,7 +7131,7 @@ class AgentLoopTest {
                     }
 
                     @Override
-                    public String description() {
+                    public String description(final Path workdir) {
                         return "test tool";
                     }
 
@@ -6877,12 +7151,46 @@ class AgentLoopTest {
                     }
 
                     @Override
-                    public ToolResult execute(final Map<String, Object> args) {
+                    public ToolResult execute(final Map<String, Object> args, final ToolContext context) {
                         return ToolResult.ok(read ? "old content" : "written");
                     }
                 };
             }
         };
+    }
+
+    @Test
+    void sessionRootSelectsWireDeclarationsAndServedTools(@TempDir final Path root) {
+        final var registry = new ToolRegistry(null) {
+
+            @Override
+            public List<Tool> toWireTools(final Path projectRoot) {
+                assertEquals(root, projectRoot);
+                return List.of(Tool.function("session_tool", "session project", Map.of()));
+            }
+
+            @Override
+            public EmbeddedTool tool(final String name) {
+                return null;
+            }
+        };
+        final var replies = new ArrayDeque<>(List.of(new ScriptedReply("done", "stop", false)));
+        final var loop = loop(
+                chatClient(replies, new ArrayList<>()),
+                null,
+                TestConfigs.codingAgent(Map.of("yca.workingDir", root.toString())),
+                noContextManager(),
+                noSessionStore(),
+                null,
+                registry,
+                null,
+                null);
+
+        assertEquals(
+                List.of("session_tool"),
+                loop.wireTools().stream().map(t -> t.function().name()).toList());
+        assertEquals("done", loop.run("work here", null, "session", null, () -> false));
+        assertEquals(Set.of("session_tool"), loop.servedToolNames);
     }
 
     @Test
@@ -6955,7 +7263,7 @@ class AgentLoopTest {
             }
         };
         final var config = configuration(true);
-        final var planPermissions = new PermissionService(config);
+        final var planPermissions = new PermissionService(config, (config).resolveWorkingDir());
         planPermissions.setMode(AgentMode.PLAN);
         permissionServiceOverride = planPermissions;
         try {
@@ -6979,7 +7287,7 @@ class AgentLoopTest {
         assertTrue(planTools.contains("read"), "plan mode must keep READ tools: " + planTools);
 
         payloads.clear();
-        final var buildPermissions = new PermissionService(config);
+        final var buildPermissions = new PermissionService(config, (config).resolveWorkingDir());
         buildPermissions.setMode(AgentMode.BUILD);
         permissionServiceOverride = buildPermissions;
         try {
@@ -7012,7 +7320,7 @@ class AgentLoopTest {
                 new ScriptedReply("here is the plan", "stop", false)));
         final var planRequests = new ArrayList<List<Message>>();
         final var config = configuration(true);
-        final var planPermissions = new PermissionService(config);
+        final var planPermissions = new PermissionService(config, (config).resolveWorkingDir());
         planPermissions.setMode(AgentMode.PLAN);
         permissionServiceOverride = planPermissions;
         try {
@@ -7052,7 +7360,7 @@ class AgentLoopTest {
                 toolCallReply("w1", "write_file", "{\"path\":\"/a.txt\",\"content\":\"new\"}"),
                 new ScriptedReply("done", "stop", false)));
         final var buildRequests = new ArrayList<List<Message>>();
-        final var buildPermissions = new PermissionService(config);
+        final var buildPermissions = new PermissionService(config, (config).resolveWorkingDir());
         buildPermissions.setMode(AgentMode.BUILD);
         permissionServiceOverride = buildPermissions;
         try {
@@ -7083,8 +7391,8 @@ class AgentLoopTest {
     private ToolRegistry registryOf(final EmbeddedTool... tools) {
         return new ToolRegistry(null) {
             @Override
-            public List<Tool> toWireTools() {
-                return List.of();
+            public List<EmbeddedTool> tools() {
+                return List.of(tools);
             }
 
             @Override
@@ -7108,7 +7416,7 @@ class AgentLoopTest {
             }
 
             @Override
-            public String description() {
+            public String description(final Path workdir) {
                 return "echoes";
             }
 
@@ -7123,7 +7431,7 @@ class AgentLoopTest {
             }
 
             @Override
-            public ToolResult execute(final Map<String, Object> args) {
+            public ToolResult execute(final Map<String, Object> args, final ToolContext context) {
                 return new ToolResult(true, "done");
             }
         });
@@ -7138,7 +7446,7 @@ class AgentLoopTest {
             }
 
             @Override
-            public String description() {
+            public String description(final Path workdir) {
                 return "state-changing echo";
             }
 
@@ -7153,7 +7461,7 @@ class AgentLoopTest {
             }
 
             @Override
-            public ToolResult execute(final Map<String, Object> args) {
+            public ToolResult execute(final Map<String, Object> args, final ToolContext context) {
                 return new ToolResult(true, "done");
             }
         });
@@ -7172,7 +7480,7 @@ class AgentLoopTest {
                     }
 
                     @Override
-                    public String description() {
+                    public String description(final Path workdir) {
                         return "read a file";
                     }
 
@@ -7189,7 +7497,7 @@ class AgentLoopTest {
                     private int readCall;
 
                     @Override
-                    public ToolResult execute(final Map<String, Object> args) {
+                    public ToolResult execute(final Map<String, Object> args, final ToolContext context) {
                         final var path = args.get("path") instanceof final String p ? p : "?";
                         final var offset = args.get("offset") instanceof final Number n ? n.intValue() : 0;
                         return ToolResult.ok("content of " + path + " @" + offset + " #" + (readCall++));
@@ -7202,7 +7510,7 @@ class AgentLoopTest {
                     }
 
                     @Override
-                    public String description() {
+                    public String description(final Path workdir) {
                         return "run a command";
                     }
 
@@ -7219,7 +7527,7 @@ class AgentLoopTest {
                     private int bashCall;
 
                     @Override
-                    public ToolResult execute(final Map<String, Object> args) {
+                    public ToolResult execute(final Map<String, Object> args, final ToolContext context) {
                         return ToolResult.ok("ran " + args.get("command") + " #" + (bashCall++));
                     }
                 });
@@ -7294,6 +7602,7 @@ class AgentLoopTest {
         entries.put("yca.llm.retriesBaseDelayMs", "1");
         entries.put("yca.llm.maxIterations", "10");
         entries.put("yca.llm.continueOnTruncation", Boolean.toString(continueOnTruncation));
+        entries.put("yca.mode", "build");
         entries.putAll(extra);
         return TestConfigs.codingAgent(entries);
     }
@@ -7464,7 +7773,7 @@ class AgentLoopTest {
         final var resolvedRegistry = registry == null
                 ? new ToolRegistry(null) {
                     @Override
-                    public List<Tool> toWireTools() {
+                    public List<EmbeddedTool> tools() {
                         return List.of();
                     }
 
@@ -7480,8 +7789,18 @@ class AgentLoopTest {
                 resolvedRegistry,
                 resolvedExecutions,
                 config,
-                permissionServiceOverride != null ? permissionServiceOverride : new PermissionService(config),
+                permissionServiceOverride != null
+                        ? permissionServiceOverride
+                        : new PermissionService(config, (config).resolveWorkingDir()),
                 new UsageTracker() {
+                    @Override
+                    public void attach(final ChatSettings settings) {
+                        if (usageAttachmentObserver != null) {
+                            usageAttachmentObserver.accept(settings);
+                        }
+                        super.attach(settings);
+                    }
+
                     @Override
                     public void record(final io.yupiik.ia.agent.core.llm.Usage usage) {
                         recordedUsage.set(usage);
@@ -7512,14 +7831,14 @@ class AgentLoopTest {
                 contextView,
                 sessionStore,
                 promptBuilder == null
-                        ? new SystemPromptBuilder() {
+                        ? new SystemPromptBuilder(testWorkdir) {
                             @Override
                             public String build(final String prompt, final AgentConfiguration agent) {
                                 return "system prompt";
                             }
                         }
                         : promptBuilder,
-                new MemoryExtractor() {
+                new MemoryExtractor(testWorkdir) {
                     @Override
                     public void asyncExtractNow(final List<Message> messages) {}
 
@@ -7534,6 +7853,9 @@ class AgentLoopTest {
                 new Emitter() {
                     @Override
                     public <T> void emit(final T event) {
+                        if (emittedObserver != null) {
+                            emittedObserver.accept(event);
+                        }
                         synchronized (events) {
                             if (event instanceof AgentEvent agentEvent) {
                                 events.add(agentEvent);
@@ -7547,7 +7869,7 @@ class AgentLoopTest {
                 mapper,
                 new StructuralCodeGraph() {
                     @Override
-                    public void ensureReadyAsync() {}
+                    public void ensureReadyAsync(final Path root) {}
                 },
                 new ProviderManager() {
                     @Override
@@ -7624,7 +7946,8 @@ class AgentLoopTest {
                 null,
                 null,
                 null,
-                null);
+                null,
+                (config).resolveWorkingDir());
     }
 
     /**

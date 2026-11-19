@@ -46,6 +46,8 @@ import java.util.regex.Pattern;
  * important artifacts first.</p>
  */
 public final class MvnProjectDeps {
+    private static final Pattern LINE_BREAK = Pattern.compile("\\R");
+    private static final Pattern WHITESPACE = Pattern.compile("\\s+");
     private static final Pattern LOG_PREFIXES = Pattern.compile("^(\\[[^]]+]\\s*)+");
 
     private static final Pattern COORDINATE = Pattern.compile("^([^:]+):([^:]+):([^:]+):([^:]+):([^:]+)");
@@ -357,14 +359,14 @@ public final class MvnProjectDeps {
     /** Parses {@code mvn dependency:list} output into de-duplicated coordinates ordered by scope priority. */
     static List<Gav> parse(final String output) {
         final Map<Gav, DependencyScope> byCoordinate = new LinkedHashMap<>();
-        for (final var line : output.split("\\R")) {
+        for (final var line : LINE_BREAK.split(output)) {
             final var m = COORDINATE.matcher(stripLogPrefix(line));
             if (!m.find() || !"jar".equals(m.group(3))) {
                 continue;
             }
             final var gav = Gav.of(m.group(1), m.group(2), m.group(4));
             // the scope can be followed by the trailing Maven suffix (eg " -- module ... [auto]")
-            final var scope = DependencyScope.parse(m.group(5).split("\\s+", 2)[0]);
+            final var scope = DependencyScope.parse(WHITESPACE.split(m.group(5), 2)[0]);
             // keep the most relevant scope when a coordinate is declared in several scopes
             byCoordinate.merge(gav, scope, (a, b) -> a.order() <= b.order() ? a : b);
         }

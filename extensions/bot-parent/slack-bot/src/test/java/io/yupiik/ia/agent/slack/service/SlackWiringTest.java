@@ -34,6 +34,7 @@ import io.yupiik.ia.agent.core.question.FeedbackGate;
 import io.yupiik.ia.agent.core.question.Question;
 import io.yupiik.ia.agent.core.tools.EmbeddedTool;
 import io.yupiik.ia.agent.core.tools.ToolCategory;
+import io.yupiik.ia.agent.core.tools.ToolContext;
 import io.yupiik.ia.agent.core.wiring.FeedbackGateProducer$FusionBean;
 import io.yupiik.ia.agent.core.wiring.FeedbackGateProducer$FusionBean$feedbackGate;
 import io.yupiik.ia.agent.slack.SlackBotModule;
@@ -86,8 +87,10 @@ class SlackWiringTest {
             assertEquals("slack_context", tool.instance().name());
             assertEquals(ToolCategory.READ, tool.instance().category());
             assertTrue(tool.instance().readonly());
-            assertFalse(tool.instance().usable());
-            assertTrue(tool.instance().execute(Map.of("operation", "summary")).error());
+            assertFalse(tool.instance().usable(root));
+            assertTrue(tool.instance()
+                    .execute(Map.of("operation", "summary"), ToolContext.empty(root))
+                    .error());
         }
         assertFalse(Files.exists(root.resolve("uncreated")));
     }
@@ -112,8 +115,9 @@ class SlackWiringTest {
             assertEquals(mailbox.toString(), configuration.instance().directory());
             assertEquals("CBINDING", configuration.instance().channel());
             assertEquals(3, configuration.instance().timeoutSeconds());
-            assertTrue(tool.instance().usable());
-            final var result = executor.submit(() -> tool.instance().execute(Map.of("operation", "summary")));
+            assertTrue(tool.instance().usable(root));
+            final var result = executor.submit(
+                    () -> tool.instance().execute(Map.of("operation", "summary"), ToolContext.empty(root)));
             final var request = assertTimeoutPreemptively(Duration.ofSeconds(2), () -> {
                 SlackContextMailbox.Request pending;
                 while ((pending = controller.pending()) == null) {

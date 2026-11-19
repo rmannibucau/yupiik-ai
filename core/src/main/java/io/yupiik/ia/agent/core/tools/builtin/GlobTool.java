@@ -59,7 +59,7 @@ public class GlobTool implements EmbeddedTool {
     }
 
     @Override
-    public String description() {
+    public String description(final Path workdir) {
         return "Search file paths using a glob pattern (examples: `**/*.java`, `src/**/*.xml`), skipping build output "
                 + "and ignored directories. Set hidden=true to include hidden files/directories.";
     }
@@ -81,16 +81,9 @@ public class GlobTool implements EmbeddedTool {
     }
 
     @Override
-    public ToolResult execute(final Map<String, Object> args) {
-        return execute(args, ToolContext.empty());
-    }
-
-    @Override
     public ToolResult execute(final Map<String, Object> args, final ToolContext context) {
         final var pattern = arg(args, "pattern");
-        final var base = context.resolvePath(
-                arg(args, "path") == null ? "." : arg(args, "path"),
-                configuration == null ? null : configuration.resolveProjectDir());
+        final var base = context.resolvePath(arg(args, "path") == null ? "." : arg(args, "path"));
         if (pattern == null || pattern.isBlank()) {
             return ToolResult.error("pattern is required");
         }

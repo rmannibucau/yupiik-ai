@@ -22,6 +22,7 @@ import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.configuration.HookRegistration;
 import io.yupiik.ia.agent.core.configuration.HooksConfiguration;
 import io.yupiik.ia.agent.core.events.hooks.CallbackRunner;
+import io.yupiik.ia.agent.core.tools.ToolCategory;
 import io.yupiik.ia.agent.test.TestJsonMapper;
 import io.yupiik.maven.knowledge.process.ProcessService;
 import java.nio.charset.StandardCharsets;
@@ -33,6 +34,7 @@ import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.api.io.TempDir;
@@ -45,6 +47,8 @@ import org.junit.jupiter.api.io.TempDir;
  */
 @ExtendWith(TestJsonMapper.class)
 class CallbackRunnerTest {
+    @TempDir
+    Path testWorkdir;
 
     private static final ExecutorService EXECUTOR = Executors.newVirtualThreadPerTaskExecutor();
     private static final ProcessService PROCESSES = new ProcessService();
@@ -58,7 +62,7 @@ class CallbackRunnerTest {
     @Test
     void forbidDecisionIsRespected(final JsonMapper mapper) {
         final var runner = runner(mapper, "forbid");
-        final var responses = runner.run("ToolUsePreEvent", input().payload(), 1);
+        final var responses = runner.run("ToolUsePreEvent", input().payload(), 1, testWorkdir);
         assertEquals(1, responses.size());
         assertEquals(
                 HookResponse.HookResponseDecision.forbid, responses.getFirst().decision());
@@ -68,7 +72,7 @@ class CallbackRunnerTest {
     @Test
     void allowDecisionIsRespected(final JsonMapper mapper) {
         final var runner = runner(mapper, "allow");
-        final var responses = runner.run("ToolUsePreEvent", input().payload(), 1);
+        final var responses = runner.run("ToolUsePreEvent", input().payload(), 1, testWorkdir);
         assertEquals(1, responses.size());
         assertEquals(
                 HookResponse.HookResponseDecision.allow, responses.getFirst().decision());
@@ -77,27 +81,30 @@ class CallbackRunnerTest {
     @Test
     void emptyOutputIsANoop(final JsonMapper mapper) {
         final var runner = runner(mapper, "empty");
-        assertTrue(runner.run("ToolUsePreEvent", input().payload(), 1).isEmpty());
+        assertTrue(
+                runner.run("ToolUsePreEvent", input().payload(), 1, testWorkdir).isEmpty());
     }
 
     @Test
     void invalidJsonFailsTheCallback(final JsonMapper mapper) {
         final var runner = runner(mapper, "invalid");
-        assertTrue(runner.run("ToolUsePreEvent", input().payload(), 1)
+        assertTrue(runner.run("ToolUsePreEvent", input().payload(), 1, testWorkdir)
                 .isEmpty()); // failure is logged, no decision applies
     }
 
     @Test
     void nonZeroExitFailsTheCallback(final JsonMapper mapper) {
         final var runner = runner(mapper, "exit");
-        assertTrue(runner.run("ToolUsePreEvent", input().payload(), 1).isEmpty()); // exit 3 => error, no decision
+        assertTrue(runner.run("ToolUsePreEvent", input().payload(), 1, testWorkdir)
+                .isEmpty()); // exit 3 => error, no decision
     }
 
     @Test
     void timeoutFailsTheCallback(final JsonMapper mapper) {
         final var runner = runner(mapper, "slow", 1);
         final long start = System.nanoTime();
-        assertTrue(runner.run("ToolUsePreEvent", input().payload(), 1).isEmpty()); // exceeds the 1s timeout
+        assertTrue(
+                runner.run("ToolUsePreEvent", input().payload(), 1, testWorkdir).isEmpty()); // exceeds the 1s timeout
         final long elapsedMs = (System.nanoTime() - start) / 1_000_000;
         assertTrue(elapsedMs < 10_000, "timeout must bound the callback, took " + elapsedMs + "ms");
     }
@@ -105,14 +112,15 @@ class CallbackRunnerTest {
     @Test
     void noConfigMeansNoCallbacks(final JsonMapper mapper) {
         final var runner = new CallbackRunner(new HooksConfiguration(List.of()), EXECUTOR, PROCESSES, mapper);
-        assertTrue(runner.run("ToolUsePreEvent", input().payload(), 1).isEmpty());
+        assertTrue(
+                runner.run("ToolUsePreEvent", input().payload(), 1, testWorkdir).isEmpty());
     }
 
     @Test
     void inputPayloadTokenizedOnStdin(final JsonMapper mapper, @TempDir final Path tmp) throws Exception {
         final var echo = tmp.resolve("echo.json");
         final var runner = runner(mapper, "forbid", 1, List.of("-Dfixture.echo=" + echo));
-        runner.run("ToolUsePreEvent", input().payload(), 1);
+        runner.run("ToolUsePreEvent", input().payload(), 1, testWorkdir);
         final var received = Files.readString(echo, StandardCharsets.UTF_8);
         assertTrue(received.contains("\"toolName\"") && received.contains("\"bash\""));
         assertTrue(received.contains("\"eventContext\""));
@@ -121,8 +129,7 @@ class CallbackRunnerTest {
 
     @Test
     void honorsConfiguredWorkingDir(final JsonMapper mapper, @TempDir final Path tmp) throws Exception {
-        org.junit.jupiter.api.Assumptions.assumeTrue(
-                !System.getProperty("os.name", "").toLowerCase().contains("win"));
+        Assumptions.assumeTrue(!System.getProperty("os.name", "").toLowerCase().contains("win"));
         final var workdir = tmp.resolve("hook-cwd");
         Files.createDirectories(workdir);
         final var sentinel = tmp.resolve("started-in").toString();
@@ -130,7 +137,7 @@ class CallbackRunnerTest {
         final var hooks = new HooksConfiguration(List.of(new HookRegistration(
                 "ToolUsePreEvent", List.of("sh", "-c", "pwd > " + sentinel), workdir.toString(), 10)));
         final var runner = new CallbackRunner(hooks, EXECUTOR, PROCESSES, mapper);
-        runner.run("ToolUsePreEvent", input().payload(), 1);
+        runner.run("ToolUsePreEvent", input().payload(), 1, testWorkdir);
         assertEquals(
                 workdir.toAbsolutePath().normalize().toString(),
                 Files.readString(tmp.resolve("started-in")).strip(),
@@ -181,7 +188,7 @@ class CallbackRunnerTest {
                 "call-1",
                 new HookResult(),
                 null,
-                io.yupiik.ia.agent.core.tools.ToolCategory.BASH,
+                ToolCategory.BASH,
                 false);
     }
 }

@@ -15,15 +15,29 @@
  */
 package io.yupiik.ia.agent.core.optimize;
 
+import java.nio.file.Path;
+import java.util.Map;
+import java.util.Objects;
+
 /**
  * Fired after a tool call executed. {@code success} is {@code true} for a success ({@code PostToolUse}) and
  * {@code false} for a failure ({@code PostToolUseFailure}). Carries the session coordinates (from {@link
  * io.yupiik.ia.agent.core.tools.ToolContext}) so observers can attribute the result to the right session/subagent.
  */
 public record AfterToolExecutionEvent(
-        String tool, boolean success, String output, String sessionId, String subagentId, String subagentName) {
+        String tool,
+        boolean success,
+        String output,
+        String sessionId,
+        String subagentId,
+        String subagentName,
+        Map<String, Object> args,
+        Path workdir) {
 
-    public AfterToolExecutionEvent(final String tool, final boolean success, final String output) {
-        this(tool, success, output, null, null, null);
+    public AfterToolExecutionEvent {
+        Objects.requireNonNull(workdir, "workdir");
+        if (!workdir.isAbsolute() || !workdir.equals(workdir.normalize())) {
+            throw new IllegalArgumentException("workdir must be absolute and normalized: " + workdir);
+        }
     }
 }

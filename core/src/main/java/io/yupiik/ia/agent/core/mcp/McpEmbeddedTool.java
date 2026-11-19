@@ -17,7 +17,9 @@ package io.yupiik.ia.agent.core.mcp;
 
 import io.yupiik.ia.agent.core.tools.EmbeddedTool;
 import io.yupiik.ia.agent.core.tools.ToolCategory;
+import io.yupiik.ia.agent.core.tools.ToolContext;
 import io.yupiik.ia.agent.core.tools.ToolResult;
+import java.nio.file.Path;
 import java.util.Map;
 import java.util.regex.Pattern;
 
@@ -46,7 +48,7 @@ class McpEmbeddedTool implements EmbeddedTool {
     }
 
     @Override
-    public String description() {
+    public String description(final Path workdir) {
         return "[" + serverName + "] " + (tool.description() == null ? tool.name() : tool.description());
     }
 
@@ -66,7 +68,7 @@ class McpEmbeddedTool implements EmbeddedTool {
     }
 
     @Override
-    public ToolResult execute(final Map<String, Object> args) {
+    public ToolResult execute(final Map<String, Object> args, final ToolContext context) {
         try {
             return ToolResult.ok(manager.call(serverName, tool.name(), args));
         } catch (final RuntimeException e) {

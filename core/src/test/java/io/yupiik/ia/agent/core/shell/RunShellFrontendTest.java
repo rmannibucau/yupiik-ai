@@ -26,6 +26,7 @@ import io.yupiik.ia.agent.test.TestJsonMapper;
 import java.io.ByteArrayOutputStream;
 import java.io.PrintStream;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CyclicBarrier;
@@ -33,10 +34,12 @@ import java.util.logging.Handler;
 import java.util.logging.Level;
 import java.util.logging.LogRecord;
 import java.util.logging.Logger;
+import java.util.regex.Pattern;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.api.parallel.ResourceLock;
 import org.junit.jupiter.api.parallel.Resources;
 
@@ -45,15 +48,21 @@ import org.junit.jupiter.api.parallel.Resources;
 @ResourceLock(Resources.SYSTEM_ERR)
 @ResourceLock("java.util.logging")
 class RunShellFrontendTest {
+    private static final Pattern PARENT_DELTA = Pattern.compile(".*P\\d+ .*");
+    private static final Pattern CHILD_DELTA = Pattern.compile(".*C\\d+ .*");
+
+    @TempDir
+    private static Path eventWorkdir;
+
     @Test
     void responseMarkersUseCapturedJulTimeWithoutChangingTheStdoutProduct() {
         final var frontend = new RunShellFrontend(false, ToolOutputVisibility.HIDDEN, presenter);
-        frontend.onEvent(new AgentEvent.FeedbackStarted("text", 1000, "s1", null, null));
-        frontend.onEvent(new AgentEvent.TextDelta("exact", "s1"));
-        frontend.onEvent(new AgentEvent.TextDelta("\nproduct", "s1"));
-        frontend.onEvent(new AgentEvent.FeedbackStarted("thinking", 2000, "s1", null, null));
-        frontend.onEvent(new AgentEvent.FeedbackStarted("text", 3000, "s1", null, null));
-        frontend.onEvent(new AgentEvent.TextDelta("!", "s1"));
+        frontend.onEvent(new AgentEvent.FeedbackStarted("text", 1000, "s1", null, null, eventWorkdir));
+        frontend.onEvent(new AgentEvent.TextDelta("exact", "s1", eventWorkdir));
+        frontend.onEvent(new AgentEvent.TextDelta("\nproduct", "s1", eventWorkdir));
+        frontend.onEvent(new AgentEvent.FeedbackStarted("thinking", 2000, "s1", null, null, eventWorkdir));
+        frontend.onEvent(new AgentEvent.FeedbackStarted("text", 3000, "s1", null, null, eventWorkdir));
+        frontend.onEvent(new AgentEvent.TextDelta("!", "s1", eventWorkdir));
         assertEquals("exact\nproduct!", out.toString(StandardCharsets.UTF_8));
         assertEquals(List.of("INFO text response started", "INFO text response started"), logs);
         assertEquals(List.of(1000L, 3000L), logTimes);
@@ -119,12 +128,12 @@ class RunShellFrontendTest {
     void answerStreamsOnStdoutAndEventsAreLogged() {
         final var frontend = new RunShellFrontend(false, ToolOutputVisibility.COLLAPSED, presenter);
 
-        frontend.onEvent(new AgentEvent.TextDelta("hel", "s1"));
-        frontend.onEvent(new AgentEvent.TextDelta("lo", "s1"));
-        frontend.onEvent(new AgentEvent.ToolStarted("read", "{}", "s1"));
-        frontend.onEvent(new AgentEvent.ToolFinished("read", "out", true, "s1"));
-        frontend.onEvent(new AgentEvent.Status("working", "s1"));
-        frontend.onEvent(new AgentEvent.Error("boom", "s1"));
+        frontend.onEvent(new AgentEvent.TextDelta("hel", "s1", eventWorkdir));
+        frontend.onEvent(new AgentEvent.TextDelta("lo", "s1", eventWorkdir));
+        frontend.onEvent(new AgentEvent.ToolStarted("read", "{}", "s1", eventWorkdir));
+        frontend.onEvent(new AgentEvent.ToolFinished("read", "out", true, "s1", eventWorkdir));
+        frontend.onEvent(new AgentEvent.Status("working", "s1", eventWorkdir));
+        frontend.onEvent(new AgentEvent.Error("boom", "s1", eventWorkdir));
 
         assertEquals("hello", out.toString(StandardCharsets.UTF_8));
         final var joined = String.join("\n", logs);
@@ -138,7 +147,7 @@ class RunShellFrontendTest {
     void toolOutputPrintsOnceWhenNotStreamedAndEnabled() {
         final var frontend = new RunShellFrontend(false, ToolOutputVisibility.SHOWN, presenter);
 
-        frontend.onEvent(new AgentEvent.ToolFinished("read", "line1\nline2", true, "s1"));
+        frontend.onEvent(new AgentEvent.ToolFinished("read", "line1\nline2", true, "s1", eventWorkdir));
 
         assertEquals(2, logs.size());
         assertTrue(logs.get(1).contains("line1\nline2"), logs.toString());
@@ -148,8 +157,8 @@ class RunShellFrontendTest {
     void streamedToolOutputIsNotReprinted() {
         final var frontend = new RunShellFrontend(false, ToolOutputVisibility.SHOWN, presenter);
 
-        frontend.onEvent(new AgentEvent.ToolStream("bash", "streamed line", "s1"));
-        frontend.onEvent(new AgentEvent.ToolFinished("bash", "streamed line", true, "s1"));
+        frontend.onEvent(new AgentEvent.ToolStream("bash", "streamed line", "s1", eventWorkdir));
+        frontend.onEvent(new AgentEvent.ToolFinished("bash", "streamed line", true, "s1", eventWorkdir));
 
         assertEquals(2, logs.size());
         assertTrue(logs.get(0).contains("streamed line"), logs.get(0));
@@ -159,8 +168,8 @@ class RunShellFrontendTest {
     void failuresAndNoticesUseTheRightLevels() {
         final var frontend = new RunShellFrontend(false, ToolOutputVisibility.COLLAPSED, presenter);
 
-        frontend.onEvent(new AgentEvent.ToolFinished("bash", "oops", false, "s1"));
-        frontend.onEvent(AgentEvent.Notice.warn("careful", "s1"));
+        frontend.onEvent(new AgentEvent.ToolFinished("bash", "oops", false, "s1", eventWorkdir));
+        frontend.onEvent(AgentEvent.Notice.warn("careful", "s1", eventWorkdir));
 
         final var joined = String.join("\n", logs);
         assertTrue(joined.contains("WARNING bash failed"), joined);
@@ -171,7 +180,7 @@ class RunShellFrontendTest {
     void thinkingStreamStaysRawOnStderrWhenEnabled() {
         final var frontend = new RunShellFrontend(true, ToolOutputVisibility.COLLAPSED, presenter);
 
-        frontend.onEvent(new AgentEvent.ThinkingDelta("thinking...", "s1"));
+        frontend.onEvent(new AgentEvent.ThinkingDelta("thinking...", "s1", eventWorkdir));
 
         assertEquals("thinking...", err.toString(StandardCharsets.UTF_8));
     }
@@ -193,7 +202,7 @@ class RunShellFrontendTest {
                     return;
                 }
                 for (int j = 0; j < 20; j++) {
-                    frontend.onEvent(new AgentEvent.ThinkingDelta("P" + j + " ", "s1"));
+                    frontend.onEvent(new AgentEvent.ThinkingDelta("P" + j + " ", "s1", eventWorkdir));
                 }
             });
             final var child = Thread.ofVirtual().start(() -> {
@@ -203,7 +212,7 @@ class RunShellFrontendTest {
                     return;
                 }
                 for (int j = 0; j < 20; j++) {
-                    frontend.onEvent(new AgentEvent.ThinkingDelta("C" + j + " ", "s1", "sub-1", "kid"));
+                    frontend.onEvent(new AgentEvent.ThinkingDelta("C" + j + " ", "s1", "sub-1", "kid", eventWorkdir));
                 }
             });
             parent.join();
@@ -214,8 +223,8 @@ class RunShellFrontendTest {
         assertTrue(lines.length > 2, "the race produced no reasoning to check");
         for (final var line : lines) {
             // P*/C* are the per-actor delta tokens, one line may only carry one voice
-            final var parent2 = line.matches(".*P\\d+ .*");
-            final var child2 = line.matches(".*C\\d+ .*");
+            final var parent2 = PARENT_DELTA.matcher(line).matches();
+            final var child2 = CHILD_DELTA.matcher(line).matches();
             assertFalse(parent2 && child2, () -> "two thoughts spliced into one line: \"" + line + "\"");
         }
     }
@@ -225,10 +234,11 @@ class RunShellFrontendTest {
         for (final var visibility : List.of(ToolOutputVisibility.HIDDEN, ToolOutputVisibility.COLLAPSED)) {
             logs.clear();
             final var frontend = new RunShellFrontend(false, visibility, presenter);
-            frontend.onEvent(
-                    new AgentEvent.ToolStarted("bash", "{\"command\":\"secret request\"}", 9, "s", null, null));
-            frontend.onEvent(new AgentEvent.ToolStream("bash", "secret output\n", 9, "s", null, null));
-            frontend.onEvent(new AgentEvent.ToolFinished("bash", "secret result", true, false, 9, "s", null, null));
+            frontend.onEvent(new AgentEvent.ToolStarted(
+                    "bash", "{\"command\":\"secret request\"}", 9, "s", null, null, eventWorkdir));
+            frontend.onEvent(new AgentEvent.ToolStream("bash", "secret output\n", 9, "s", null, null, eventWorkdir));
+            frontend.onEvent(new AgentEvent.ToolFinished(
+                    "bash", "secret result", true, false, 9, "s", null, null, eventWorkdir));
             final var joined = String.join("\n", logs);
             assertFalse(joined.contains("secret"), joined);
             if (visibility == ToolOutputVisibility.HIDDEN) {
@@ -245,11 +255,11 @@ class RunShellFrontendTest {
         for (final var visibility : ToolOutputVisibility.values()) {
             logs.clear();
             final var frontend = new RunShellFrontend(false, visibility, presenter);
-            frontend.onEvent(
-                    new AgentEvent.ToolStarted("bash", "{\"command\":\"private command\"}", 9, "s", null, null));
-            frontend.onEvent(new AgentEvent.ToolStream("bash", "error body\n", 9, "s", null, null));
+            frontend.onEvent(new AgentEvent.ToolStarted(
+                    "bash", "{\"command\":\"private command\"}", 9, "s", null, null, eventWorkdir));
+            frontend.onEvent(new AgentEvent.ToolStream("bash", "error body\n", 9, "s", null, null, eventWorkdir));
             frontend.onEvent(new AgentEvent.ToolFinished(
-                    "bash", "error body\nlast diagnostic", false, false, 9, "s", null, null));
+                    "bash", "error body\nlast diagnostic", false, false, 9, "s", null, null, eventWorkdir));
             final var joined = String.join("\n", logs);
             assertTrue(joined.contains("WARNING #9 bash failed"), joined);
             assertTrue(joined.contains("error body"), joined);
@@ -259,7 +269,7 @@ class RunShellFrontendTest {
             }
             logs.clear();
             frontend.onEvent(new AgentEvent.ToolFinished(
-                    "bash", "pending body\nExit code: 7", false, true, 10, "s", null, null));
+                    "bash", "pending body\nExit code: 7", false, true, 10, "s", null, null, eventWorkdir));
             assertFalse(logs.stream().anyMatch(it -> it.startsWith("WARNING")), logs.toString());
             if (visibility == ToolOutputVisibility.HIDDEN) {
                 assertTrue(logs.isEmpty(), logs.toString());
@@ -271,8 +281,10 @@ class RunShellFrontendTest {
     @Test
     void collapsedActivityKeepsRequestSummaryAndNonzeroExitIsSeparate() {
         final var frontend = new RunShellFrontend(false, ToolOutputVisibility.COLLAPSED, presenter);
-        frontend.onEvent(new AgentEvent.ToolStarted("read", "{\"path\":\"pom.xml\"}", 3, "s", null, null));
-        frontend.onEvent(new AgentEvent.ToolFinished("bash", "output\nExit code: 7", true, false, 4, "s", null, null));
+        frontend.onEvent(
+                new AgentEvent.ToolStarted("read", "{\"path\":\"pom.xml\"}", 3, "s", null, null, eventWorkdir));
+        frontend.onEvent(new AgentEvent.ToolFinished(
+                "bash", "output\nExit code: 7", true, false, 4, "s", null, null, eventWorkdir));
         final var joined = String.join("\n", logs);
         assertTrue(joined.contains("#3 read started (pom.xml)"), joined);
         assertTrue(joined.contains("INFO #4 bash done"), joined);
@@ -283,16 +295,18 @@ class RunShellFrontendTest {
     @Test
     void perInvocationStreamsKeepWhitespaceAndDoNotDropFinalDiagnostics() {
         final var frontend = new RunShellFrontend(false, ToolOutputVisibility.SHOWN, presenter);
-        frontend.onEvent(new AgentEvent.ToolStarted("bash", "{}", 1, "s", null, null));
-        frontend.onEvent(new AgentEvent.ToolStarted("bash", "{}", 2, "s", null, null));
-        frontend.onEvent(new AgentEvent.ToolStarted("bash", "{}", 1, "s", "kid", "worker"));
-        frontend.onEvent(new AgentEvent.ToolStream("bash", "  same", 1, "s", null, null));
-        frontend.onEvent(new AgentEvent.ToolStream("bash", "  \n\tend", 1, "s", null, null));
-        frontend.onEvent(new AgentEvent.ToolStream("bash", "child", 1, "s", "kid", "worker"));
+        frontend.onEvent(new AgentEvent.ToolStarted("bash", "{}", 1, "s", null, null, eventWorkdir));
+        frontend.onEvent(new AgentEvent.ToolStarted("bash", "{}", 2, "s", null, null, eventWorkdir));
+        frontend.onEvent(new AgentEvent.ToolStarted("bash", "{}", 1, "s", "kid", "worker", eventWorkdir));
+        frontend.onEvent(new AgentEvent.ToolStream("bash", "  same", 1, "s", null, null, eventWorkdir));
+        frontend.onEvent(new AgentEvent.ToolStream("bash", "  \n\tend", 1, "s", null, null, eventWorkdir));
+        frontend.onEvent(new AgentEvent.ToolStream("bash", "child", 1, "s", "kid", "worker", eventWorkdir));
+        frontend.onEvent(new AgentEvent.ToolFinished(
+                "bash", "  same  \n\tend\nDIAGNOSTIC", false, false, 1, "s", null, null, eventWorkdir));
         frontend.onEvent(
-                new AgentEvent.ToolFinished("bash", "  same  \n\tend\nDIAGNOSTIC", false, false, 1, "s", null, null));
-        frontend.onEvent(new AgentEvent.ToolFinished("bash", "second output", true, false, 2, "s", null, null));
-        frontend.onEvent(new AgentEvent.ToolFinished("bash", "child", false, true, 1, "s", "kid", "worker"));
+                new AgentEvent.ToolFinished("bash", "second output", true, false, 2, "s", null, null, eventWorkdir));
+        frontend.onEvent(
+                new AgentEvent.ToolFinished("bash", "child", false, true, 1, "s", "kid", "worker", eventWorkdir));
         final var joined = String.join("\n", logs);
         assertTrue(joined.contains("output:   same  "), joined);
         assertTrue(joined.contains("output: \tend"), joined);
@@ -306,10 +320,10 @@ class RunShellFrontendTest {
     @Test
     void legacyFallbackIsPerNameAndActorAndRemainderFlushesOnEndTurn() {
         final var frontend = new RunShellFrontend(false, ToolOutputVisibility.SHOWN, presenter);
-        frontend.onEvent(new AgentEvent.ToolStarted("bash", "{}", "s"));
-        frontend.onEvent(new AgentEvent.ToolStream("bash", "trailing  ", "s"));
-        frontend.onEvent(new AgentEvent.ToolStarted("read", "{}", "s"));
-        frontend.onEvent(new AgentEvent.ToolFinished("read", "read result", true, "s"));
+        frontend.onEvent(new AgentEvent.ToolStarted("bash", "{}", "s", eventWorkdir));
+        frontend.onEvent(new AgentEvent.ToolStream("bash", "trailing  ", "s", eventWorkdir));
+        frontend.onEvent(new AgentEvent.ToolStarted("read", "{}", "s", eventWorkdir));
+        frontend.onEvent(new AgentEvent.ToolFinished("read", "read result", true, "s", eventWorkdir));
         frontend.endTurn();
         final var joined = String.join("\n", logs);
         assertTrue(joined.contains("read result"), joined);

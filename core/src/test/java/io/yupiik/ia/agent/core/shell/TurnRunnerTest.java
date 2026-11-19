@@ -24,6 +24,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import io.yupiik.ia.agent.core.agent.AgentEvent;
 import io.yupiik.ia.agent.core.agent.AgentLoop;
 import io.yupiik.ia.agent.core.agent.SubagentRegistry;
+import io.yupiik.ia.agent.core.agent.SystemPromptBuilder;
+import io.yupiik.ia.agent.core.llm.ChatSettings;
 import io.yupiik.ia.agent.core.llm.CodexLoginService;
 import io.yupiik.ia.agent.core.llm.Message;
 import io.yupiik.ia.agent.core.maven.MavenRepositoryKnowledgeService;
@@ -32,6 +34,7 @@ import io.yupiik.ia.agent.core.question.FeedbackGate;
 import io.yupiik.ia.agent.core.session.AgentSessionService;
 import io.yupiik.llm.client.codex.CodexNotAuthenticatedException;
 import io.yupiik.llm.client.codex.model.CodexTokenStore;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
@@ -43,18 +46,25 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
+import java.util.function.Consumer;
+import java.util.function.Predicate;
 import java.util.function.Supplier;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 class TurnRunnerTest {
+    @TempDir
+    private static Path testWorkdir;
+
     private static final ExecutorService EXECUTOR = Executors.newVirtualThreadPerTaskExecutor();
 
     @Test
     void runsThePromptThroughBeginAndEndTurn() {
         final var loop = new RecordingLoop();
         final var frontend = new RecordingFrontend();
-        final var session = new ShellSession();
+        final var session = new ShellSession()
+                .runtime(new SessionRuntime(null, null, null, null, null, null, null, null, testWorkdir));
         final var env = new ShellEnv(frontend, new FixedIo(true), session, null);
         final var runner = new TurnRunner(noIndexing(), EXECUTOR, agentSessionService());
 
@@ -79,7 +89,12 @@ class TurnRunnerTest {
     @Test
     void nullPromptResumesInsteadOfRunning() {
         final var loop = new RecordingLoop();
-        final var env = new ShellEnv(new RecordingFrontend(), new FixedIo(true), new ShellSession(), null);
+        final var env = new ShellEnv(
+                new RecordingFrontend(),
+                new FixedIo(true),
+                new ShellSession()
+                        .runtime(new SessionRuntime(null, null, null, null, null, null, null, null, testWorkdir)),
+                null);
         final var runner = new TurnRunner(noIndexing(), EXECUTOR, agentSessionService());
 
         runner.submit(new TurnRunner.TurnRequest(loop, env, "s1", null, null, List::of, () -> false))
@@ -93,7 +108,8 @@ class TurnRunnerTest {
     @Test
     void busyIsVisibleDuringTheTurn() {
         final var loop = new RecordingLoop();
-        final var session = new ShellSession();
+        final var session = new ShellSession()
+                .runtime(new SessionRuntime(null, null, null, null, null, null, null, null, testWorkdir));
         final var seenBusy = new AtomicBoolean(false);
         final var env = new ShellEnv(new RecordingFrontend(), new FixedIo(true), session, null);
         final var runner = new TurnRunner(noIndexing(), EXECUTOR, agentSessionService());
@@ -110,7 +126,12 @@ class TurnRunnerTest {
     @Test
     void declinedConfirmSkipsTheTurnAndReturnsFalse() throws Exception {
         final var loop = new RecordingLoop();
-        final var env = new ShellEnv(new RecordingFrontend(), new FixedIo(false), new ShellSession(), null);
+        final var env = new ShellEnv(
+                new RecordingFrontend(),
+                new FixedIo(false),
+                new ShellSession()
+                        .runtime(new SessionRuntime(null, null, null, null, null, null, null, null, testWorkdir)),
+                null);
         final var runner = new TurnRunner(indexing(3), EXECUTOR, agentSessionService());
 
         final var ran = runner.submit(new TurnRunner.TurnRequest(loop, env, "s1", null, "hi", List::of, () -> false))
@@ -123,10 +144,86 @@ class TurnRunnerTest {
     }
 
     @Test
+    void missingPromptBuilderKeepsLegacyIndexGate() throws Exception {
+        final var loop = new RecordingLoop();
+        final var session = new ShellSession()
+                .runtime(new SessionRuntime(loop, null, null, null, null, null, null, null, testWorkdir));
+        final var env = new ShellEnv(new RecordingFrontend(), new FixedIo(false), session, null);
+        final var runner = new TurnRunner(indexing(3), EXECUTOR, agentSessionService());
+
+        assertFalse(runner.submit(new TurnRunner.TurnRequest(loop, env, "s1", null, "hi", List::of, () -> false))
+                .toCompletableFuture()
+                .join());
+        assertNull(loop.prompt().get());
+    }
+
+    @Test
+    void indexingGateUsesEachSessionsRootWhenReturningToAnEarlierSession() throws Exception {
+        final var rootA = Path.of("project-a").toAbsolutePath();
+        final var rootB = Path.of("project-b").toAbsolutePath();
+        final var ctor = MavenRepositoryKnowledgeService.IndexRun.class.getDeclaredConstructor(
+                Path.class, int.class, ChatSettings.class, List.class);
+        ctor.setAccessible(true);
+        final var idleA = ctor.newInstance(rootA, 0, null, List.of());
+        final var indexingB = ctor.newInstance(rootB, 3, null, List.of());
+        final var roots = new ArrayList<Path>();
+        final var service = new MavenRepositoryKnowledgeService() {
+
+            @Override
+            public IndexRun currentIndex(final Path root) {
+                roots.add(root);
+                return rootA.equals(root) ? idleA : indexingB;
+            }
+        };
+        final var runner = new TurnRunner(service, EXECUTOR, agentSessionService());
+        final var loopA = new RecordingLoop();
+        final var loopB = new RecordingLoop();
+        final var builderA = new SystemPromptBuilder(testWorkdir) {
+            @Override
+            public Path effectiveWorkdir() {
+                return rootA;
+            }
+        };
+        final var builderB = new SystemPromptBuilder(testWorkdir) {
+            @Override
+            public Path effectiveWorkdir() {
+                return rootB;
+            }
+        };
+        final var envA = new ShellEnv(
+                new RecordingFrontend(),
+                new FixedIo(false),
+                new ShellSession()
+                        .runtime(new SessionRuntime(loopA, null, null, null, null, null, null, builderA, rootA)),
+                null);
+        final var envB = new ShellEnv(
+                new RecordingFrontend(),
+                new FixedIo(false),
+                new ShellSession()
+                        .runtime(new SessionRuntime(loopB, null, null, null, null, null, null, builderB, rootB)),
+                null);
+
+        assertTrue(runner.submit(new TurnRunner.TurnRequest(loopA, envA, "a", null, "first", List::of, () -> false))
+                .toCompletableFuture()
+                .join());
+        assertFalse(runner.submit(new TurnRunner.TurnRequest(loopB, envB, "b", null, "blocked", List::of, () -> false))
+                .toCompletableFuture()
+                .join());
+        assertTrue(runner.submit(new TurnRunner.TurnRequest(loopA, envA, "a", null, "again", List::of, () -> false))
+                .toCompletableFuture()
+                .join());
+
+        assertEquals(List.of(rootA, rootB, rootA), roots);
+        assertEquals("again", loopA.prompt().get());
+        assertNull(loopB.prompt().get());
+    }
+
+    @Test
     void pendingModeIsAppliedAtTheEndOfTheTurn() {
         final var loop = new RecordingLoop();
         final var frontend = new RecordingFrontend();
-        final var session = new ShellSession();
+        final var session = new ShellSession()
+                .runtime(new SessionRuntime(null, null, null, null, null, null, null, null, testWorkdir));
         final var agentSession = new RecordingAgentSessionService();
         final var env = new ShellEnv(frontend, new FixedIo(true), session, null);
         final var runner = new TurnRunner(noIndexing(), EXECUTOR, agentSession);
@@ -145,7 +242,12 @@ class TurnRunnerTest {
     void interruptedTurnLatchesTheCancelOfItsSubagents() {
         // the UI resets its interrupt flag when the next turn starts, so the cancel is pushed to
         // the sub-agents here, at turn end, while the flag still reads true
-        final var env = new ShellEnv(new RecordingFrontend(), new FixedIo(true), new ShellSession(), null);
+        final var env = new ShellEnv(
+                new RecordingFrontend(),
+                new FixedIo(true),
+                new ShellSession()
+                        .runtime(new SessionRuntime(null, null, null, null, null, null, null, null, testWorkdir)),
+                null);
         final var latched = new AtomicReference<String>();
         final var interrupted = new AtomicBoolean(false);
         final var loop = new RecordingLoop();
@@ -168,7 +270,12 @@ class TurnRunnerTest {
 
     @Test
     void completedTurnLeavesSubagentsRunning() {
-        final var env = new ShellEnv(new RecordingFrontend(), new FixedIo(true), new ShellSession(), null);
+        final var env = new ShellEnv(
+                new RecordingFrontend(),
+                new FixedIo(true),
+                new ShellSession()
+                        .runtime(new SessionRuntime(null, null, null, null, null, null, null, null, testWorkdir)),
+                null);
         final var latched = new AtomicReference<String>();
         final var interrupted = new AtomicBoolean(false);
         final var runner = new TurnRunner(noIndexing(), EXECUTOR, agentSessionService(), recordingRegistry(latched));
@@ -216,7 +323,8 @@ class TurnRunnerTest {
             }
         };
         final var runner = new TurnRunner(noIndexing(), EXECUTOR, agentSessionService(), recordingRegistry(latched));
-        final var session = new ShellSession();
+        final var session = new ShellSession()
+                .runtime(new SessionRuntime(null, null, null, null, null, null, null, null, testWorkdir));
         final var first = runner.submit(new TurnRunner.TurnRequest(
                         loop,
                         new ShellEnv(new RecordingFrontend(), new FixedIo(true), session, null),
@@ -228,7 +336,13 @@ class TurnRunnerTest {
                 .toCompletableFuture();
         final var second = runner.submit(new TurnRunner.TurnRequest(
                         other,
-                        new ShellEnv(new RecordingFrontend(), new FixedIo(true), new ShellSession(), null),
+                        new ShellEnv(
+                                new RecordingFrontend(),
+                                new FixedIo(true),
+                                new ShellSession()
+                                        .runtime(new SessionRuntime(
+                                                null, null, null, null, null, null, null, null, testWorkdir)),
+                                null),
                         "keep-running",
                         null,
                         "go",
@@ -255,7 +369,12 @@ class TurnRunnerTest {
     void completedTurnDoesNotInterruptReusedWorker() throws Exception {
         try (final var executor = Executors.newSingleThreadExecutor()) {
             final var cancelled = new AtomicBoolean();
-            final var env = new ShellEnv(new RecordingFrontend(), new FixedIo(true), new ShellSession(), null);
+            final var env = new ShellEnv(
+                    new RecordingFrontend(),
+                    new FixedIo(true),
+                    new ShellSession()
+                            .runtime(new SessionRuntime(null, null, null, null, null, null, null, null, testWorkdir)),
+                    null);
             final var runner = new TurnRunner(noIndexing(), executor, agentSessionService());
             runner.submit(new TurnRunner.TurnRequest(
                             new RecordingLoop(), env, "done", null, "go", List::of, cancelled::get))
@@ -302,12 +421,13 @@ class TurnRunnerTest {
 
     /** Indexing service override with a fabricated in-flight run (total {@code total}). */
     private static MavenRepositoryKnowledgeService indexing(final int total) throws Exception {
-        final var ctor = MavenRepositoryKnowledgeService.IndexRun.class.getDeclaredConstructor(int.class);
+        final var ctor = MavenRepositoryKnowledgeService.IndexRun.class.getDeclaredConstructor(
+                Path.class, int.class, ChatSettings.class, List.class);
         ctor.setAccessible(true);
-        final var run = ctor.newInstance(total);
+        final var run = ctor.newInstance(testWorkdir, total, null, List.of());
         return new MavenRepositoryKnowledgeService() {
             @Override
-            public IndexRun currentIndex() {
+            public IndexRun currentIndex(final Path root) {
                 return run;
             }
         };
@@ -388,6 +508,10 @@ class TurnRunnerTest {
     }
 
     private static final class RecordingLoop extends AgentLoop {
+        private RecordingLoop() {
+            super(testWorkdir);
+        }
+
         private final AtomicReference<String> prompt = new AtomicReference<>();
         private final AtomicReference<String> sessionId = new AtomicReference<>();
         private final AtomicReference<String> resumedSession = new AtomicReference<>();
@@ -442,7 +566,12 @@ class TurnRunnerTest {
         };
         final var captor = new CapturingLoginService();
         final var frontend = new RecordingFrontend();
-        final var env = new ShellEnv(frontend, new FixedIo(true), new ShellSession(), null);
+        final var env = new ShellEnv(
+                frontend,
+                new FixedIo(true),
+                new ShellSession()
+                        .runtime(new SessionRuntime(null, null, null, null, null, null, null, null, testWorkdir)),
+                null);
         final var runner = new TurnRunner(noIndexing(), EXECUTOR, agentSessionService(), null, captor);
 
         final var ran = runner.submit(new TurnRunner.TurnRequest(
@@ -475,8 +604,8 @@ class TurnRunnerTest {
         public CodexTokenStore signIn(
                 final String provider,
                 final boolean device,
-                final java.util.function.Consumer<String> urlSink,
-                final java.util.function.Predicate<Boolean> cancelled) {
+                final Consumer<String> urlSink,
+                final Predicate<Boolean> cancelled) {
             signIns.set(signIns.get() + 1);
             providerKey.set(provider);
             if (urlSink != null) {

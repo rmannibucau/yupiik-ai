@@ -32,9 +32,11 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
+import java.util.regex.Pattern;
 
 /** Credential-free, bounded CONNECT destination proxy. Does not decrypt or inspect tunnel contents. */
 public final class EgressGateway implements AutoCloseable {
+    private static final Pattern HEADER_LINES = Pattern.compile("\r\n");
     private static final Set<String> COMMON_PUBLIC_SUFFIXES = Set.of(
             "co.uk", "org.uk", "ac.uk", "gov.uk", "com.au", "net.au", "org.au", "co.jp", "co.nz", "com.br", "com.cn",
             "co.in", "co.za");
@@ -163,7 +165,7 @@ public final class EgressGateway implements AutoCloseable {
                 }
                 header.append((char) c);
             }
-            final var lines = header.toString().split("\r\n");
+            final var lines = HEADER_LINES.split(header);
             final var request = lines[0].split(" ", -1);
             if (!header.toString().endsWith("\r\n\r\n")
                     || request.length != 3

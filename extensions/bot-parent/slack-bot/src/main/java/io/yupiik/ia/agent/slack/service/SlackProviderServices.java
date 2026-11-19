@@ -44,6 +44,8 @@ import java.util.regex.Pattern;
 
 /** Trusted provider-only handoff; there is no GitHub broker or Slack capability in this manifest. */
 public final class SlackProviderServices {
+    private static final Pattern INFERENCE_PATH = Pattern.compile(
+            "/inference/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/(?:chat/completions|responses)");
     private static final Pattern PROVIDER_ID = Pattern.compile("[A-Za-z0-9_-]{1,64}");
     private static final Pattern NUMERIC_HOST = Pattern.compile("[0-9.]+");
     private static final Pattern SERVICE_PATH = Pattern.compile("(/[A-Za-z0-9_-]+)*");
@@ -212,9 +214,7 @@ public final class SlackProviderServices {
                 || endpoint.getRawUserInfo() != null
                 || endpoint.getRawQuery() != null
                 || endpoint.getRawFragment() != null
-                || !endpoint.getRawPath()
-                        .matches(
-                                "/inference/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/(?:chat/completions|responses)")
+                || !INFERENCE_PATH.matcher(endpoint.getRawPath()).matches()
                 || ChatRoutes.detectFlavor(endpoint.toString()) != api) {
             throw new IllegalArgumentException("Gateway connection must preserve the pinned provider API");
         }

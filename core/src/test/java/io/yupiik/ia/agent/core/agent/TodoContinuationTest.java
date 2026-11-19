@@ -30,14 +30,19 @@ import io.yupiik.ia.agent.core.session.SessionEntry;
 import io.yupiik.ia.agent.core.session.SessionStore;
 import io.yupiik.ia.agent.core.todo.TodoItem;
 import io.yupiik.ia.agent.core.todo.TodoStore;
+import java.nio.file.Path;
 import java.time.Clock;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.function.Supplier;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 class TodoContinuationTest {
+    @TempDir
+    private static Path eventWorkdir;
+
     @Test
     void unfinishedTodosGating() {
         final var todos = new TodoStore(config(Map.of()), null) {
@@ -55,7 +60,8 @@ class TodoContinuationTest {
                 Clock.systemUTC(),
                 () -> "s1",
                 () -> null,
-                () -> null);
+                () -> null,
+                eventWorkdir);
 
         assertEquals(new TodoContinuation.PendingTodos(2, 3), continuation.unfinishedTodos(true));
 
@@ -70,7 +76,8 @@ class TodoContinuationTest {
                         Clock.systemUTC(),
                         () -> "s1",
                         () -> null,
-                        () -> null)
+                        () -> null,
+                        eventWorkdir)
                 .unfinishedTodos(true));
         // fully completed list: nothing pending
         assertNull(new TodoContinuation(
@@ -86,7 +93,8 @@ class TodoContinuationTest {
                         Clock.systemUTC(),
                         () -> "s1",
                         () -> null,
-                        () -> null)
+                        () -> null,
+                        eventWorkdir)
                 .unfinishedTodos(true));
     }
 
@@ -98,7 +106,7 @@ class TodoContinuationTest {
                 return List.of(new TodoItem("plan", "pending"));
             }
         };
-        final var permissions = new PermissionService(config(Map.of()));
+        final var permissions = new PermissionService(config(Map.of()), (config(Map.of())).resolveWorkingDir());
         permissions.setMode(AgentMode.PLAN);
         final var continuation = new TodoContinuation(
                 config(Map.of()),
@@ -108,7 +116,8 @@ class TodoContinuationTest {
                 Clock.systemUTC(),
                 () -> "s1",
                 () -> null,
-                () -> null);
+                () -> null,
+                eventWorkdir);
         assertNull(continuation.unfinishedTodos(true));
     }
 
@@ -123,7 +132,8 @@ class TodoContinuationTest {
                 Clock.systemUTC(),
                 () -> "s1",
                 () -> null,
-                () -> null);
+                () -> null,
+                eventWorkdir);
         assertTrue(continuation.canAutoContinueUnfinished(false));
         // a user-injected prompt must not be turned into a continuation
         assertFalse(continuation.canAutoContinueUnfinished(true));
@@ -136,7 +146,8 @@ class TodoContinuationTest {
                         Clock.systemUTC(),
                         () -> "s1",
                         () -> "child",
-                        () -> "child-name")
+                        () -> "child-name",
+                        eventWorkdir)
                 .canAutoContinueUnfinished(false));
         // the feature must be opted in
         assertFalse(new TodoContinuation(
@@ -147,7 +158,8 @@ class TodoContinuationTest {
                         Clock.systemUTC(),
                         () -> "s1",
                         () -> null,
-                        () -> null)
+                        () -> null,
+                        eventWorkdir)
                 .canAutoContinueUnfinished(false));
     }
 
@@ -170,7 +182,8 @@ class TodoContinuationTest {
                 Clock.systemUTC(),
                 () -> "s1",
                 () -> null,
-                () -> null);
+                () -> null,
+                eventWorkdir);
 
         assertTrue(continuation.tryTodoAutoContinue(messages, "stop", true, false, state, notices::add));
         assertEquals(1, state.unfinishedTodoContinues);
@@ -214,7 +227,8 @@ class TodoContinuationTest {
                 Clock.systemUTC(),
                 () -> "s1",
                 () -> null,
-                () -> null);
+                () -> null,
+                eventWorkdir);
         assertTrue(continuation.tryTodoAutoContinue(messages, "stop", true, false, state, notices::add));
         assertTrue(((String) messages.get(0).content()).contains("keep going please"));
     }
@@ -229,7 +243,15 @@ class TodoContinuationTest {
             }
         };
         final var continuation = new TodoContinuation(
-                config(Map.of()), () -> null, () -> null, store, Clock.systemUTC(), () -> "s1", () -> null, () -> null);
+                config(Map.of()),
+                () -> null,
+                () -> null,
+                store,
+                Clock.systemUTC(),
+                () -> "s1",
+                () -> null,
+                () -> null,
+                eventWorkdir);
         continuation.persistStopNotice("s1", "the turn stopped");
         assertEquals(1, entries.size());
         assertEquals("system", entries.get(0).role());
@@ -247,7 +269,8 @@ class TodoContinuationTest {
                 Clock.systemUTC(),
                 () -> "s1",
                 () -> "sa",
-                () -> "name");
+                () -> "name",
+                eventWorkdir);
         final var notice = continuation.unfinishedTodosNotice(new TodoContinuation.PendingTodos(2, 5), "stop_sequence");
         assertEquals(AgentEvent.Notice.Level.WARN, notice.level());
         assertEquals("s1", notice.sessionId());

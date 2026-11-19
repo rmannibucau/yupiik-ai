@@ -22,6 +22,7 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Objects;
 
 /**
  * Resolves skills (SKILL.md files) from the project hierarchy (searched upwards from the
@@ -33,9 +34,13 @@ public final class SkillLocator {
 
     private SkillLocator() {}
 
-    public static List<Path> skillDirectories(final CodingAgentConfiguration configuration) {
+    /** Uses the required session working directory, normalized before walking its ancestors. */
+    public static List<Path> skillDirectories(final CodingAgentConfiguration configuration, final Path workingDir) {
         final var list = new ArrayList<Path>();
-        final var base = configuration.resolveWorkingDir();
+        final var base = Objects.requireNonNull(workingDir, "workdir").normalize();
+        if (!base.isAbsolute()) {
+            throw new IllegalArgumentException("workdir must be absolute: " + workingDir);
+        }
         final var walk = new ArrayList<Path>();
         var dir = base;
         walk.add(dir);
@@ -56,9 +61,9 @@ public final class SkillLocator {
         return list;
     }
 
-    public static List<String> skillNames(final CodingAgentConfiguration configuration) {
+    public static List<String> skillNames(final CodingAgentConfiguration configuration, final Path workingDir) {
         final var out = new ArrayList<String>();
-        for (final var dir : skillDirectories(configuration)) {
+        for (final var dir : skillDirectories(configuration, workingDir)) {
             if (!Files.isDirectory(dir)) {
                 continue;
             }
@@ -78,8 +83,8 @@ public final class SkillLocator {
         return out;
     }
 
-    public static Path find(final CodingAgentConfiguration configuration, final String name) {
-        for (final var dir : skillDirectories(configuration)) {
+    public static Path find(final CodingAgentConfiguration configuration, final String name, final Path workingDir) {
+        for (final var dir : skillDirectories(configuration, workingDir)) {
             if (!Files.isDirectory(dir)) {
                 continue;
             }
@@ -111,10 +116,11 @@ public final class SkillLocator {
      * never the full SKILL.md body). Mirrors opencode's {@code <available_skills>} discovery so the model
      * can decide which skill to load on demand via the {@code skill} tool.
      */
-    public static List<SkillDescriptor> availableSkills(final CodingAgentConfiguration configuration) {
+    public static List<SkillDescriptor> availableSkills(
+            final CodingAgentConfiguration configuration, final Path workingDir) {
         final var out = new ArrayList<SkillDescriptor>();
         final var seen = new HashSet<String>();
-        for (final var dir : skillDirectories(configuration)) {
+        for (final var dir : skillDirectories(configuration, workingDir)) {
             if (!Files.isDirectory(dir)) {
                 continue;
             }
@@ -146,10 +152,11 @@ public final class SkillLocator {
 
     /**
      * Render the discovered skills as an opencode-style {@code <available_skills>} catalog (name + description),
-     * used inside the {@code skill} tool description. Returns {@code ""} when no skills are found.
+     * for session-specific prompt context. Returns {@code ""} when no skills are found.
      */
-    public static String availableSkillsCatalog(final CodingAgentConfiguration configuration) {
-        final var skills = availableSkills(configuration);
+    /** Renders metadata only for the supplied session root; callers enforce the skills enabled setting. */
+    public static String availableSkillsCatalog(final CodingAgentConfiguration configuration, final Path workingDir) {
+        final var skills = availableSkills(configuration, workingDir);
         if (skills.isEmpty()) {
             return "";
         }

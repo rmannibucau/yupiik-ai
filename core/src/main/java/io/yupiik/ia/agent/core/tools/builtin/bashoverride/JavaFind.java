@@ -92,13 +92,14 @@ public class JavaFind implements JavaCommand {
         }
         final var relative = !args.get(0).startsWith("/");
         final var printBase = relative ? cwd.toAbsolutePath().normalize() + "/" : "";
-        walk(root, name, type, 0, maxDepth, out, printBase);
+        final var namePattern = name == null ? null : glob(name);
+        walk(root, namePattern, type, 0, maxDepth, out, printBase);
         return true;
     }
 
     private static void walk(
             final Path dir,
-            final String name,
+            final Pattern name,
             final Character type,
             final int depth,
             final int maxDepth,
@@ -118,7 +119,7 @@ public class JavaFind implements JavaCommand {
             final var isDir = Files.isDirectory(child);
             final var matchesType = type == null || (type == 'd' && isDir) || (type == 'f' && !isDir);
             final var fileName = child.getFileName().toString();
-            final var matchesName = name == null || glob(name, fileName);
+            final var matchesName = name == null || name.matcher(fileName).matches();
             if (matchesType && matchesName) {
                 out.append(printBase).append(child).append('\n');
             }
@@ -128,7 +129,7 @@ public class JavaFind implements JavaCommand {
         }
     }
 
-    private static boolean glob(final String pattern, final String value) {
+    private static Pattern glob(final String pattern) {
         final var regex = new StringBuilder();
         for (final var c : pattern.toCharArray()) {
             switch (c) {
@@ -137,6 +138,6 @@ public class JavaFind implements JavaCommand {
                 default -> regex.append(Pattern.quote(String.valueOf(c)));
             }
         }
-        return Pattern.compile(regex.toString()).matcher(value).matches();
+        return Pattern.compile(regex.toString());
     }
 }

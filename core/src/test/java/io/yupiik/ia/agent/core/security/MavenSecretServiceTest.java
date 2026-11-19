@@ -183,6 +183,10 @@ class MavenSecretServiceTest {
                             <name>Authorization</name>
                             <value>Bearer ${sys.yca.test.header.token}</value>
                           </property>
+                          <property>
+                            <name>X-Api-Key</name>
+                            <value>${sys:yca.test.header.literal}</value>
+                          </property>
                         </httpHeaders>
                       </configuration>
                     </server>
@@ -192,7 +196,9 @@ class MavenSecretServiceTest {
         TestJvm.run(
                 tmp,
                 HeaderPlaceholderPeer.class,
-                Map.of("yca.test.header.token", "resolved-placeholder-secret"),
+                Map.of(
+                        "yca.test.header.token", "resolved-placeholder-secret",
+                        "yca.test.header.literal", "literal-$1\\token"),
                 settings.toAbsolutePath().toString());
     }
 
@@ -200,6 +206,7 @@ class MavenSecretServiceTest {
         public static void main(final String[] args) {
             final var secrets = new MavenSecretService().collectSecretNames(Path.of(args[0]));
             assertTrue(secrets.contains("resolved-placeholder-secret"), "placeholder must resolve: " + secrets);
+            assertTrue(secrets.contains("literal-$1\\token"), "replacement syntax must remain literal: " + secrets);
         }
     }
 }

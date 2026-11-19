@@ -28,6 +28,7 @@ import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.HttpClientCertificateConfiguration;
 import io.yupiik.ia.agent.core.configuration.NativeProviderConfiguration;
 import io.yupiik.ia.agent.core.llm.UnixProviderHttpClient;
+import io.yupiik.ia.agent.core.mcp.SessionMcpHttpClient;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.net.Authenticator;
@@ -54,7 +55,9 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.TreeMap;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Predicate;
 import java.util.logging.Logger;
 import java.util.regex.Pattern;
@@ -68,7 +71,7 @@ import javax.net.ssl.X509TrustManager;
 public class HttpClientProducer {
     @Bean
     @ApplicationScoped
-    public ExtendedHttpClient httpClient(
+    public SessionCapableClient httpClient(
             final CodingAgentConfiguration configuration,
             final NativeProviderConfiguration nativeProviderConfiguration) {
         final var cfg = configuration.httpClient();
@@ -113,7 +116,7 @@ public class HttpClientProducer {
         }
         final var listeners = new ArrayList<RequestListener<?>>();
         if (cfg.headers() != null && !cfg.headers().isEmpty()) {
-            listeners.add(new SetHeader(cfg.headers()));
+            listeners.add(new SetHeader(cfg.headers(), true));
         }
         listeners.add(
                 new SetUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko)"
@@ -122,20 +125,106 @@ public class HttpClientProducer {
             listeners.add(new CurlLoggerListener(
                     new CurlLoggerListener.Configuration(Logger.getLogger("yca.http")).setLogPayload(true)));
         }
-        final var transport = new OpenCodeHttpClient(
-                UnixProviderHttpClient.fromConfiguration(builder.build(), nativeProviderConfiguration),
-                hasCertificates(cfg.certificates()) ? certificateKeyStore(cfg.certificates()) : null);
-        return new ExtendedHttpClient(
-                new ExtendedHttpClientConfiguration().setDelegate(transport).setRequestListeners(listeners)) {
-            @Override
-            public void close() {
+        final var base = builder.build();
+        try {
+            final var transport = new OpenCodeHttpClient(
+                    UnixProviderHttpClient.fromConfiguration(base, nativeProviderConfiguration),
+                    hasCertificates(cfg.certificates()) ? certificateKeyStore(cfg.certificates()) : null);
+            final var sessionListeners = new ArrayList<RequestListener<?>>();
+            if (cfg.headers() != null && !cfg.headers().isEmpty()) {
+                sessionListeners.add(new SetHeader(cfg.headers(), false));
+            }
+            sessionListeners.add(
+                    new SetUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko)"
+                            + " Chrome/124.0.0.0 Safari/537.36"));
+            return new SessionCapableClient(transport, base, listeners, sessionListeners, cfg.debug());
+        } catch (final RuntimeException | Error e) {
+            base.close(); // A failed provider/configuration wrapper must not orphan its transport.
+            throw e;
+        }
+    }
+
+    public static final class SessionCapableClient extends ExtendedHttpClient {
+        private final HttpClient transport;
+        private final HttpClient base;
+        private final List<RequestListener<?>> sessionListeners;
+        private final boolean debug;
+        private final ReentrantLock lock = new ReentrantLock();
+        private HttpClient sessionTransport;
+        private boolean closed;
+
+        private SessionCapableClient(
+                final HttpClient transport,
+                final HttpClient base,
+                final List<RequestListener<?>> listeners,
+                final List<RequestListener<?>> sessionListeners,
+                final boolean debug) {
+            super(new ExtendedHttpClientConfiguration().setDelegate(transport).setRequestListeners(listeners));
+            this.transport = transport;
+            this.base = base;
+            this.sessionListeners = List.copyOf(sessionListeners);
+            this.debug = debug;
+        }
+
+        public ExtendedHttpClient openSession(final Set<String> secretHeaderNames) {
+            lock.lock();
+            try {
+                if (closed) {
+                    throw new IllegalStateException("HTTP client is closed");
+                }
+                if (sessionTransport == null) {
+                    if (base.followRedirects() == HttpClient.Redirect.NEVER) {
+                        sessionTransport = base;
+                    } else {
+                        final var builder = HttpClient.newBuilder()
+                                .followRedirects(HttpClient.Redirect.NEVER)
+                                .version(base.version())
+                                .sslContext(base.sslContext())
+                                .sslParameters(base.sslParameters());
+                        base.connectTimeout().ifPresent(builder::connectTimeout);
+                        base.proxy().ifPresent(builder::proxy);
+                        base.authenticator().ifPresent(builder::authenticator);
+                        base.cookieHandler().ifPresent(builder::cookieHandler);
+                        base.executor().ifPresent(builder::executor);
+                        sessionTransport = builder.build();
+                    }
+                }
+                return new SessionMcpHttpClient(sessionTransport, sessionListeners, debug, secretHeaderNames);
+            } finally {
+                lock.unlock();
+            }
+        }
+
+        @Override
+        public void close() {
+            final HttpClient ownedSession;
+            lock.lock();
+            try {
+                if (closed) {
+                    return;
+                }
+                closed = true;
+                ownedSession = sessionTransport != base ? sessionTransport : null;
+                sessionTransport = null;
+            } finally {
+                lock.unlock();
+            }
+            // Never hold the publication lock across listener callbacks or transport shutdown.
+            try {
+                super.close();
+            } finally {
                 try {
-                    super.close();
+                    if (ownedSession != null) {
+                        // Session SSE bodies can remain open indefinitely; graceful close alone
+                        // would wait for the remote server rather than release owned resources.
+                        ownedSession.shutdownNow();
+                        ownedSession.close();
+                    }
                 } finally {
                     transport.close();
                 }
             }
-        };
+        }
     }
 
     private static HttpClient.Version version(final String value) {
@@ -347,7 +436,7 @@ public class HttpClientProducer {
         }
     }
 
-    private record SetHeader(Map<String, String> headers) implements RequestListener<Void> {
+    private record SetHeader(Map<String, String> headers, boolean overwrite) implements RequestListener<Void> {
         private SetHeader {
             final var normalized = new LinkedHashMap<String, String>();
             for (final var e : headers.entrySet()) {
@@ -378,7 +467,13 @@ public class HttpClientProducer {
             final var map = request.headers().map();
             final var newMap = new TreeMap<String, List<String>>(String.CASE_INSENSITIVE_ORDER);
             newMap.putAll(map);
-            headers.forEach((k, v) -> newMap.put(k, List.of(v)));
+            headers.forEach((k, v) -> {
+                if (overwrite) {
+                    newMap.put(k, List.of(v));
+                } else {
+                    newMap.putIfAbsent(k, List.of(v));
+                }
+            });
             return new State<>(
                     new UnlockedHttpRequest(
                             request.bodyPublisher(),

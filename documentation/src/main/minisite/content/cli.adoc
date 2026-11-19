@@ -25,6 +25,7 @@ Use the command directory below to open the *generated reference* for arguments,
 |Core |xref:cli/completion-bash.adoc[`yca completion bash`] |Generate a Bash completion script.
 |TUI |xref:cli/tui.adoc[`yca tui`] |Start the full-screen terminal interface.
 |Web |xref:cli/web.adoc[`yca web`] |Serve the browser interface and its JSON-RPC/SSE API.
+|ACP |xref:cli/acp.adoc[`yca acp`] |Launch the ACP v1 stdio agent for Air; see xref:acp.adoc[setup and capabilities].
 |===
 
 These links point to build-generated pages, not a second handwritten option reference.

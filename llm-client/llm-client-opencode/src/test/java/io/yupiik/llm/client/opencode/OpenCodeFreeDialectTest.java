@@ -46,6 +46,7 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.Flow;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
+import java.util.regex.Pattern;
 import javax.net.ssl.KeyManagerFactory;
 import javax.net.ssl.SSLContext;
 import org.junit.jupiter.api.Test;
@@ -54,6 +55,8 @@ import org.junit.jupiter.api.io.TempDir;
 
 @ExtendWith(TestJsonMapper.class)
 class OpenCodeFreeDialectTest {
+    private static final Pattern SESSION_ID = Pattern.compile("ses_[0-9a-f]{12}[0-9A-Za-z]{14}");
+    private static final Pattern PROJECT_HASH = Pattern.compile("[0-9a-f]{64}");
     private static final String TOOL_RESPONSE = """
         data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"read","arguments":"{\\"path\\":"}}]}}]}
 
@@ -289,12 +292,14 @@ class OpenCodeFreeDialectTest {
                 assertEquals("/inference/openai/v1/chat/completions", captured.path());
                 assertEquals(List.of("Bearer public"), captured.authorization());
                 assertEquals(1, captured.sessions().size());
-                assertTrue(captured.sessions().getFirst().matches("ses_[0-9a-f]{12}[0-9A-Za-z]{14}"));
+                assertTrue(SESSION_ID.matcher(captured.sessions().getFirst()).matches());
                 assertEquals(fixture.requests.getFirst().sessions(), captured.sessions());
                 assertEquals("*/*", captured.accept());
                 assertEquals("opencode/latest/2.2.3/cli", captured.headers().get("user-agent"));
                 assertEquals("cli", captured.headers().get("x-opencode-client"));
-                assertTrue(captured.headers().get("x-opencode-project").matches("[0-9a-f]{64}"));
+                assertTrue(PROJECT_HASH
+                        .matcher(captured.headers().get("x-opencode-project"))
+                        .matches());
                 assertEquals(
                         fixture.requests.getFirst().headers().get("x-opencode-project"),
                         captured.headers().get("x-opencode-project"));

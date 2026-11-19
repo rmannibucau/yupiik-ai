@@ -19,7 +19,9 @@ import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.ia.agent.core.tools.EmbeddedTool;
 import io.yupiik.ia.agent.core.tools.Schemas;
 import io.yupiik.ia.agent.core.tools.ToolCategory;
+import io.yupiik.ia.agent.core.tools.ToolContext;
 import io.yupiik.ia.agent.core.tools.ToolResult;
+import java.nio.file.Path;
 import java.util.Map;
 
 @ApplicationScoped
@@ -36,7 +38,7 @@ public class CodeCheckGraphTool implements EmbeddedTool {
     }
 
     @Override
-    public String description() {
+    public String description(final Path workdir) {
         return "Report the freshness and health of the structural code graph (symbol/file counts, missing files, "
                 + "store location). Use it to decide whether to query the graph with code_find_code / code_trace_calls.";
     }
@@ -57,8 +59,8 @@ public class CodeCheckGraphTool implements EmbeddedTool {
     }
 
     @Override
-    public ToolResult execute(final Map<String, Object> args) {
-        codeGraph.ensureRefreshedReady();
-        return ToolResult.ok(codeGraph.freshness());
+    public ToolResult execute(final Map<String, Object> args, final ToolContext context) {
+        codeGraph.ensureRefreshedReady(context.projectDir());
+        return ToolResult.ok(codeGraph.freshness(context.projectDir()));
     }
 }

@@ -24,24 +24,29 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import io.yupiik.fusion.framework.api.event.Emitter;
 import io.yupiik.ia.agent.core.agent.AgentEvent;
 import io.yupiik.ia.agent.core.agent.SubagentRegistry;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 class ShellRegistryTest {
+    @TempDir
+    private static Path eventWorkdir;
+
     @Test
     void capturesSubagentConversationWithoutSuppressingCliLiveOutput() {
         final var subagents = new SubagentRegistry(null, null);
         final var frontend = new RecordingFrontend();
         final var registry = new ShellRegistry(collecting(null), subagents);
         registry.register(env(frontend, "parent"));
-        registry.onEvent(new AgentEvent.TextDelta("child response", "parent", "child-id", "reviewer"));
+        registry.onEvent(new AgentEvent.TextDelta("child response", "parent", "child-id", "reviewer", eventWorkdir));
         assertEquals(List.of("transcript:child response"), frontend.calls);
-        registry.onEvent(new AgentEvent.TurnDone("child response", "parent", "child-id", "reviewer"));
+        registry.onEvent(new AgentEvent.TurnDone("child response", "parent", "child-id", "reviewer", eventWorkdir));
         assertTrue(subagents.transcriptOf("child-id").markdown("", "").contains("child response"));
         registry.bindSubagents(subagents);
-        registry.onEvent(new AgentEvent.TextDelta("modal only", "parent", "child-id", "reviewer"));
-        registry.onEvent(new AgentEvent.TurnDone("modal only", "parent", "child-id", "reviewer"));
+        registry.onEvent(new AgentEvent.TextDelta("modal only", "parent", "child-id", "reviewer", eventWorkdir));
+        registry.onEvent(new AgentEvent.TurnDone("modal only", "parent", "child-id", "reviewer", eventWorkdir));
         assertEquals(List.of("transcript:child response"), frontend.calls);
         assertTrue(subagents.transcriptOf("child-id").markdown("", "").contains("modal only"));
     }
@@ -56,9 +61,10 @@ class ShellRegistryTest {
         registry.register(env);
 
         assertSame(env, registry.active("s1"));
-        registry.onEvent(new AgentEvent.Status("working", "s1"));
-        registry.onEvent(new AgentEvent.Notice(AgentEvent.Notice.Level.WARN, "careful", null, "s1", null, null));
-        registry.onEvent(new AgentEvent.Error("boom", "s1"));
+        registry.onEvent(new AgentEvent.Status("working", "s1", eventWorkdir));
+        registry.onEvent(
+                new AgentEvent.Notice(AgentEvent.Notice.Level.WARN, "careful", null, "s1", null, null, eventWorkdir));
+        registry.onEvent(new AgentEvent.Error("boom", "s1", eventWorkdir));
 
         assertEquals(List.of("status:working", "notice:WARN:careful", "error:boom"), frontend.calls);
     }
@@ -70,7 +76,7 @@ class ShellRegistryTest {
         final var env = env(frontend, "s1");
 
         registry.register(env);
-        registry.onEvent(new AgentEvent.Status("working", null, null, null));
+        registry.onEvent(new AgentEvent.Status("working", null, null, null, eventWorkdir));
 
         assertEquals(List.of(), frontend.calls);
         assertThrows(IllegalArgumentException.class, () -> registry.register(env(frontend, null)));
@@ -85,10 +91,10 @@ class ShellRegistryTest {
         registry.register(env(first, "s1"));
         registry.register(env(second, "s2"));
 
-        registry.onEvent(new AgentEvent.Status("first working", "s1"));
-        registry.onEvent(new AgentEvent.Status("second working", "s2"));
-        registry.onEvent(new AgentEvent.TextDelta("hello", "s2", null, null));
-        registry.onEvent(new AgentEvent.TextDelta("ignored", "s3", null, null));
+        registry.onEvent(new AgentEvent.Status("first working", "s1", eventWorkdir));
+        registry.onEvent(new AgentEvent.Status("second working", "s2", eventWorkdir));
+        registry.onEvent(new AgentEvent.TextDelta("hello", "s2", null, null, eventWorkdir));
+        registry.onEvent(new AgentEvent.TextDelta("ignored", "s3", null, null, eventWorkdir));
 
         assertEquals(List.of("status:first working"), first.calls);
         assertEquals(List.of("status:second working", "transcript:hello"), second.calls);
@@ -103,7 +109,7 @@ class ShellRegistryTest {
 
         registry.register(env);
         registry.unregister(env);
-        registry.onEvent(new AgentEvent.Status("ignored", "s1"));
+        registry.onEvent(new AgentEvent.Status("ignored", "s1", eventWorkdir));
 
         assertEquals(List.of(), frontend.calls);
         assertNull(registry.active("s1"));
@@ -119,7 +125,7 @@ class ShellRegistryTest {
         registry.register(env(second, "s2"));
 
         registry.unregister(firstEnv);
-        registry.onEvent(new AgentEvent.Status("still working", "s2"));
+        registry.onEvent(new AgentEvent.Status("still working", "s2", eventWorkdir));
 
         assertEquals(List.of(), first.calls);
         assertEquals(List.of("status:still working"), second.calls);
@@ -188,7 +194,9 @@ class ShellRegistryTest {
 
         @Override
         public void onEvent(final AgentEvent event) {
-            if (event instanceof AgentEvent.TextDelta(var delta, var sessionId, var subagentId, var subagentName)) {
+            if (event
+                    instanceof
+                    AgentEvent.TextDelta(var delta, var sessionId, var subagentId, var subagentName, var _)) {
                 // like the real frontends, stream text deltas through the transcript
                 transcript(delta);
             } else {

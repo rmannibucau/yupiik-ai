@@ -21,18 +21,23 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.ia.agent.core.agent.AgentEvent;
+import java.nio.file.Path;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 class ConversationCoordinatorTest {
+    @TempDir
+    private static Path eventWorkdir;
+
     @Test
     void foldsEventsIntoTranscriptAndStats() {
         final var coordinator = new ConversationCoordinator();
-        coordinator.onEvent(new AgentEvent.ToolStarted("bash", "{}", "s1"));
-        coordinator.onEvent(new AgentEvent.ToolFinished("bash", "out", true, "s1"));
-        final var usage = new AgentEvent.UsageUpdated(null, 11, 22.0, "s1");
+        coordinator.onEvent(new AgentEvent.ToolStarted("bash", "{}", "s1", eventWorkdir));
+        coordinator.onEvent(new AgentEvent.ToolFinished("bash", "out", true, "s1", eventWorkdir));
+        final var usage = new AgentEvent.UsageUpdated(null, 11, 22.0, "s1", eventWorkdir);
         coordinator.onEvent(usage);
-        coordinator.onEvent(new AgentEvent.TurnMetrics(2, 30, 40, 45, 1, 500, "s1"));
-        coordinator.onEvent(new AgentEvent.TurnDone("done", "s1"));
+        coordinator.onEvent(new AgentEvent.TurnMetrics(2, 30, 40, 45, 1, 500, "s1", eventWorkdir));
+        coordinator.onEvent(new AgentEvent.TurnDone("done", "s1", eventWorkdir));
 
         assertTrue(coordinator.transcript().transcript().toString().contains("**Assistant**\n\ndone"));
         assertEquals(1, coordinator.stats().toolsRun());
@@ -45,8 +50,8 @@ class ConversationCoordinatorTest {
     @Test
     void shellLifecycleEventsResetState() {
         final var coordinator = new ConversationCoordinator();
-        coordinator.onEvent(new AgentEvent.ToolFinished("bash", "out", true, "s1"));
-        coordinator.onEvent(new AgentEvent.UsageUpdated(null, 11, 22.0, "s1"));
+        coordinator.onEvent(new AgentEvent.ToolFinished("bash", "out", true, "s1", eventWorkdir));
+        coordinator.onEvent(new AgentEvent.UsageUpdated(null, 11, 22.0, "s1", eventWorkdir));
 
         coordinator.onRegistered(new ShellRegistered(null));
 
@@ -54,7 +59,7 @@ class ConversationCoordinatorTest {
         assertEquals(0, coordinator.stats().toolsRun());
         assertNull(coordinator.stats().lastUsage());
 
-        coordinator.onEvent(new AgentEvent.TurnMetrics(1, 0, 0, 0, 0, 0, "s1"));
+        coordinator.onEvent(new AgentEvent.TurnMetrics(1, 0, 0, 0, 0, 0, "s1", eventWorkdir));
         coordinator.onUnregistered(new ShellUnregistered(null));
         assertNull(coordinator.stats().lastTurnMetrics());
     }

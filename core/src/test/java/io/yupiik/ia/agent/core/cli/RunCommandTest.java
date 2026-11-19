@@ -86,6 +86,7 @@ import java.util.function.BooleanSupplier;
 import java.util.logging.Handler;
 import java.util.logging.LogRecord;
 import java.util.logging.Logger;
+import java.util.regex.Pattern;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -108,6 +109,15 @@ import org.junit.jupiter.params.provider.ValueSource;
 @ResourceLock(Resources.SYSTEM_ERR)
 @ResourceLock("java.util.logging")
 class RunCommandTest {
+    private static final Pattern STREAMED_LINE = Pattern.compile("streamed line");
+    private static final Pattern WHITESPACE = Pattern.compile("\\s+");
+
+    @TempDir
+    private static Path eventWorkdir;
+
+    @TempDir
+    private static Path testWorkdir;
+
     private JsonMapper mapper;
 
     @BeforeEach
@@ -205,7 +215,7 @@ class RunCommandTest {
         }
         final var shellRegistry = testRegistry();
         final var calls = new ArrayList<String[]>();
-        final var agentLoop = new AgentLoop() {
+        final var agentLoop = new AgentLoop(testWorkdir) {
             @Override
             public String run(
                     final String prompt,
@@ -216,9 +226,9 @@ class RunCommandTest {
                 assertTrue(mcpStarted.get(), "MCP warm-up must begin before the first agent request");
                 calls.add(new String[] {prompt, agentName, sessionId});
                 assertNull(history);
-                shellRegistry.onEvent(new AgentEvent.TextDelta("hel", sessionId));
-                shellRegistry.onEvent(new AgentEvent.TextDelta("lo", sessionId));
-                shellRegistry.onEvent(new AgentEvent.TurnDone("hello", sessionId));
+                shellRegistry.onEvent(new AgentEvent.TextDelta("hel", sessionId, eventWorkdir));
+                shellRegistry.onEvent(new AgentEvent.TextDelta("lo", sessionId, eventWorkdir));
+                shellRegistry.onEvent(new AgentEvent.TurnDone("hello", sessionId, eventWorkdir));
                 return "ok";
             }
         };
@@ -238,7 +248,7 @@ class RunCommandTest {
                         defaultCorrectionPrompt(),
                         fromFile ? file.toString() : null),
                 shellRegistry,
-                runtimeFactory(agentLoop, new PermissionService(null)),
+                runtimeFactory(agentLoop, new PermissionService(null, testWorkdir)),
                 sessionStore(),
                 null,
                 mcpManager(),
@@ -314,7 +324,7 @@ class RunCommandTest {
                         Configuration.of(Map.of("run.prompt-file", file.toString())))
                 .get();
         final var received = new AtomicReference<String>();
-        final var loop = new AgentLoop() {
+        final var loop = new AgentLoop(testWorkdir) {
             @Override
             public String run(
                     final String value,
@@ -329,7 +339,7 @@ class RunCommandTest {
         new RunCommand(
                         conf,
                         testRegistry(),
-                        runtimeFactory(loop, new PermissionService(null)),
+                        runtimeFactory(loop, new PermissionService(null, testWorkdir)),
                         sessionStore(),
                         null,
                         mcpManager(),
@@ -346,7 +356,7 @@ class RunCommandTest {
         final var prompts = new ArrayList<String>();
         final var cancellation = new AtomicReference<BooleanSupplier>();
         final var cap = new AtomicInteger();
-        final var loop = new AgentLoop() {
+        final var loop = new AgentLoop(testWorkdir) {
             @Override
             public void maxIterationsCap(final int value) {
                 cap.set(value);
@@ -407,7 +417,7 @@ class RunCommandTest {
                                 defaultCorrectionPrompt(),
                                 null),
                         testRegistry(),
-                        runtimeFactory(loop, new PermissionService(null)),
+                        runtimeFactory(loop, new PermissionService(null, testWorkdir)),
                         store,
                         null,
                         mcpManager(),
@@ -422,7 +432,7 @@ class RunCommandTest {
     void invalidResultFailsAfterExactlyOneCorrection() throws Exception {
         final var result = Files.writeString(temp.resolve("invalid.json"), "{}");
         final var calls = new AtomicInteger();
-        final var loop = new AgentLoop() {
+        final var loop = new AgentLoop(testWorkdir) {
             @Override
             public String run(
                     final String prompt,
@@ -456,7 +466,7 @@ class RunCommandTest {
                                 .resultCorrectionPrompt(),
                         null),
                 testRegistry(),
-                runtimeFactory(loop, new PermissionService(null)),
+                runtimeFactory(loop, new PermissionService(null, testWorkdir)),
                 sessionStore(),
                 null,
                 mcpManager(),
@@ -473,7 +483,7 @@ class RunCommandTest {
     void validResultDoesNotTriggerCorrection() throws Exception {
         final var result = Files.writeString(temp.resolve("valid.json"), "{\"failure\":\"blocked\"}");
         final var calls = new AtomicInteger();
-        final var loop = new AgentLoop() {
+        final var loop = new AgentLoop(testWorkdir) {
             @Override
             public String run(
                     final String prompt,
@@ -501,7 +511,7 @@ class RunCommandTest {
                                 defaultCorrectionPrompt(),
                                 null),
                         testRegistry(),
-                        runtimeFactory(loop, new PermissionService(null)),
+                        runtimeFactory(loop, new PermissionService(null, testWorkdir)),
                         sessionStore(),
                         null,
                         mcpManager(),
@@ -515,7 +525,7 @@ class RunCommandTest {
     void failedTurnDoesNotTriggerResultCorrection() {
         final var registry = testRegistry();
         final var calls = new AtomicInteger();
-        final var loop = new AgentLoop() {
+        final var loop = new AgentLoop(testWorkdir) {
             @Override
             public String run(
                     final String prompt,
@@ -524,7 +534,7 @@ class RunCommandTest {
                     final List<Message> history,
                     final BooleanSupplier cancelled) {
                 calls.incrementAndGet();
-                registry.onEvent(new AgentEvent.Error("provider failed", sessionId));
+                registry.onEvent(new AgentEvent.Error("provider failed", sessionId, eventWorkdir));
                 return "";
             }
         };
@@ -544,7 +554,7 @@ class RunCommandTest {
                         defaultCorrectionPrompt(),
                         null),
                 registry,
-                runtimeFactory(loop, new PermissionService(null)),
+                runtimeFactory(loop, new PermissionService(null, testWorkdir)),
                 sessionStore(),
                 null,
                 mcpManager(),
@@ -559,7 +569,7 @@ class RunCommandTest {
     @Test
     void errorEventFails() {
         final var shellRegistry = testRegistry();
-        final var agentLoop = new AgentLoop() {
+        final var agentLoop = new AgentLoop(testWorkdir) {
             @Override
             public String run(
                     final String prompt,
@@ -568,7 +578,7 @@ class RunCommandTest {
                     final List<Message> history,
                     final BooleanSupplier cancelled) {
                 lastSessionIdUsed.set(sessionId);
-                shellRegistry.onEvent(new AgentEvent.Error("boom", sessionId));
+                shellRegistry.onEvent(new AgentEvent.Error("boom", sessionId, eventWorkdir));
                 return "ko";
             }
         };
@@ -588,7 +598,7 @@ class RunCommandTest {
                         defaultCorrectionPrompt(),
                         null),
                 shellRegistry,
-                runtimeFactory(agentLoop, new PermissionService(null)),
+                runtimeFactory(agentLoop, new PermissionService(null, testWorkdir)),
                 sessionStore(),
                 null,
                 mcpManager(),
@@ -613,11 +623,11 @@ class RunCommandTest {
                         List.of(),
                         new BashPermissionsConfiguration(List.of(), "", 1024)))
                 .build();
-        final var permissions = new PermissionService(configuration);
+        final var permissions = new PermissionService(configuration, (configuration).resolveWorkingDir());
         permissions.setMode(AgentMode.BUILD);
         final var allowed = new AtomicBoolean(true);
         final var shellRegistry = testRegistry();
-        final var agentLoop = new AgentLoop() {
+        final var agentLoop = new AgentLoop(testWorkdir) {
             @Override
             public String run(
                     final String prompt,
@@ -671,11 +681,11 @@ class RunCommandTest {
                         List.of(),
                         new BashPermissionsConfiguration(List.of(), "", 1024)))
                 .build();
-        final var permissions = new PermissionService(configuration);
+        final var permissions = new PermissionService(configuration, (configuration).resolveWorkingDir());
         // default mode, falls back to PLAN
         final var allowed = new AtomicBoolean(true);
         final var shellRegistry = testRegistry();
-        final var agentLoop = new AgentLoop() {
+        final var agentLoop = new AgentLoop(testWorkdir) {
             @Override
             public String run(
                     final String prompt,
@@ -722,10 +732,10 @@ class RunCommandTest {
                 .baseUrl("http://localhost:1/v1/chat/completions")
                 .storageHome(temp.toString())
                 .build();
-        final var permissions = new PermissionService(configuration);
+        final var permissions = new PermissionService(configuration, (configuration).resolveWorkingDir());
         final var modeSeen = new AtomicReference<AgentMode>();
         final var shellRegistry = testRegistry();
-        final var agentLoop = new AgentLoop() {
+        final var agentLoop = new AgentLoop(testWorkdir) {
             @Override
             public String run(
                     final String prompt,
@@ -776,10 +786,10 @@ class RunCommandTest {
                         List.of(),
                         new BashPermissionsConfiguration(List.of(), "", 1024)))
                 .build();
-        final var permissions = new PermissionService(configuration);
+        final var permissions = new PermissionService(configuration, (configuration).resolveWorkingDir());
         final var reason = new AtomicReference<String>();
         final var shellRegistry = testRegistry();
-        final var agentLoop = new AgentLoop() {
+        final var agentLoop = new AgentLoop(testWorkdir) {
             @Override
             public String run(
                     final String prompt,
@@ -828,7 +838,7 @@ class RunCommandTest {
     @Test
     void showToolOutputPrintsNonStreamedSuccess() {
         final var shellRegistry = testRegistry();
-        final var agentLoop = new AgentLoop() {
+        final var agentLoop = new AgentLoop(testWorkdir) {
             @Override
             public String run(
                     final String prompt,
@@ -836,9 +846,11 @@ class RunCommandTest {
                     final String sessionId,
                     final List<Message> history,
                     final BooleanSupplier cancelled) {
-                shellRegistry.onEvent(new AgentEvent.ToolStarted("read", "{\"path\":\"a.txt\"}", sessionId));
-                shellRegistry.onEvent(new AgentEvent.ToolFinished("read", "line1\nline2", true, sessionId));
-                shellRegistry.onEvent(new AgentEvent.TurnDone("done", sessionId));
+                shellRegistry.onEvent(
+                        new AgentEvent.ToolStarted("read", "{\"path\":\"a.txt\"}", sessionId, eventWorkdir));
+                shellRegistry.onEvent(
+                        new AgentEvent.ToolFinished("read", "line1\nline2", true, sessionId, eventWorkdir));
+                shellRegistry.onEvent(new AgentEvent.TurnDone("done", sessionId, eventWorkdir));
                 return "ok";
             }
         };
@@ -846,7 +858,7 @@ class RunCommandTest {
                 new RunCommand.RunConf(
                         "say hi", "", "", false, "", "shown", "", "", "", "", 1000000, defaultCorrectionPrompt(), null),
                 shellRegistry,
-                runtimeFactory(agentLoop, new PermissionService(null)),
+                runtimeFactory(agentLoop, new PermissionService(null, testWorkdir)),
                 sessionStore(),
                 null,
                 mcpManager(),
@@ -862,7 +874,7 @@ class RunCommandTest {
     @Test
     void showToolOutputSkipsStreamedTools() {
         final var shellRegistry = testRegistry();
-        final var agentLoop = new AgentLoop() {
+        final var agentLoop = new AgentLoop(testWorkdir) {
             @Override
             public String run(
                     final String prompt,
@@ -870,10 +882,12 @@ class RunCommandTest {
                     final String sessionId,
                     final List<Message> history,
                     final BooleanSupplier cancelled) {
-                shellRegistry.onEvent(new AgentEvent.ToolStarted("bash", "{\"command\":\"echo hi\"}", sessionId));
-                shellRegistry.onEvent(new AgentEvent.ToolStream("bash", "streamed line", sessionId));
-                shellRegistry.onEvent(new AgentEvent.ToolFinished("bash", "streamed line", true, sessionId));
-                shellRegistry.onEvent(new AgentEvent.TurnDone("done", sessionId));
+                shellRegistry.onEvent(
+                        new AgentEvent.ToolStarted("bash", "{\"command\":\"echo hi\"}", sessionId, eventWorkdir));
+                shellRegistry.onEvent(new AgentEvent.ToolStream("bash", "streamed line", sessionId, eventWorkdir));
+                shellRegistry.onEvent(
+                        new AgentEvent.ToolFinished("bash", "streamed line", true, sessionId, eventWorkdir));
+                shellRegistry.onEvent(new AgentEvent.TurnDone("done", sessionId, eventWorkdir));
                 return "ok";
             }
         };
@@ -881,7 +895,7 @@ class RunCommandTest {
                 new RunCommand.RunConf(
                         "say hi", "", "", false, "", "shown", "", "", "", "", 1000000, defaultCorrectionPrompt(), null),
                 shellRegistry,
-                runtimeFactory(agentLoop, new PermissionService(null)),
+                runtimeFactory(agentLoop, new PermissionService(null, testWorkdir)),
                 sessionStore(),
                 null,
                 mcpManager(),
@@ -892,7 +906,7 @@ class RunCommandTest {
 
         // streamed tool output must not be re-printed from ToolFinished.output
         awaitLog("streamed line");
-        assertEquals(1, logs().split("streamed line", -1).length - 1);
+        assertEquals(1, STREAMED_LINE.split(logs(), -1).length - 1);
     }
 
     @Test
@@ -918,7 +932,7 @@ class RunCommandTest {
                         defaultCorrectionPrompt(),
                         null),
                 shellRegistry,
-                runtimeFactory(stubAgentLoop(), new PermissionService(null)),
+                runtimeFactory(stubAgentLoop(), new PermissionService(null, testWorkdir)),
                 sessionStore(),
                 new AgentProvider(configuration),
                 mcpManager(),
@@ -932,7 +946,7 @@ class RunCommandTest {
     private final AtomicReference<String> lastSessionIdUsed = new AtomicReference<>();
 
     private AgentLoop stubAgentLoop() {
-        return new AgentLoop() {
+        return new AgentLoop(testWorkdir) {
             @Override
             public String run(
                     final String prompt,
@@ -981,13 +995,14 @@ class RunCommandTest {
                         new BashPermissionsConfiguration(List.of(), "", 1024)))
                 .build();
         final var questions = List.of(new Question("choice", "Pick?", List.of("yes", "no"), false));
-        final var otherRuntime = runtimeFactory(stubAgentLoop(), new PermissionService(configuration))
-                .create("other");
+        final var otherRuntime = runtimeFactory(
+                        stubAgentLoop(), new PermissionService(configuration, (configuration).resolveWorkingDir()))
+                .create("other", temp);
         otherRuntime.feedback().setGate(asked -> Map.of("choice", "other-session"));
         final var active = new AtomicReference<SessionRuntime>();
         final var overrideCalls = new AtomicInteger();
         final var turns = new AtomicInteger();
-        final var loop = new AgentLoop() {
+        final var loop = new AgentLoop(testWorkdir) {
             @Override
             public String run(
                     final String prompt,
@@ -1013,7 +1028,10 @@ class RunCommandTest {
                                         null,
                                         null,
                                         null,
-                                        cancelled));
+                                        cancelled,
+                                        null,
+                                        null,
+                                        testWorkdir));
                 assertTrue(result.success());
                 if (override) {
                     assertEquals("{\"choice\":\"yes\"}", result.output());
@@ -1034,9 +1052,15 @@ class RunCommandTest {
         };
         final var factory = new SessionRuntimeFactory() {
             @Override
-            public SessionRuntime create(final String sessionId) {
-                final var runtime = runtimeFactory(loop, new PermissionService(configuration))
-                        .create(sessionId);
+            public Path resolveWorkdir(final Path explicitWorkdir, final String resumedSessionId) {
+                return explicitWorkdir == null ? testWorkdir : explicitWorkdir;
+            }
+
+            @Override
+            public SessionRuntime create(final String sessionId, final Path workdir) {
+                final var runtime = runtimeFactory(
+                                loop, new PermissionService(configuration, (configuration).resolveWorkingDir()))
+                        .create(sessionId, workdir);
                 active.set(runtime);
                 return runtime;
             }
@@ -1115,7 +1139,12 @@ class RunCommandTest {
     private static SessionRuntimeFactory runtimeFactory(final AgentLoop loop, final PermissionService permissions) {
         return new SessionRuntimeFactory() {
             @Override
-            public SessionRuntime create(final String sessionId) {
+            public Path resolveWorkdir(final Path explicitWorkdir, final String resumedSessionId) {
+                return explicitWorkdir == null ? testWorkdir : explicitWorkdir;
+            }
+
+            @Override
+            public SessionRuntime create(final String sessionId, final Path workdir) {
                 return new SessionRuntime(
                         loop,
                         permissions,
@@ -1124,7 +1153,8 @@ class RunCommandTest {
                         new InMemoryTodoStore(),
                         new StatusReporter(),
                         null,
-                        null);
+                        null,
+                        workdir);
             }
         };
     }
@@ -1146,7 +1176,7 @@ class RunCommandTest {
     @Test
     void displayOnlyUsageRefreshDoesNotCountAsRequest() throws Exception {
         final var shellRegistry = testRegistry();
-        final var agentLoop = new AgentLoop() {
+        final var agentLoop = new AgentLoop(testWorkdir) {
             @Override
             public String run(
                     final String prompt,
@@ -1156,11 +1186,11 @@ class RunCommandTest {
                     final BooleanSupplier cancelled) {
                 // synthetic display-only quota/context refresh (refreshUsage/pushUsageQuota at t0): even a
                 // NON-zero cumulative usage here must neither increment llmCalls nor add any token.
-                shellRegistry.onEvent(
-                        new AgentEvent.UsageUpdated(new Usage(10, 20, 30, 1, 0, 0, 0), 100, 5.0, sessionId));
+                shellRegistry.onEvent(new AgentEvent.UsageUpdated(
+                        new Usage(10, 20, 30, 1, 0, 0, 0), 100, 5.0, sessionId, eventWorkdir));
                 // a real request with NO usage reported must still count exactly once (skipping a
                 // zero-usage request on account of "no tokens" would be wrong).
-                shellRegistry.onEvent(new AgentEvent.LlmRequestCompleted(Usage.EMPTY, "m", 1, sessionId));
+                shellRegistry.onEvent(new AgentEvent.LlmRequestCompleted(Usage.EMPTY, "m", 1, sessionId, eventWorkdir));
                 return "ok";
             }
         };
@@ -1181,7 +1211,7 @@ class RunCommandTest {
                         defaultCorrectionPrompt(),
                         null),
                 shellRegistry,
-                runtimeFactory(agentLoop, new PermissionService(null)),
+                runtimeFactory(agentLoop, new PermissionService(null, testWorkdir)),
                 sessionStore(),
                 null,
                 mcpManager(),
@@ -1198,7 +1228,7 @@ class RunCommandTest {
     @Test
     void nonZeroDisplayRefreshDoesNotDoubleCountAndCumulativeUsageAggregatesOnce() throws Exception {
         final var shellRegistry = testRegistry();
-        final var agentLoop = new AgentLoop() {
+        final var agentLoop = new AgentLoop(testWorkdir) {
             @Override
             public String run(
                     final String prompt,
@@ -1207,14 +1237,14 @@ class RunCommandTest {
                     final List<Message> history,
                     final BooleanSupplier cancelled) {
                 // two real logical requests carrying per-request usage...
-                shellRegistry.onEvent(
-                        new AgentEvent.LlmRequestCompleted(new Usage(10, 20, 30, 1, 2, 3, 4), "m", 1, sessionId));
+                shellRegistry.onEvent(new AgentEvent.LlmRequestCompleted(
+                        new Usage(10, 20, 30, 1, 2, 3, 4), "m", 1, sessionId, eventWorkdir));
                 // ...with a display-only refresh re-publishing the same cumulative usage in between: this
                 // must add nothing (the OLD code added totalTokens=30 again as absolute + counted a call).
-                shellRegistry.onEvent(
-                        new AgentEvent.UsageUpdated(new Usage(10, 20, 30, 1, 2, 3, 4), 100, 5.0, sessionId));
-                shellRegistry.onEvent(
-                        new AgentEvent.LlmRequestCompleted(new Usage(5, 5, 10, 0, 0, 0, 0), "m", 2, sessionId));
+                shellRegistry.onEvent(new AgentEvent.UsageUpdated(
+                        new Usage(10, 20, 30, 1, 2, 3, 4), 100, 5.0, sessionId, eventWorkdir));
+                shellRegistry.onEvent(new AgentEvent.LlmRequestCompleted(
+                        new Usage(5, 5, 10, 0, 0, 0, 0), "m", 2, sessionId, eventWorkdir));
                 return "ok";
             }
         };
@@ -1235,7 +1265,7 @@ class RunCommandTest {
                         defaultCorrectionPrompt(),
                         null),
                 shellRegistry,
-                runtimeFactory(agentLoop, new PermissionService(null)),
+                runtimeFactory(agentLoop, new PermissionService(null, testWorkdir)),
                 sessionStore(),
                 null,
                 mcpManager(),
@@ -1263,7 +1293,7 @@ class RunCommandTest {
                 3,
                 providerTiming ? 1 : 0,
                 !providerTiming);
-        final var agentLoop = new AgentLoop() {
+        final var agentLoop = new AgentLoop(testWorkdir) {
             @Override
             public String run(
                     final String prompt,
@@ -1271,9 +1301,9 @@ class RunCommandTest {
                     final String sessionId,
                     final List<Message> history,
                     final BooleanSupplier cancelled) {
-                shellRegistry.onEvent(
-                        new AgentEvent.TurnMetrics(3, 100, 200, 150, 2, 2500, throughput, sessionId, null, null));
-                shellRegistry.onEvent(new AgentEvent.TurnDone("done", sessionId));
+                shellRegistry.onEvent(new AgentEvent.TurnMetrics(
+                        3, 100, 200, 150, 2, 2500, throughput, sessionId, null, null, eventWorkdir));
+                shellRegistry.onEvent(new AgentEvent.TurnDone("done", sessionId, eventWorkdir));
                 return "done";
             }
         };
@@ -1295,7 +1325,7 @@ class RunCommandTest {
                         defaultCorrectionPrompt(),
                         null),
                 shellRegistry,
-                runtimeFactory(agentLoop, new PermissionService(null)),
+                runtimeFactory(agentLoop, new PermissionService(null, testWorkdir)),
                 sessionStore(),
                 null,
                 mcpManager(),
@@ -1330,7 +1360,7 @@ class RunCommandTest {
 
     private static Map<String, String> metricFields(final String line) {
         final var fields = new HashMap<String, String>();
-        for (final var field : line.split("\\s+")) {
+        for (final var field : WHITESPACE.split(line)) {
             final var separator = field.indexOf('=');
             if (separator > 0) {
                 assertNull(

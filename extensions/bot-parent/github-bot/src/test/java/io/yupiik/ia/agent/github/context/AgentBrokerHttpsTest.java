@@ -41,6 +41,7 @@ import java.util.Properties;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.regex.Pattern;
 import javax.net.ssl.KeyManagerFactory;
 import javax.net.ssl.SSLContext;
 import org.junit.jupiter.api.AfterAll;
@@ -50,6 +51,10 @@ import org.junit.jupiter.api.io.TempDir;
 
 /** Real TLS and Git boundary test; no fake Git, permissive trust manager or TLS-verification bypass. */
 class AgentBrokerHttpsTest {
+    private static final Pattern FETCH_FAILURE = Pattern.compile(
+            "Broker source operation failed: stage=git_fetch code=GIT_EXIT processors=[0-9]+ commonPoolParallelism=[0-9]+\\n");
+    private static final Pattern VALIDATION_FAILURE = Pattern.compile(
+            "Broker source operation failed: stage=validation code=REJECTED processors=[0-9]+ commonPoolParallelism=[0-9]+\\n");
     private static final String STORE_PASSWORD = "changeit";
 
     @TempDir
@@ -188,12 +193,7 @@ class AgentBrokerHttpsTest {
                         environment,
                         "");
                 assertNotEquals(0, untrusted.exit());
-                assertTrue(
-                        untrusted
-                                .output()
-                                .matches(
-                                        "Broker source operation failed: stage=git_fetch code=GIT_EXIT processors=[0-9]+ commonPoolParallelism=[0-9]+\\n"),
-                        untrusted.output());
+                assertTrue(FETCH_FAILURE.matcher(untrusted.output()).matches(), untrusted.output());
                 assertTrue(
                         requests.stream().noneMatch(path -> path.contains("/git/")),
                         "Untrusted native TLS must not reach Git HTTP");
@@ -295,11 +295,7 @@ class AgentBrokerHttpsTest {
                         credential.replace(gitPath, gitPath + "/other"))) {
                     final var denied = run(repo, credentialCommand, environment, invalid);
                     assertNotEquals(0, denied.exit());
-                    assertTrue(
-                            denied.output()
-                                    .matches(
-                                            "Broker source operation failed: stage=validation code=REJECTED processors=[0-9]+ commonPoolParallelism=[0-9]+\\n"),
-                            denied.output());
+                    assertTrue(VALIDATION_FAILURE.matcher(denied.output()).matches(), denied.output());
                 }
                 for (final var file :
                         List.of(repo.resolve(".git/config"), repo.resolve(".git/yca-broker.properties"))) {

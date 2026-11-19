@@ -31,14 +31,19 @@ import io.yupiik.ia.agent.core.notifications.NotificationService;
 import io.yupiik.ia.agent.core.session.SessionStore;
 import io.yupiik.ia.agent.core.wiring.PrecisionDurationMarkerProvider;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 class TurnNotificationReporterTest {
+    @TempDir
+    private static Path eventWorkdir;
+
     @Test
     void emitTurnMetricsEmitsBothEventsAndSetsLastContent() {
         final var state = new TurnState();
@@ -60,7 +65,8 @@ class TurnNotificationReporterTest {
                 () -> "name",
                 lastContent::get,
                 lastContent::set,
-                events::add);
+                events::add,
+                eventWorkdir);
 
         reporter.emitTurnMetrics("final answer", System.nanoTime() - TimeUnit.MILLISECONDS.toNanos(1234));
 
@@ -100,7 +106,8 @@ class TurnNotificationReporterTest {
                 () -> null,
                 lastContent::get,
                 lastContent::set,
-                events::add);
+                events::add,
+                eventWorkdir);
         reporter.emitTurnMetrics("  ", 0L);
         assertEquals(2, events.size(), "the metrics and the turn-done event are both emitted");
         assertFalse(lastContent.get(), "a blank content must record the turn ended without content");
@@ -122,7 +129,8 @@ class TurnNotificationReporterTest {
                 () -> null,
                 () -> false,
                 b -> {},
-                e -> {});
+                e -> {},
+                eventWorkdir);
         reporter.recordThroughput(Message.assistant("hello", List.of()), new Usage(10, 120, 130, 0, 0, 30, 250), 850);
         assertEquals(120, state.outputTokens);
         assertEquals(30, state.reasoningTokens);
@@ -147,7 +155,8 @@ class TurnNotificationReporterTest {
                 () -> null,
                 () -> false,
                 b -> {},
-                e -> {});
+                e -> {},
+                eventWorkdir);
         reporter.recordThroughput(Message.assistant("hello world", List.of()), Usage.EMPTY, 100);
         assertTrue(state.outputEstimated);
         assertTrue(state.outputTokens > 0, "the produced tokens must be estimated from the content");
@@ -167,7 +176,8 @@ class TurnNotificationReporterTest {
                 () -> null,
                 () -> false,
                 b -> {},
-                e -> {});
+                e -> {},
+                eventWorkdir);
         final var call = new ToolCall(
                 "id1", "function", new ToolCall.FunctionCall("bash", "{\"command\":\"echo hello\"}"), null);
         reporter.recordThroughput(Message.assistant("", List.of(call)), Usage.EMPTY, 100);
@@ -236,7 +246,8 @@ class TurnNotificationReporterTest {
                 () -> null,
                 () -> true,
                 b -> {},
-                e -> {});
+                e -> {},
+                eventWorkdir);
         reporter.emitTurnEndNotification("s1", List.of(Message.assistant("done", List.of())));
         assertEquals(1, sent.size());
         final var payload = sent.get(0);
@@ -258,7 +269,8 @@ class TurnNotificationReporterTest {
                 () -> null,
                 () -> false,
                 b -> {},
-                e -> {});
+                e -> {},
+                eventWorkdir);
         reporter.emitTurnEndNotification("s1", List.of());
         // nothing to assert beyond no NPE
     }

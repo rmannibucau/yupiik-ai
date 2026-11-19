@@ -34,10 +34,13 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ThreadLocalRandom;
+import java.util.regex.Pattern;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 class AttemptServicesTest {
+    private static final Pattern COMPLETIONS_URL =
+            Pattern.compile("https://attempt-services\\.yca\\.internal:8443/inference/[0-9a-f-]{36}/chat/completions");
     private static final String ROUTE = "/context/11111111-2222-3333-4444-555555555555/rpc";
     private static final Map<String, String> CONTEXT =
             Map.of("YCA_CONTEXT_TOKEN", "c".repeat(43), "YCA_CONTEXT_GIT_TOKEN", "g".repeat(43));
@@ -357,11 +360,9 @@ class AttemptServicesTest {
                 final var selected = TaskStore.map(entries.getFirst());
                 assertEquals("test-model", selected.get("model"));
                 assertEquals("COMPLETIONS", selected.get("api"));
-                assertTrue(
-                        selected.get("baseUrl")
-                                .toString()
-                                .matches(
-                                        "https://attempt-services\\.yca\\.internal:8443/inference/[0-9a-f-]{36}/chat/completions"));
+                assertTrue(COMPLETIONS_URL
+                        .matcher(selected.get("baseUrl").toString())
+                        .matches());
                 assertEquals(selected.get("apiKey"), services.credentials().get("YCA_SERVICES_PROVIDER_TOKEN"));
                 assertEquals("upstream-secret", services.credentials().get("YCA_SERVICES_UPSTREAM_TOKEN"));
                 assertEquals(

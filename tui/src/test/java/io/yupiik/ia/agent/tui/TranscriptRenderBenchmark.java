@@ -23,6 +23,7 @@ import io.yupiik.ia.agent.core.agent.AgentEvent;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration$FusionConfigurationFactory;
 import io.yupiik.ia.agent.core.shell.ThinkTagSplitter;
 import java.lang.management.ManagementFactory;
+import java.nio.file.Path;
 import java.time.Clock;
 import java.util.ArrayList;
 import java.util.List;
@@ -35,6 +36,8 @@ import java.util.Optional;
  * No provider requests, persistence, terminal, native binary or timing assertions.
  */
 public final class TranscriptRenderBenchmark {
+    private static final Path eventWorkdir = Path.of("/benchmark");
+
     private TranscriptRenderBenchmark() {}
 
     public static void main(final String[] args) throws Exception {
@@ -62,7 +65,7 @@ public final class TranscriptRenderBenchmark {
             final var ingestion = System.nanoTime();
             for (var i = 0; i < 109; i++) {
                 state.model.startUserTurn("synthetic turn " + i);
-                state.model.onEvent(new AgentEvent.TurnDone(payload, "mock", null, null));
+                state.model.onEvent(new AgentEvent.TurnDone(payload, "mock", null, null, eventWorkdir));
                 state.model.trim();
             }
 

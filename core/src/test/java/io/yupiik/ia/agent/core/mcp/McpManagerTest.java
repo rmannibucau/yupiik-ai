@@ -20,25 +20,29 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import io.yupiik.fusion.httpclient.core.ExtendedHttpClient;
-import io.yupiik.fusion.httpclient.core.ExtendedHttpClientConfiguration;
+import com.sun.net.httpserver.HttpExchange;
+import com.sun.net.httpserver.HttpServer;
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.McpConfiguration;
 import io.yupiik.ia.agent.core.configuration.McpServerConfiguration;
 import io.yupiik.ia.agent.core.configuration.MetricsConfiguration;
 import io.yupiik.ia.agent.core.configuration.MetricsDisplayMode;
+import io.yupiik.ia.agent.core.configuration.NativeProviderConfiguration;
 import io.yupiik.ia.agent.core.configuration.TestConfigs;
 import io.yupiik.ia.agent.core.tools.EmbeddedTool;
 import io.yupiik.ia.agent.core.tools.ToolCategory;
+import io.yupiik.ia.agent.core.tools.ToolContext;
 import io.yupiik.ia.agent.core.tools.ToolResult;
+import io.yupiik.ia.agent.core.wiring.HttpClientProducer;
+import io.yupiik.ia.agent.core.wiring.HttpClientProducer.SessionCapableClient;
 import io.yupiik.ia.agent.test.TestJsonMapper;
 import io.yupiik.maven.knowledge.process.ProcessService;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.net.InetSocketAddress;
-import java.net.http.HttpClient;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -61,26 +65,21 @@ import org.junit.jupiter.params.provider.ValueSource;
 @ExtendWith(TestJsonMapper.class)
 class McpManagerTest {
 
-    private com.sun.net.httpserver.HttpServer server;
+    private HttpServer server;
 
     private JsonMapper mapper;
     // shared per test class: each per-test client spawned/stopped a selector thread
-    private static HttpClient delegate;
-    private static ExtendedHttpClient httpClient;
+    private static SessionCapableClient httpClient;
 
     @BeforeAll
     static void bootClient() {
-        delegate = HttpClient.newBuilder().build();
-        httpClient = new ExtendedHttpClient(new ExtendedHttpClientConfiguration().setDelegate(delegate));
+        httpClient = new HttpClientProducer()
+                .httpClient(TestConfigs.codingAgent(Map.of()), new NativeProviderConfiguration(null, null));
     }
 
     @AfterAll
     static void stopClient() {
         httpClient.close();
-        // HttpResponse/completion is done at that point: the graceful shutdown can wait forever on a
-        // lingering (SSE/keep-alive) connection of the test server, so abort the selector first.
-        delegate.shutdownNow();
-        delegate.close();
     }
 
     @BeforeEach
@@ -98,7 +97,7 @@ class McpManagerTest {
     @Test
     void startResetAndCall() throws Exception {
         final var initializations = new AtomicInteger();
-        server = com.sun.net.httpserver.HttpServer.create(new InetSocketAddress("localhost", 0), 0);
+        server = HttpServer.create(new InetSocketAddress("localhost", 0), 0);
         server.createContext("/mcp", exchange -> {
             final var body = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
             if (body.contains("\"method\":\"initialize\"")) {
@@ -106,7 +105,7 @@ class McpManagerTest {
                 respond(
                         exchange,
                         200,
-                        "{\"result\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{\"tools\":{\"listChanged\":true}},\"serverInfo\":{\"name\":\"test\",\"version\":\"1\"}},\"id\":1}",
+                        "{\"jsonrpc\":\"2.0\",\"result\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{\"tools\":{\"listChanged\":true}},\"serverInfo\":{\"name\":\"test\",\"version\":\"1\"}},\"id\":1}",
                         "application/json");
             } else if (body.contains("\"method\":\"notifications/initialized\"")) {
                 exchange.getResponseHeaders().set("content-type", "application/json");
@@ -116,13 +115,13 @@ class McpManagerTest {
                 respond(
                         exchange,
                         200,
-                        "{\"result\":{\"tools\":[{\"name\":\"find_docs\",\"description\":\"find docs\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"q\":{\"type\":\"string\"}}}}]},\"id\":2}",
+                        "{\"jsonrpc\":\"2.0\",\"result\":{\"tools\":[{\"name\":\"find_docs\",\"description\":\"find docs\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"q\":{\"type\":\"string\"}}}}]},\"id\":2}",
                         "application/json");
             } else if (body.contains("\"method\":\"tools/call\"")) {
                 respond(
                         exchange,
                         200,
-                        "{\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"hello from server\"}]},\"id\":3}",
+                        "{\"jsonrpc\":\"2.0\",\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"hello from server\"}]},\"id\":3}",
                         "application/json");
             } else {
                 respond(
@@ -188,7 +187,7 @@ class McpManagerTest {
         // McpManager twice (two bean instances) or fire start() twice, which used to reconnect every
         // MCP server and duplicate the "ready" startup logs. A re-entrant start() must be a no-op.
         final var initializations = new AtomicInteger();
-        server = com.sun.net.httpserver.HttpServer.create(new InetSocketAddress("localhost", 0), 0);
+        server = HttpServer.create(new InetSocketAddress("localhost", 0), 0);
         server.createContext("/mcp", exchange -> {
             final var body = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
             if (body.contains("\"method\":\"initialize\"")) {
@@ -196,13 +195,13 @@ class McpManagerTest {
                 respond(
                         exchange,
                         200,
-                        "{\"result\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{},\"serverInfo\":{\"name\":\"test\",\"version\":\"1\"}},\"id\":1}",
+                        "{\"jsonrpc\":\"2.0\",\"result\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{},\"serverInfo\":{\"name\":\"test\",\"version\":\"1\"}},\"id\":1}",
                         "application/json");
             } else if (body.contains("\"method\":\"tools/list\"")) {
                 respond(
                         exchange,
                         200,
-                        "{\"result\":{\"tools\":[{\"name\":\"find_docs\",\"description\":\"find docs\",\"inputSchema\":{\"type\":\"object\"}}]},\"id\":2}",
+                        "{\"jsonrpc\":\"2.0\",\"result\":{\"tools\":[{\"name\":\"find_docs\",\"description\":\"find docs\",\"inputSchema\":{\"type\":\"object\"}}]},\"id\":2}",
                         "application/json");
             } else {
                 respond(exchange, 200, "{}", "application/json");
@@ -234,7 +233,7 @@ class McpManagerTest {
         // server has answered, while the first real use (tools()/call()) and close() join the
         // in-flight handshake.
         final var initializeGate = new CountDownLatch(1);
-        server = com.sun.net.httpserver.HttpServer.create(new InetSocketAddress("localhost", 0), 0);
+        server = HttpServer.create(new InetSocketAddress("localhost", 0), 0);
         server.createContext("/mcp", exchange -> {
             final var body = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
             if (body.contains("\"method\":\"initialize\"")) {
@@ -251,13 +250,13 @@ class McpManagerTest {
                 respond(
                         exchange,
                         200,
-                        "{\"result\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{},\"serverInfo\":{\"name\":\"test\",\"version\":\"1\"}},\"id\":1}",
+                        "{\"jsonrpc\":\"2.0\",\"result\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{},\"serverInfo\":{\"name\":\"test\",\"version\":\"1\"}},\"id\":1}",
                         "application/json");
             } else if (body.contains("\"method\":\"tools/list\"")) {
                 respond(
                         exchange,
                         200,
-                        "{\"result\":{\"tools\":[{\"name\":\"find_docs\",\"description\":\"find docs\",\"inputSchema\":{\"type\":\"object\"}}]},\"id\":2}",
+                        "{\"jsonrpc\":\"2.0\",\"result\":{\"tools\":[{\"name\":\"find_docs\",\"description\":\"find docs\",\"inputSchema\":{\"type\":\"object\"}}]},\"id\":2}",
                         "application/json");
             } else {
                 respond(exchange, 200, "{}", "application/json");
@@ -298,7 +297,7 @@ class McpManagerTest {
     }
 
     @Test
-    void builtinsAreServedInProcessWithoutMcpWrapping() {
+    void builtinsAreServedInProcessWithoutMcpWrapping(@org.junit.jupiter.api.io.TempDir final Path root) {
         final var base = TestConfigs.codingAgent(Map.of());
         final var manager = new McpManager(
                 base,
@@ -310,7 +309,7 @@ class McpManagerTest {
                     }
 
                     @Override
-                    public String description() {
+                    public String description(final Path workdir) {
                         return "probe tool";
                     }
 
@@ -325,7 +324,7 @@ class McpManagerTest {
                     }
 
                     @Override
-                    public ToolResult execute(final Map<String, Object> args) {
+                    public ToolResult execute(final Map<String, Object> args, final ToolContext context) {
                         return ToolResult.error("File not found: nope.txt. Did you mean: nope.md?");
                     }
                 }),
@@ -336,7 +335,7 @@ class McpManagerTest {
         final var tools = manager.tools();
         assertEquals(1, tools.size());
         assertEquals("probe", tools.get(0).name());
-        final var result = tools.get(0).execute(Map.of());
+        final var result = tools.get(0).execute(Map.of(), ToolContext.empty(root));
         assertFalse(result.success());
         assertEquals("File not found: nope.txt. Did you mean: nope.md?", result.output());
         assertTrue(
@@ -468,7 +467,7 @@ class McpManagerTest {
 
     private void bootProbeServer(final AtomicInteger initializations, final CountDownLatch initializeGate)
             throws IOException {
-        server = com.sun.net.httpserver.HttpServer.create(new InetSocketAddress("localhost", 0), 0);
+        server = HttpServer.create(new InetSocketAddress("localhost", 0), 0);
         server.createContext("/mcp", exchange -> {
             final var body = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
             if (body.contains("\"method\":\"initialize\"")) {
@@ -486,19 +485,25 @@ class McpManagerTest {
                 respond(
                         exchange,
                         200,
-                        "{\"result\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{},\"serverInfo\":{\"name\":\"test\",\"version\":\"1\"}},\"id\":1}",
+                        "{\"jsonrpc\":\"2.0\",\"result\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{},\"serverInfo\":{\"name\":\"test\",\"version\":\"1\"}},\"id\":1}",
                         "application/json");
             } else if (body.contains("\"method\":\"tools/list\"")) {
                 respond(
                         exchange,
                         200,
-                        "{\"result\":{\"tools\":[{\"name\":\"probe\",\"description\":\"probe\",\"inputSchema\":{\"type\":\"object\"}}]},\"id\":2}",
+                        "{\"jsonrpc\":\"2.0\",\"result\":{\"tools\":[{\"name\":\"probe\",\"description\":\"probe\",\"inputSchema\":{\"type\":\"object\"}}]},\"id\":2}",
                         "application/json");
             } else if (body.contains("\"method\":\"tools/call\"")) {
                 respond(
                         exchange,
                         200,
-                        "{\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"probe result\"}]},\"id\":3}",
+                        mapper.toString(Map.of(
+                                "jsonrpc",
+                                "2.0",
+                                "id",
+                                ((Map<?, ?>) mapper.fromString(Object.class, body)).get("id"),
+                                "result",
+                                Map.of("content", List.of(Map.of("type", "text", "text", "probe result"))))),
                         "application/json");
             } else {
                 respond(exchange, 200, "{}", "application/json");
@@ -548,10 +553,7 @@ class McpManagerTest {
     }
 
     private static void respond(
-            final com.sun.net.httpserver.HttpExchange exchange,
-            final int status,
-            final String body,
-            final String contentType) {
+            final HttpExchange exchange, final int status, final String body, final String contentType) {
         try {
             exchange.getRequestBody().readAllBytes();
             final var bytes = body.getBytes(StandardCharsets.UTF_8);

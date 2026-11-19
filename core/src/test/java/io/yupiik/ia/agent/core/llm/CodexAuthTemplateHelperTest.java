@@ -20,6 +20,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import io.yupiik.fusion.framework.api.ConfiguringContainer;
 import io.yupiik.fusion.framework.api.RuntimeContainer;
@@ -42,6 +43,8 @@ import io.yupiik.ia.agent.core.security.SecretVault;
 import io.yupiik.ia.agent.core.shell.CodexLoginDispatcherRegistrar;
 import io.yupiik.ia.agent.core.shell.ShellRegistry;
 import io.yupiik.ia.agent.test.TestJsonMapper;
+import io.yupiik.llm.client.codex.CodexAgentIdentityConfig;
+import io.yupiik.llm.client.codex.CodexNotAuthenticatedException;
 import io.yupiik.llm.client.codex.CodexOAuthConfig;
 import io.yupiik.llm.client.codex.Ed25519Util;
 import io.yupiik.llm.client.codex.model.AgentIdentityRecord;
@@ -56,10 +59,14 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BiPredicate;
 import java.util.function.Function;
+import java.util.regex.Pattern;
 import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -68,6 +75,7 @@ import org.junit.jupiter.api.io.TempDir;
 /** Tests the {@code {{codexAuth}}} dynamic-header helper: token store persistence and lazy refresh. */
 @ExtendWith(TestJsonMapper.class)
 class CodexAuthTemplateHelperTest {
+    private static final Pattern TASK_REGISTRATION = Pattern.compile(".*/v1/agent/[^/]+/task/register");
 
     private HttpServer issuer;
     private String issuerUrl;
@@ -78,10 +86,8 @@ class CodexAuthTemplateHelperTest {
     private ExtendedHttpClient client;
     private HttpClient delegate;
     private final AtomicInteger refreshCalls = new AtomicInteger();
-    private final java.util.concurrent.atomic.AtomicReference<String> lastRefreshBody =
-            new java.util.concurrent.atomic.AtomicReference<>();
-    private final java.util.concurrent.atomic.AtomicBoolean failRefresh =
-            new java.util.concurrent.atomic.AtomicBoolean();
+    private final AtomicReference<String> lastRefreshBody = new AtomicReference<>();
+    private final AtomicBoolean failRefresh = new AtomicBoolean();
 
     @BeforeEach
     void start() throws IOException {
@@ -106,7 +112,7 @@ class CodexAuthTemplateHelperTest {
         });
         // mock Agent Identity run-task registration for the lazy re-registration test
         issuer.createContext("/v1/agent", exchange -> {
-            if (exchange.getRequestURI().getPath().matches(".*/v1/agent/[^/]+/task/register")) {
+            if (TASK_REGISTRATION.matcher(exchange.getRequestURI().getPath()).matches()) {
                 respond(exchange, 200, "{\"task_id\":\"fresh-task\"}");
             } else if (exchange.getRequestURI().getPath().endsWith("/v1/agent/register")) {
                 respond(exchange, 200, "{\"agent_runtime_id\":\"runtime-lazy\"}");
@@ -152,8 +158,7 @@ class CodexAuthTemplateHelperTest {
         assertEquals("new", helper.resolveCredentials("p").accessToken());
         assertEquals("new-account", helper.resolveCredentials("p").accountId());
         Files.delete(storage.resolve("providers/p/codex.auth.json"));
-        assertThrows(
-                io.yupiik.llm.client.codex.CodexNotAuthenticatedException.class, () -> helper.resolveCredentials("p"));
+        assertThrows(CodexNotAuthenticatedException.class, () -> helper.resolveCredentials("p"));
     }
 
     @Test
@@ -236,7 +241,7 @@ class CodexAuthTemplateHelperTest {
                     final var store = new CodexTokenStore("dispatched-token", "refresh", "acc", farFuture(), "id");
                     seed(mapper, providerName, store);
                     return store;
-                } catch (final java.io.IOException e) {
+                } catch (final IOException e) {
                     throw new IllegalStateException(e);
                 }
             }
@@ -287,9 +292,8 @@ class CodexAuthTemplateHelperTest {
     @Test
     void missingSessionFailsLoudly(final JsonMapper mapper) {
         final var helper = helper(mapper);
-        final var e = assertThrows(
-                io.yupiik.llm.client.codex.CodexNotAuthenticatedException.class,
-                () -> render(helper, "{{codexAuth \"absent\"}}"));
+        final var e =
+                assertThrows(CodexNotAuthenticatedException.class, () -> render(helper, "{{codexAuth \"absent\"}}"));
         assertEquals("absent", e.provider());
         assertTrue(e.getMessage().contains("interactive login"), e.getMessage());
     }
@@ -304,21 +308,19 @@ class CodexAuthTemplateHelperTest {
         // first prove the refresh actually fails without a dispatcher (loudly)
         final var preliminary =
                 assertThrows(IllegalStateException.class, () -> render(helper, "{{codexAuth \"revoked-p\"}}"));
-        org.junit.jupiter.api.Assertions.assertTrue(
-                preliminary.getMessage().contains("Codex OAuth HTTP 400"), preliminary.getMessage());
+        Assertions.assertTrue(preliminary.getMessage().contains("Codex OAuth HTTP 400"), preliminary.getMessage());
         // now register the dispatcher and re-render: the refresh failure must transparently re-login
         helper.setCodexLoginDispatcher(providerName -> {
             try {
                 final var fresh = new CodexTokenStore("re-signed-token", "refresh-2", "acc", farFuture(), "id");
                 seed(mapper, providerName, fresh);
                 return fresh;
-            } catch (final java.io.IOException e) {
+            } catch (final IOException e) {
                 throw new IllegalStateException(e);
             }
         });
         assertEquals("re-signed-token", render(helper, "{{codexAuth \"revoked-p\"}}"));
-        org.junit.jupiter.api.Assertions.assertTrue(
-                refreshCalls.get() >= 1, "the failed refresh must have been attempted");
+        Assertions.assertTrue(refreshCalls.get() >= 1, "the failed refresh must have been attempted");
         // the re-signed store is persisted over the revoked one
         final CodexTokenStore saved = mapper.fromBytes(
                 CodexTokenStore.class, Files.readAllBytes(storage.resolve("providers/revoked-p/codex.auth.json")));
@@ -421,8 +423,7 @@ class CodexAuthTemplateHelperTest {
         // a plain OAuth session (no Agent Identity yet) self-enrolls lazily on the first
         // {{codexAgentAssertion}} render: register + registerTask against the mock auth API
         seed(mapper, "plain-agent", new CodexTokenStore("access", "refresh", "acc", farFuture(), "id"));
-        final var agentConfig =
-                new io.yupiik.llm.client.codex.CodexAgentIdentityConfig(issuerUrl, issuerUrl, null, null);
+        final var agentConfig = new CodexAgentIdentityConfig(issuerUrl, issuerUrl, null, null);
         final var helper = helper(mapper, agentConfig);
         final var rendered = render(
                 helper,
@@ -442,8 +443,7 @@ class CodexAuthTemplateHelperTest {
         // after the first lazy enrollment a second render reuses the stored identity; the mock's
         // register counter must not grow (no device-identity churn on repeated renders)
         seed(mapper, "plain-again", new CodexTokenStore("access", "refresh", "acc", farFuture(), "id"));
-        final var agentConfig =
-                new io.yupiik.llm.client.codex.CodexAgentIdentityConfig(issuerUrl, issuerUrl, null, null);
+        final var agentConfig = new CodexAgentIdentityConfig(issuerUrl, issuerUrl, null, null);
         final var helper = helper(mapper, agentConfig);
         final var first = render(
                 helper,
@@ -528,8 +528,7 @@ class CodexAuthTemplateHelperTest {
                                 "enterprise",
                                 false,
                                 null))); // no task id -> needs re-registration
-        final var agentConfig =
-                new io.yupiik.llm.client.codex.CodexAgentIdentityConfig(issuerUrl, issuerUrl, null, null);
+        final var agentConfig = new CodexAgentIdentityConfig(issuerUrl, issuerUrl, null, null);
         final var helper = helper(mapper, agentConfig);
         final var rendered = render(
                 helper,
@@ -592,8 +591,7 @@ class CodexAuthTemplateHelperTest {
         return helper(mapper, null);
     }
 
-    private CodexAuthTemplateHelper helper(
-            final JsonMapper mapper, final io.yupiik.llm.client.codex.CodexAgentIdentityConfig agentConfig) {
+    private CodexAuthTemplateHelper helper(final JsonMapper mapper, final CodexAgentIdentityConfig agentConfig) {
         final var helper = new CodexAuthTemplateHelper(mapper, client, config());
         helper.setOAuthConfig(oauthConfig());
         if (agentConfig != null) {
@@ -630,8 +628,7 @@ class CodexAuthTemplateHelperTest {
         return template.render(Map.of());
     }
 
-    private static void respond(final com.sun.net.httpserver.HttpExchange exchange, final int status, final String body)
-            throws IOException {
+    private static void respond(final HttpExchange exchange, final int status, final String body) throws IOException {
         final byte[] bytes = body.getBytes(StandardCharsets.UTF_8);
         exchange.getResponseHeaders().set("content-type", "application/json");
         exchange.sendResponseHeaders(status, bytes.length);

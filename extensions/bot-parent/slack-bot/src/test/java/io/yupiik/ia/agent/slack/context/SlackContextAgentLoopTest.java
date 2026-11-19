@@ -458,7 +458,7 @@ class SlackContextAgentLoopTest {
                     try (final var chat = new ChatClient(configuration, json, providers, clock, http)) {
                         final var sessions = new FileSessionStore(configuration, json, clock);
                         final var sessionId = sessions.create();
-                        final var permissions = new PermissionService(configuration);
+                        final var permissions = new PermissionService(configuration, workdir);
                         final var usage = new UsageTracker(
                                 providers, chat, new ContextWindowCache(configuration, json, clock), clock);
                         final var todos = new InMemoryTodoStore();
@@ -473,13 +473,13 @@ class SlackContextAgentLoopTest {
                         };
                         final var agents = new AgentProvider(configuration);
                         final var system = new SystemPromptBuilder(
-                                configuration, null, todos, permissions, agents, providers, null, null, null);
-                        system.workdir(workdir);
+                                configuration, null, todos, permissions, agents, providers, null, null, null, workdir);
+
                         final var tool = new SlackContextTool(new SlackContextClient(
                                 new AgentSlackContextConfiguration(
                                         true, mailbox.toString(), (String) context.get("channel"), 15),
                                 json));
-                        final var mcp = new McpManager(configuration, json, List.of(tool), http, null);
+                        final var mcp = new McpManager(configuration, json, List.of(tool), null, null);
                         try {
                             final var loop = new AgentLoop(
                                     chat,
@@ -506,7 +506,8 @@ class SlackContextAgentLoopTest {
                                             sessionId,
                                             null,
                                             null,
-                                            null),
+                                            null,
+                                            workdir),
                                     new StatusReporter(),
                                     emitter,
                                     json,
@@ -518,9 +519,10 @@ class SlackContextAgentLoopTest {
                                     null,
                                     todos,
                                     null,
-                                    null);
+                                    null,
+                                    workdir);
                             try {
-                                loop.sessionWorkdir(workdir);
+
                                 final var answer = loop.run(prompt, "build", sessionId, List.of(), () -> false);
                                 assertEquals(
                                         FINAL + " " + permalink,

@@ -31,6 +31,7 @@ import io.yupiik.ia.agent.core.llm.Message;
 import io.yupiik.ia.agent.core.mcp.McpManager;
 import io.yupiik.ia.agent.core.session.AgentSessionService;
 import io.yupiik.ia.agent.core.session.SessionStore;
+import io.yupiik.ia.agent.core.shell.SessionRuntimeFactory;
 import io.yupiik.ia.agent.core.shell.slash.ArgCompletion;
 import io.yupiik.ia.agent.core.shell.slash.CompletionEngine;
 import io.yupiik.ia.agent.core.shell.slash.SlashRegistry;
@@ -66,8 +67,10 @@ public class WebJsonRpc {
     private final SlashRegistry slashRegistry;
     private final ChatClient chatClient;
     private final ProviderManager providerManager;
-    private final CompletionEngine completionEngine;
+    private final AgentProvider agentProvider;
     private final WebCommand.WebConf webConf;
+    private final SessionRuntimeFactory sessionRuntimeFactory;
+    private final Path invocationWorkdir;
 
     public WebJsonRpc(
             final SessionStore sessionStore,
@@ -81,7 +84,8 @@ public class WebJsonRpc {
             final ChatClient chatClient,
             final ProviderManager providerManager,
             final AgentProvider agentProvider,
-            final WebCommand.WebConf webConf) {
+            final WebCommand.WebConf webConf,
+            final SessionRuntimeFactory sessionRuntimeFactory) {
         this.sessionStore = sessionStore;
         this.agentSessionService = agentSessionService;
         this.sessions = sessions;
@@ -92,11 +96,17 @@ public class WebJsonRpc {
         this.slashRegistry = slashRegistry == null ? null : slashRegistry.registry();
         this.chatClient = chatClient;
         this.providerManager = providerManager;
+        this.agentProvider = agentProvider;
         this.webConf = webConf;
-        this.completionEngine = new CompletionEngine(this.slashRegistry, new ArgCompletion.Env() {
+        this.sessionRuntimeFactory = sessionRuntimeFactory;
+        this.invocationWorkdir = sessionRuntimeFactory.resolveWorkdir(null, null);
+    }
+
+    private CompletionEngine completionEngine(final Path workdir, final ChatSettings settings) {
+        return new CompletionEngine(slashRegistry, new ArgCompletion.Env() {
             @Override
             public List<String> models() {
-                return modelsOf(chatClient);
+                return modelsOf(chatClient, settings);
             }
 
             @Override
@@ -126,17 +136,17 @@ public class WebJsonRpc {
 
             @Override
             public List<String> variants(final String model) {
-                return variantsOf(chatClient, model);
+                return variantsOf(chatClient, model == null || model.isBlank() ? settings : settings.withModel(model));
             }
 
             @Override
             public List<String> variants() {
-                return variantsOf(chatClient, chatClient == null ? null : chatClient.model());
+                return variantsOf(chatClient, settings);
             }
 
             @Override
             public List<String> paths(final String token) {
-                return CompletionEngine.pathCandidates(token);
+                return CompletionEngine.pathCandidates(token, workdir);
             }
         });
     }
@@ -246,7 +256,7 @@ public class WebJsonRpc {
 
     @JsonRpc(value = "sessions.currentProject", documentation = "Returns the current working/project directory.")
     public Map<String, String> currentProject() {
-        return Map.of("project", currentProjectDir() == null ? "" : currentProjectDir());
+        return Map.of("project", invocationWorkdir.toString());
     }
 
     @JsonRpc(value = "sessions.get", documentation = "Returns the full message list of a session.")
@@ -269,12 +279,11 @@ public class WebJsonRpc {
             @JsonRpcParam(required = true, documentation = "Session id.") final String id,
             @JsonRpcParam(required = true, documentation = "The prompt to send.") final String prompt,
             @JsonRpcParam(documentation = "Optional custom agent name (yca.agents).") final String agent) {
+        // Install the default before creating a runtime so its tools and prompt resolve the same
+        // project as the persisted marker. markProject preserves an existing/restored session root.
+        final var workdir = sessions.isAttached(id) ? sessions.runtime(id).workdir() : invocationWorkdir;
+        sessionStore.markProject(id, workdir.toString());
         sessions.attach(id);
-        // record the working directory on this session so the home page can group it by project
-        final var dir = currentProjectDir();
-        if (dir != null) {
-            sessionStore.markProject(id, dir);
-        }
         sessions.submit(id, prompt, blankToNull(agent));
         return Map.of("submitted", true);
     }
@@ -338,12 +347,12 @@ public class WebJsonRpc {
     public ToolListingDto tools(
             @JsonRpcParam(documentation = "Space-separated lowercase filters matched against server_tool keys.")
                     final String query) {
-        return toDto(agentSessionService.tools(query == null ? "" : query));
+        return toDto(agentSessionService.tools(query == null ? "" : query, invocationWorkdir));
     }
 
     @JsonRpc(value = "memory.get", documentation = "Reads the global and project memory and their resolved file paths.")
     public MemoryDto memory() {
-        final var content = agentSessionService.memory();
+        final var content = agentSessionService.memory(invocationWorkdir);
         return new MemoryDto(
                 content.global(),
                 content.project(),
@@ -432,9 +441,11 @@ public class WebJsonRpc {
         if (dir == null || dir.isBlank()) {
             return Map.of("ok", false, "error", "directory is required");
         }
-        final var normalized = Path.of(dir).toAbsolutePath().normalize();
-        if (!Files.isDirectory(normalized)) {
-            return Map.of("ok", false, "error", "not a directory: " + normalized);
+        final Path normalized;
+        try {
+            normalized = sessionRuntimeFactory.resolveWorkdir(Path.of(dir), null);
+        } catch (final IllegalArgumentException e) {
+            return Map.of("ok", false, "error", e.getMessage());
         }
         // persist the new marker (replaceProject handles the case where one already exists) ...
         sessionStore.replaceProject(id, normalized.toString());
@@ -448,7 +459,7 @@ public class WebJsonRpc {
             @JsonRpcParam(required = true, documentation = "Session id.") final String id) {
         // a session has its own recorded project (set via session.setProject / recorded on submit) which
         // may differ from the process-level project dir; report the branch of THAT dir, not the global cwd.
-        return Map.of("branch", gitBranchOf(projectDirOf(id)));
+        return Map.of("branch", gitBranchOf(sessions.runtime(id).workdir().toString()));
     }
 
     @JsonRpc(
@@ -461,7 +472,7 @@ public class WebJsonRpc {
             @JsonRpcParam(required = true, documentation = "Session id.") final String id) {
         final var runtime = sessions.runtime(id);
         final var chatSettings = runtime.chatSettings();
-        final var dir = projectDirOf(id);
+        final var dir = runtime.workdir().toString();
         final var info = agentSessionService.permissionsInfo(runtime);
         return new SessionMetadataDto(
                 id,
@@ -470,7 +481,7 @@ public class WebJsonRpc {
                         ? ""
                         : safe(() -> chatClient.flavor(chatSettings).name()),
                 chatClient == null ? "" : safe(() -> chatClient.providerId(chatSettings)),
-                dir == null ? "" : dir,
+                dir,
                 gitBranchOf(dir),
                 lowerEnum(info.agentMode()),
                 lowerEnum(info.permissionMode()),
@@ -664,9 +675,16 @@ public class WebJsonRpc {
             value = "slash.complete",
             documentation = "Completes a slash command (or its argument) at the given cursor position.")
     public List<CompletionSuggestion> slashComplete(
+            @JsonRpcParam(required = true, documentation = "Session id.") final String id,
             @JsonRpcParam(required = true, documentation = "Full prompt text.") final String text,
             @JsonRpcParam(required = true, documentation = "Cursor column into text.") final int cursor) {
-        final var suggestion = completionEngine.suggest(text == null ? "" : text, Math.max(0, cursor));
+        if (id == null || id.isBlank()) {
+            throw new IllegalArgumentException("session id is required");
+        }
+        final var runtime = sessions.runtime(id);
+        final var engine = completionEngine(runtime.workdir(), runtime.chatSettings());
+        final var prompt = text == null ? "" : text;
+        final var suggestion = engine.suggest(prompt, Math.min(prompt.length(), Math.max(0, cursor)));
         return List.of(new CompletionSuggestion(
                 suggestion.items() == null ? List.of() : suggestion.items(),
                 suggestion.replaceStart(),
@@ -676,7 +694,7 @@ public class WebJsonRpc {
 
     @JsonRpc(value = "codeGraph.status", documentation = "Reports the structural code graph freshness and statistics.")
     public Map<String, Object> codeGraphStatus() {
-        final var text = codeGraph.freshness();
+        final var text = codeGraph.freshness(invocationWorkdir);
         final var enabled = !text.startsWith("disabled");
         final var parts = new LinkedHashMap<String, Object>();
         parts.put("enabled", enabled);
@@ -692,7 +710,10 @@ public class WebJsonRpc {
     public Map<String, String> codeGraphResync(
             @JsonRpcParam(documentation = "Optional session project root to resync (defaults to the process project).")
                     final String root) {
-        return Map.of("status", codeGraph.resync(root == null || root.isBlank() ? null : Path.of(root)));
+        final var workdir = root == null || root.isBlank()
+                ? invocationWorkdir
+                : sessionRuntimeFactory.resolveWorkdir(Path.of(root), null);
+        return Map.of("status", codeGraph.resync(workdir));
     }
 
     @JsonRpc(
@@ -703,10 +724,11 @@ public class WebJsonRpc {
                     final String symbol,
             @JsonRpcParam(documentation = "Max results, default 20.") final Integer max) {
         final var limit = max == null || max < 1 ? 20 : Math.min(max, 200);
+        final var workdir = invocationWorkdir;
         final var result = new ArrayList<Map<String, Object>>();
         if (codeGraph.enabled()) {
-            codeGraph.ensureRefreshedReady();
-            final var index = codeGraph.queryIndex();
+            codeGraph.ensureRefreshedReady(workdir);
+            final var index = codeGraph.queryIndex(workdir);
             if (index != null) {
                 final var resolved = index.resolve(symbol);
                 if (resolved != null) {
@@ -733,10 +755,6 @@ public class WebJsonRpc {
 
     // ---- slash completion value sources (mirror the TUI SlashCommandCompleter) ----
 
-    private static List<String> modelsOf(final ChatClient chatClient) {
-        return modelsOf(chatClient, null);
-    }
-
     /**
      * Models for the <em>session's</em> effective provider. Passing the session's {@code chatSettings}
      * (rather than none) makes {@link ChatClient#models} resolve and cache the model list against the
@@ -748,7 +766,7 @@ public class WebJsonRpc {
             return List.of();
         }
         try {
-            final var res = settings == null ? chatClient.models() : chatClient.models(settings);
+            final var res = chatClient.models(settings);
             final var ids = res.ids();
             return ids == null ? List.of() : ids;
         } catch (final Exception e) {
@@ -828,13 +846,13 @@ public class WebJsonRpc {
         }
     }
 
-    private static List<String> variantsOf(final ChatClient chatClient, final String model) {
+    private static List<String> variantsOf(final ChatClient chatClient, final ChatSettings settings) {
         try {
             if (chatClient == null) {
                 return List.of();
             }
-            final var variants = chatClient.variants(model);
-            final var hasDefault = chatClient.implicitVariant(model) != null;
+            final var variants = chatClient.variants(settings);
+            final var hasDefault = chatClient.implicitVariant(settings) != null;
             final var size = (variants == null ? 0 : variants.size()) + (hasDefault ? 1 : 0);
             if (size == 0) {
                 return List.of();
@@ -860,20 +878,6 @@ public class WebJsonRpc {
         return dir == null || dir.isBlank() ? "" : dir;
     }
 
-    /**
-     * The directory a session actually works on: its recorded project marker when set (via
-     * {@code session.setProject} or recorded on submit), otherwise the process-level project dir.
-     * The side bar/branch read this so a session re-pointed at another project reflects it instead
-     * of always showing the server's global working directory.
-     */
-    private String projectDirOf(final String id) {
-        final var marked = projectOf(id);
-        if (!marked.isBlank()) {
-            return marked;
-        }
-        return currentProjectDir();
-    }
-
     private static boolean sameProject(final String a, final String b) {
         if (a.equals(b)) {
             return true;
@@ -881,18 +885,6 @@ public class WebJsonRpc {
         final var normalizedA = a.endsWith("/") ? a.substring(0, a.length() - 1) : a;
         final var normalizedB = b.endsWith("/") ? b.substring(0, b.length() - 1) : b;
         return normalizedA.equals(normalizedB);
-    }
-
-    private String currentProjectDir() {
-        try {
-            return configuration
-                    .resolveProjectDir()
-                    .toAbsolutePath()
-                    .normalize()
-                    .toString();
-        } catch (final RuntimeException e) {
-            return null;
-        }
     }
 
     private String title(String id) {

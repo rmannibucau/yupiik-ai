@@ -21,16 +21,19 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
+import io.yupiik.ia.agent.core.configuration.TestConfigs;
 import io.yupiik.ia.agent.core.llm.ChatClient;
 import io.yupiik.ia.agent.core.llm.ChatCompletionRequest;
 import io.yupiik.ia.agent.core.llm.ChatResult;
 import io.yupiik.ia.agent.core.llm.Message;
+import io.yupiik.ia.agent.core.llm.PauseEvent;
 import io.yupiik.ia.agent.core.llm.Usage;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import io.yupiik.ia.agent.test.TestJsonMapper;
 import io.yupiik.llm.client.ContextWindowExceededException;
 import io.yupiik.llm.client.LlmHttpFailureException;
 import java.io.IOException;
+import java.nio.file.Path;
 import java.time.Clock;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -42,6 +45,7 @@ import java.util.function.Consumer;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.api.io.TempDir;
 
 /**
  * Behavior of the adaptive compaction chunking ({@code yca.compaction.summarizer*}): the chunk cap
@@ -51,6 +55,8 @@ import org.junit.jupiter.api.extension.ExtendWith;
  */
 @ExtendWith(TestJsonMapper.class)
 class AdaptiveCompactionTest {
+    @TempDir
+    private static Path testWorkdir;
 
     private JsonMapper mapper;
 
@@ -74,7 +80,7 @@ class AdaptiveCompactionTest {
         entries.put("yca.compaction.tail.budgetTokens", "1");
         entries.put("yca.pruning.keepRecent", "1");
         entries.putAll(extra);
-        return io.yupiik.ia.agent.core.configuration.TestConfigs.codingAgent(entries);
+        return TestConfigs.codingAgent(entries);
     }
 
     private ProviderManager providerManager(final CodingAgentConfiguration cfg) {
@@ -98,7 +104,8 @@ class AdaptiveCompactionTest {
                 providerManager(cfg),
                 null,
                 "s1",
-                noOpSleeper());
+                noOpSleeper(),
+                (cfg).resolveWorkingDir());
     }
 
     /** A history whose old part is heavy and the retained tail is tiny: compaction must summarize the old part. */
@@ -150,7 +157,7 @@ class AdaptiveCompactionTest {
         entries.put("yca.compaction.tail.budgetTokens", "1");
         entries.put("yca.pruning.keepRecent", "1");
         entries.putAll(extra);
-        return io.yupiik.ia.agent.core.configuration.TestConfigs.codingAgent(entries);
+        return TestConfigs.codingAgent(entries);
     }
 
     // --- derivation -------------------------------------------------------
@@ -177,7 +184,8 @@ class AdaptiveCompactionTest {
 
     @Test
     void nullConfigFallsBackToDefaults() {
-        final var coordinator = new CompactionCoordinator(null, null, null, null, null, "s1", noOpSleeper());
+        final var coordinator =
+                new CompactionCoordinator(null, null, null, null, null, "s1", noOpSleeper(), testWorkdir);
         assertEquals(12_000, coordinator.effectiveChunkCap(), "null config must use the legacy floor");
         assertEquals(6_000, coordinator.effectiveDigestCap());
         assertEquals(2_000, coordinator.effectiveToolOutputChars());
@@ -223,7 +231,7 @@ class AdaptiveCompactionTest {
             @Override
             public ChatResult chat(
                     final ChatCompletionRequest request,
-                    final Consumer<io.yupiik.ia.agent.core.llm.PauseEvent> listener,
+                    final Consumer<PauseEvent> listener,
                     final BooleanSupplier cancelled)
                     throws IOException {
                 calls.add(promptOf(request).length());
@@ -257,7 +265,7 @@ class AdaptiveCompactionTest {
             @Override
             public ChatResult chat(
                     final ChatCompletionRequest request,
-                    final Consumer<io.yupiik.ia.agent.core.llm.PauseEvent> listener,
+                    final Consumer<PauseEvent> listener,
                     final BooleanSupplier cancelled)
                     throws IOException {
                 // always rejected as too large: halving must hit the floor and stop
@@ -285,7 +293,7 @@ class AdaptiveCompactionTest {
             @Override
             public ChatResult chat(
                     final ChatCompletionRequest request,
-                    final Consumer<io.yupiik.ia.agent.core.llm.PauseEvent> listener,
+                    final Consumer<PauseEvent> listener,
                     final BooleanSupplier cancelled)
                     throws IOException {
                 attempts.incrementAndGet();
@@ -316,7 +324,7 @@ class AdaptiveCompactionTest {
             @Override
             public ChatResult chat(
                     final ChatCompletionRequest request,
-                    final Consumer<io.yupiik.ia.agent.core.llm.PauseEvent> listener,
+                    final Consumer<PauseEvent> listener,
                     final BooleanSupplier cancelled)
                     throws IOException {
                 throw new IOException("upstream unavailable");
@@ -342,7 +350,7 @@ class AdaptiveCompactionTest {
             @Override
             public ChatResult chat(
                     final ChatCompletionRequest request,
-                    final Consumer<io.yupiik.ia.agent.core.llm.PauseEvent> listener,
+                    final Consumer<PauseEvent> listener,
                     final BooleanSupplier cancelled) {
                 calls.incrementAndGet();
                 return new ChatResult(Message.assistant("digest: single", null), Usage.EMPTY);
@@ -367,7 +375,7 @@ class AdaptiveCompactionTest {
             @Override
             public ChatResult chat(
                     final ChatCompletionRequest request,
-                    final Consumer<io.yupiik.ia.agent.core.llm.PauseEvent> listener,
+                    final Consumer<PauseEvent> listener,
                     final BooleanSupplier cancelled)
                     throws IOException {
                 attempts.incrementAndGet();
@@ -410,7 +418,7 @@ class AdaptiveCompactionTest {
             @Override
             public ChatResult chat(
                     final ChatCompletionRequest request,
-                    final Consumer<io.yupiik.ia.agent.core.llm.PauseEvent> listener,
+                    final Consumer<PauseEvent> listener,
                     final BooleanSupplier cancelled) {
                 calls.incrementAndGet();
                 return new ChatResult(Message.assistant("digest: single", null), Usage.EMPTY);
@@ -444,7 +452,7 @@ class AdaptiveCompactionTest {
             @Override
             public ChatResult chat(
                     final ChatCompletionRequest request,
-                    final Consumer<io.yupiik.ia.agent.core.llm.PauseEvent> listener,
+                    final Consumer<PauseEvent> listener,
                     final BooleanSupplier cancelled)
                     throws IOException {
                 attempts.incrementAndGet();
@@ -467,7 +475,7 @@ class AdaptiveCompactionTest {
             @Override
             public ChatResult chat(
                     final ChatCompletionRequest request,
-                    final Consumer<io.yupiik.ia.agent.core.llm.PauseEvent> listener,
+                    final Consumer<PauseEvent> listener,
                     final BooleanSupplier cancelled)
                     throws IOException {
                 throw new IOException("500 transient");
@@ -501,7 +509,7 @@ class AdaptiveCompactionTest {
             @Override
             public ChatResult chat(
                     final ChatCompletionRequest request,
-                    final Consumer<io.yupiik.ia.agent.core.llm.PauseEvent> listener,
+                    final Consumer<PauseEvent> listener,
                     final BooleanSupplier cancelled)
                     throws IOException {
                 calls.add(promptOf(request).length());
@@ -536,7 +544,7 @@ class AdaptiveCompactionTest {
             @Override
             public ChatResult chat(
                     final ChatCompletionRequest request,
-                    final Consumer<io.yupiik.ia.agent.core.llm.PauseEvent> listener,
+                    final Consumer<PauseEvent> listener,
                     final BooleanSupplier cancelled)
                     throws IOException {
                 attempts.incrementAndGet();
@@ -561,7 +569,7 @@ class AdaptiveCompactionTest {
             @Override
             public ChatResult chat(
                     final ChatCompletionRequest request,
-                    final Consumer<io.yupiik.ia.agent.core.llm.PauseEvent> listener,
+                    final Consumer<PauseEvent> listener,
                     final BooleanSupplier cancelled)
                     throws IOException {
                 calls.add(request.model());
@@ -599,7 +607,7 @@ class AdaptiveCompactionTest {
                 @Override
                 public ChatResult chat(
                         final ChatCompletionRequest request,
-                        final Consumer<io.yupiik.ia.agent.core.llm.PauseEvent> listener,
+                        final Consumer<PauseEvent> listener,
                         final BooleanSupplier cancelled)
                         throws IOException {
                     calls.add(request.model());
@@ -631,7 +639,7 @@ class AdaptiveCompactionTest {
             @Override
             public ChatResult chat(
                     final ChatCompletionRequest request,
-                    final Consumer<io.yupiik.ia.agent.core.llm.PauseEvent> listener,
+                    final Consumer<PauseEvent> listener,
                     final BooleanSupplier cancelled)
                     throws IOException {
                 attempts.incrementAndGet();
@@ -661,7 +669,7 @@ class AdaptiveCompactionTest {
             @Override
             public ChatResult chat(
                     final ChatCompletionRequest request,
-                    final Consumer<io.yupiik.ia.agent.core.llm.PauseEvent> listener,
+                    final Consumer<PauseEvent> listener,
                     final BooleanSupplier cancelled) {
                 final var n = calls.incrementAndGet();
                 return new ChatResult(Message.assistant("merge-chunk-" + n, null), Usage.EMPTY);

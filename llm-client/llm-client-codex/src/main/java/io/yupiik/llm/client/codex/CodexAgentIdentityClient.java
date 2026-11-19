@@ -35,7 +35,9 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletionException;
+import java.util.function.Predicate;
 
 /**
  * The Codex enterprise/Agent Identity enrollment client, mirroring {@code codex-rs/agent-identity}
@@ -107,6 +109,16 @@ public class CodexAgentIdentityClient {
      */
     public String registerAgentRuntime(
             final String accessToken, final Ed25519Util.KeyMaterial key, final boolean fedramp) {
+        return registerAgentRuntime(accessToken, key, fedramp, null);
+    }
+
+    /** Cancellation-aware registration, including retry boundaries. */
+    public String registerAgentRuntime(
+            final String accessToken,
+            final Ed25519Util.KeyMaterial key,
+            final boolean fedramp,
+            final Predicate<Boolean> cancelled) {
+        checkCancelled(cancelled);
         final var body = mapper.toString(new RegisterAgentRequest(
                 new AgentBillOfMaterials(config.agentVersion(), config.agentHarnessId(), runningLocation()),
                 key.publicKeySsh(),
@@ -123,7 +135,9 @@ public class CodexAgentIdentityClient {
         }
         var last = (HttpResponse<String>) null;
         for (int attempt = 0; attempt < 3; attempt++) {
+            checkCancelled(cancelled);
             last = send(request.build());
+            checkCancelled(cancelled);
             if (last.statusCode() >= 200 && last.statusCode() < 300) {
                 final var parsed = parse(last.body());
                 final var runtimeId = string(parsed, "agent_runtime_id");
@@ -142,7 +156,7 @@ public class CodexAgentIdentityClient {
                     Thread.sleep(500L * (attempt + 1));
                 } catch (final InterruptedException e) {
                     Thread.currentThread().interrupt();
-                    break;
+                    throw new CancellationException("Agent identity enrollment cancelled");
                 }
             }
         }
@@ -160,6 +174,12 @@ public class CodexAgentIdentityClient {
      * @return a copy of the record carrying the fresh task id.
      */
     public AgentIdentityRecord registerTask(final AgentIdentityRecord record) {
+        return registerTask(record, null);
+    }
+
+    /** Cancellation-aware task registration. */
+    public AgentIdentityRecord registerTask(final AgentIdentityRecord record, final Predicate<Boolean> cancelled) {
+        checkCancelled(cancelled);
         if (record == null
                 || record.agentPrivateKeyPkcs8Base64() == null
                 || record.agentPrivateKeyPkcs8Base64().isBlank()) {
@@ -172,12 +192,14 @@ public class CodexAgentIdentityClient {
         final var signature =
                 Ed25519Util.sign(record.agentPrivateKeyPkcs8Base64(), record.agentRuntimeId() + ":" + timestamp);
         final var body = mapper.toString(new RegisterTaskRequest(signature, timestamp));
+        checkCancelled(cancelled);
         final var response = send(HttpRequest.newBuilder()
                 .uri(URI.create(config.authApiBaseUrl() + "/v1/agent/" + record.agentRuntimeId() + "/task/register"))
                 .header("content-type", "application/json")
                 .header("accept", "application/json")
                 .POST(HttpRequest.BodyPublishers.ofString(body, UTF_8))
                 .build());
+        checkCancelled(cancelled);
         if (response.statusCode() < 200 || response.statusCode() >= 300) {
             throw new IllegalStateException(
                     "Agent task registration failed with HTTP " + response.statusCode() + ": " + response.body());
@@ -213,6 +235,21 @@ public class CodexAgentIdentityClient {
             final String idToken,
             final String fallbackAccountId,
             final String forcedWorkspaceId) {
+        return enroll(accessToken, idToken, fallbackAccountId, forcedWorkspaceId, null);
+    }
+
+    /**
+     * Cancellation-aware two-phase enrollment. Requests run on the calling thread so its owner can
+     * interrupt real transport work; a transport ignoring interruption is checked again on return.
+     * Remote registration already accepted by the issuer cannot be rolled back here.
+     */
+    public AgentIdentityRecord enroll(
+            final String accessToken,
+            final String idToken,
+            final String fallbackAccountId,
+            final String forcedWorkspaceId,
+            final Predicate<Boolean> cancelled) {
+        checkCancelled(cancelled);
         if (accessToken == null || accessToken.isBlank()) {
             throw new IllegalStateException("ChatGPT/Codex login produced no access token; cannot enroll");
         }
@@ -230,21 +267,32 @@ public class CodexAgentIdentityClient {
         final String planType = claims == null ? null : claims.planType();
         final boolean fedramp = claims != null && claims.chatgptAccountIsFedramp();
 
+        checkCancelled(cancelled);
         final var key = Ed25519Util.generate();
-        final String runtimeId = registerAgentRuntime(accessToken, key, fedramp);
-        final AgentIdentityRecord record = registerTask(new AgentIdentityRecord(
-                runtimeId,
-                key.privateKeyPkcs8Base64(),
-                accountId,
-                chatgptUserId,
-                claims == null ? null : claims.email(),
-                planType,
-                fedramp,
-                null));
+        final String runtimeId = registerAgentRuntime(accessToken, key, fedramp, cancelled);
+        checkCancelled(cancelled);
+        final AgentIdentityRecord record = registerTask(
+                new AgentIdentityRecord(
+                        runtimeId,
+                        key.privateKeyPkcs8Base64(),
+                        accountId,
+                        chatgptUserId,
+                        claims == null ? null : claims.email(),
+                        planType,
+                        fedramp,
+                        null),
+                cancelled);
+        checkCancelled(cancelled);
         if (record.needsTaskRegistration()) {
             throw new IllegalStateException("Agent identity enrollment produced no run task id");
         }
         return record;
+    }
+
+    private static void checkCancelled(final Predicate<Boolean> cancelled) {
+        if (Thread.currentThread().isInterrupted() || (cancelled != null && cancelled.test(Boolean.TRUE))) {
+            throw new CancellationException("Agent identity enrollment cancelled");
+        }
     }
 
     /** True when the id-token payload lists {@code workspaceId} among its organizations. */

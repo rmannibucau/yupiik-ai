@@ -21,6 +21,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
+import io.yupiik.ia.agent.core.configuration.TestConfigs;
 import io.yupiik.ia.agent.core.context.ContextCompression;
 import io.yupiik.ia.agent.core.context.ContextView;
 import io.yupiik.ia.agent.core.context.UsageTracker;
@@ -29,6 +30,7 @@ import io.yupiik.ia.agent.core.runtime.Cancellations;
 import io.yupiik.ia.agent.core.tools.ToolContext;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import io.yupiik.ia.agent.test.TestJsonMapper;
+import java.nio.file.Path;
 import java.time.Clock;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -38,9 +40,13 @@ import java.util.Map;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.api.io.TempDir;
 
 @ExtendWith(TestJsonMapper.class)
 class ManageContextToolTest {
+    @TempDir
+    private static Path testWorkdir;
+
     private JsonMapper mapper;
 
     @Test
@@ -76,7 +82,20 @@ class ManageContextToolTest {
     }
 
     private ToolContext context(final ContextView view) {
-        return new ToolContext("s1", null, null, null, null, null, null, tracker(), view, Cancellations.NEVER);
+        return new ToolContext(
+                "s1",
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                tracker(),
+                view,
+                Cancellations.NEVER,
+                null,
+                null,
+                testWorkdir);
     }
 
     private ProviderManager providerManager() {
@@ -236,7 +255,7 @@ class ManageContextToolTest {
         if (!enabled) {
             entries.put("yca.tools.manageContext.enabled", "false");
         }
-        return io.yupiik.ia.agent.core.configuration.TestConfigs.codingAgent(entries);
+        return TestConfigs.codingAgent(entries);
     }
 
     private UsageTracker tracker() {

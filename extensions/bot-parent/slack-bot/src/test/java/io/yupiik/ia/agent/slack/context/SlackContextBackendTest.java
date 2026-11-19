@@ -51,6 +51,9 @@ import org.junit.jupiter.api.io.TempDir;
 /** Real backend handoff with fake launchers/API, not Docker, Nono or a Kubernetes cluster. */
 @Timeout(15)
 class SlackContextBackendTest {
+    @TempDir
+    private static Path testWorkdir;
+
     private static final String DIRECTORY = "/attempt/storage/slack-context";
     private static final String BINDING = "CBINDING";
 
@@ -278,7 +281,7 @@ class SlackContextBackendTest {
                         context.get("channel").toString(),
                         ((Number) context.get("timeoutSeconds")).intValue()),
                 json));
-        assertTrue(tool.usable(), "The launched agent's directory must address the prepared host mailbox");
+        assertTrue(tool.usable(testWorkdir), "The launched agent's directory must address the prepared host mailbox");
     }
 
     private String option(final List<String> args, final String key) {

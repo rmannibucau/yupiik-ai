@@ -34,11 +34,14 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.TimeUnit;
+import java.util.regex.Pattern;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 
 @ExtendWith(TestJsonMapper.class)
 class OpenCodeFreeDialectTest {
+    private static final Pattern SESSION_ID = Pattern.compile("ses_[0-9a-f]{12}[0-9A-Za-z]{14}");
+
     @Test
     void bufferedToolRoundTripUsesSseAndPrivateAffinity(final JsonMapper mapper) throws Exception {
         final var bodies = new CopyOnWriteArrayList<String>();
@@ -151,7 +154,7 @@ class OpenCodeFreeDialectTest {
                             .get(10, TimeUnit.SECONDS)
                             .text());
             assertEquals(1, sessions.size());
-            assertTrue(sessions.getFirst().matches("ses_[0-9a-f]{12}[0-9A-Za-z]{14}"));
+            assertTrue(SESSION_ID.matcher(sessions.getFirst()).matches());
             assertEquals(
                     "deepseek-v4.1-flash-free",
                     dialect.models()

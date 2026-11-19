@@ -265,7 +265,8 @@ public class RunCommand implements Runnable {
             }
         };
         final var shellSession = new ShellSession().sessionId(sessionId);
-        final var runtime = sessionRuntimeFactory.create(sessionId);
+        final var workdir = sessionRuntimeFactory.resolveWorkdir(null, sessionId);
+        final var runtime = sessionRuntimeFactory.create(sessionId, workdir);
         shellSession.runtime(runtime);
         final var shellEnv = new ShellEnv(frontend, null, shellSession, null);
         shellRegistry.register(shellEnv);

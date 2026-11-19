@@ -18,10 +18,14 @@ package io.yupiik.ia.agent.core.shell;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
 import io.yupiik.ia.agent.core.agent.AgentEvent;
+import java.nio.file.Path;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 /** Live-stream tail tests: inline-code tails must not lag or be lost (regression for char loss in the TUI). */
 class StreamTailRegressionTest {
+    @TempDir
+    private static Path eventWorkdir;
 
     private final ThinkTagSplitter splitter = new ThinkTagSplitter();
 
@@ -49,12 +53,12 @@ class StreamTailRegressionTest {
         // - it has to drain into pending first so the streamed text survives.
         final var t = new ConversationTranscript();
         t.startUserTurn("hi");
-        t.onEvent(new AgentEvent.TextDelta("je commence par le code de `AgentLoop.java` :", "s1"));
-        t.onEvent(new AgentEvent.TextReset("s1"));
+        t.onEvent(new AgentEvent.TextDelta("je commence par le code de `AgentLoop.java` :", "s1", eventWorkdir));
+        t.onEvent(new AgentEvent.TextReset("s1", eventWorkdir));
         // the retry re-sends the whole text (same bytes in this repro)
-        t.onEvent(new AgentEvent.TextDelta("je commence par le code de `AgentLoop.java` :", "s1"));
-        t.onEvent(new AgentEvent.ToolStarted("edit_file", "{}", "s1"));
-        t.onEvent(new AgentEvent.ToolFinished("edit_file", "ok", true, "s1"));
+        t.onEvent(new AgentEvent.TextDelta("je commence par le code de `AgentLoop.java` :", "s1", eventWorkdir));
+        t.onEvent(new AgentEvent.ToolStarted("edit_file", "{}", "s1", eventWorkdir));
+        t.onEvent(new AgentEvent.ToolFinished("edit_file", "ok", true, "s1", eventWorkdir));
 
         final var md = t.transcript().toString();
         assertEquals(

@@ -27,26 +27,33 @@ import io.yupiik.fusion.httpclient.core.ExtendedHttpClient;
 import io.yupiik.fusion.httpclient.core.ExtendedHttpClientConfiguration;
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration$FusionConfigurationFactory;
+import io.yupiik.ia.agent.core.configuration.SecretRedactionMode;
 import io.yupiik.ia.agent.core.security.SecretRedactor;
 import io.yupiik.ia.agent.core.security.SecretRegistry;
+import io.yupiik.ia.agent.core.security.SecretSessionModes;
 import io.yupiik.ia.agent.core.security.SecretVault;
 import io.yupiik.ia.agent.test.TestJsonMapper;
 import io.yupiik.llm.client.codex.CodexOAuthConfig;
+import io.yupiik.llm.client.codex.model.AgentIdentityRecord;
 import io.yupiik.llm.client.codex.model.CodexTokenStore;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.URI;
 import java.net.URLDecoder;
 import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Base64;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.atomic.AtomicReference;
+import java.util.regex.Pattern;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -60,6 +67,8 @@ import org.junit.jupiter.api.io.TempDir;
  */
 @ExtendWith(TestJsonMapper.class)
 class CodexLoginServiceTest {
+    private static final Pattern REDIRECT_PORT = Pattern.compile("redirect_uri=[^&]*127\\.0\\.0\\.1%3A(\\d+)[^&]*");
+    private static final Pattern STATE = Pattern.compile("state=([^&]+)");
 
     private HttpServer issuer;
     private String issuerUrl;
@@ -73,7 +82,7 @@ class CodexLoginServiceTest {
 
     // an id_token carrying the chatgpt_account_id claim so the account id can be derived
     private static final String ID_TOKEN = "header."
-            + java.util.Base64.getUrlEncoder()
+            + Base64.getUrlEncoder()
                     .withoutPadding()
                     .encodeToString("{\"https://api.openai.com/auth.chatgpt_account_id\":\"acc-1\"}"
                             .getBytes(StandardCharsets.UTF_8))
@@ -131,7 +140,7 @@ class CodexLoginServiceTest {
     }
 
     private CodexLoginService service(final JsonMapper mapper) {
-        final var map = new java.util.HashMap<String, String>();
+        final var map = new HashMap<String, String>();
         map.put("yca.storageHome", storage.toString());
         final var cfg =
                 new CodingAgentConfiguration$FusionConfigurationFactory(k -> Optional.ofNullable(map.get(k))).get();
@@ -150,8 +159,8 @@ class CodexLoginServiceTest {
     @Test
     void savedSessionsRegisterSecretsAndRetainPreviousValues(final JsonMapper mapper) {
         final var registry = new SecretRegistry(null, List.of(), new SecretVault(), List.of());
-        final var modes = new io.yupiik.ia.agent.core.security.SecretSessionModes();
-        modes.set("test", io.yupiik.ia.agent.core.configuration.SecretRedactionMode.REDACT);
+        final var modes = new SecretSessionModes();
+        modes.set("test", SecretRedactionMode.REDACT);
         final var redactor = new SecretRedactor(registry, modes);
         // Use a temporary storage home, never the real user's credentials.
         final var cfg = new CodingAgentConfiguration$FusionConfigurationFactory(
@@ -162,7 +171,7 @@ class CodexLoginServiceTest {
                 "test",
                 new CodexTokenStore("login-access", "login-refresh", "account-metadata", 1L, "login-id-token")
                         .withApiKey("login-api-key")
-                        .withAgentIdentity(new io.yupiik.llm.client.codex.model.AgentIdentityRecord(
+                        .withAgentIdentity(new AgentIdentityRecord(
                                 "runtime", "private-key-value", "account", "user", null, "plan", false, "task")));
         temporaryService.save(
                 "test", new CodexTokenStore("next-access", "next-refresh", "account-metadata", 2L, "next-id-token"));
@@ -184,8 +193,8 @@ class CodexLoginServiceTest {
     @Test
     void deviceLoginRegistersTokensAfterStartup(final JsonMapper mapper) {
         final var registry = new SecretRegistry(null, List.of(), new SecretVault(), List.of());
-        final var modes = new io.yupiik.ia.agent.core.security.SecretSessionModes();
-        modes.set("test", io.yupiik.ia.agent.core.configuration.SecretRedactionMode.REDACT);
+        final var modes = new SecretSessionModes();
+        modes.set("test", SecretRedactionMode.REDACT);
         final var redactor = new SecretRedactor(registry, modes);
         registry.scan();
         final var cfg = new CodingAgentConfiguration$FusionConfigurationFactory(
@@ -201,30 +210,18 @@ class CodexLoginServiceTest {
     @Test
     void browserFlowRecordsProvenanceAndApiKey(final JsonMapper mapper) throws Exception {
         final var service = service(mapper);
-        final AtomicReference<String> callbackPort = new AtomicReference<>();
-        final AtomicReference<String> callbackState = new AtomicReference<>();
+        final var authorizeUrl = new CompletableFuture<String>();
         // run the browser flow off-thread (it blocks waiting for the callback), then drive the redirect
-        final CompletableFuture<CodexTokenStore> result = CompletableFuture.supplyAsync(() -> service.signIn(
-                "browser-p",
-                false,
-                url -> {
-                    callbackPort.set(portOf(url));
-                    callbackState.set(stateOf(url));
-                },
-                b -> false,
-                issuerConfig()));
+        final CompletableFuture<CodexTokenStore> result = CompletableFuture.supplyAsync(
+                () -> service.signIn("browser-p", false, authorizeUrl::complete, b -> false, issuerConfig()));
 
-        final long deadline = System.currentTimeMillis() + 5_000;
-        while ((callbackPort.get() == null || callbackState.get() == null) && System.currentTimeMillis() < deadline) {
-            Thread.sleep(20);
-        }
-        assertNotNull(callbackPort.get(), "the authorize URL must expose the loopback port");
-        final var callback = java.net.http.HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + callbackPort.get()
-                        + "/auth/callback?state=" + callbackState.get() + "&code=thecode"))
+        final var url = authorizeUrl.get(5, TimeUnit.SECONDS);
+        final var callback = HttpRequest.newBuilder(URI.create(
+                        "http://127.0.0.1:" + portOf(url) + "/auth/callback?state=" + stateOf(url) + "&code=thecode"))
                 .GET()
                 .build();
         try (final var http = HttpClient.newHttpClient()) {
-            http.send(callback, java.net.http.HttpResponse.BodyHandlers.discarding());
+            http.send(callback, HttpResponse.BodyHandlers.discarding());
         }
 
         final CodexTokenStore store = result.get(5, TimeUnit.SECONDS);
@@ -263,15 +260,14 @@ class CodexLoginServiceTest {
 
     private static String portOf(final String authorizeUrl) {
         final var uri = URI.create(authorizeUrl);
-        final var m = java.util.regex.Pattern.compile("redirect_uri=[^&]*127\\.0\\.0\\.1%3A(\\d+)[^&]*")
-                .matcher(uri.getRawQuery());
+        final var m = REDIRECT_PORT.matcher(uri.getRawQuery());
         assertTrue(m.find(), "cannot find the port in " + authorizeUrl);
         return m.group(1);
     }
 
     private static String stateOf(final String authorizeUrl) {
         final var uri = URI.create(authorizeUrl);
-        final var m = java.util.regex.Pattern.compile("state=([^&]+)").matcher(uri.getRawQuery());
+        final var m = STATE.matcher(uri.getRawQuery());
         assertTrue(m.find(), "cannot find the state in " + authorizeUrl);
         return URLDecoder.decode(m.group(1), StandardCharsets.UTF_8);
     }

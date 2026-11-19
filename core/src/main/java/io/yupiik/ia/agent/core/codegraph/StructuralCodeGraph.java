@@ -26,9 +26,9 @@ import io.yupiik.ia.agent.core.codegraph.index.GraphToIndex;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.llm.ChatClient;
 import io.yupiik.ia.agent.core.optimize.AfterToolExecutionEvent;
-import io.yupiik.ia.agent.core.optimize.BeforeToolExecutionEvent;
 import io.yupiik.ia.agent.core.runtime.StatusReporter;
 import io.yupiik.ia.agent.core.tools.FileIgnore;
+import io.yupiik.ia.agent.core.tools.ToolContext;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import java.io.IOException;
 import java.io.UncheckedIOException;
@@ -57,6 +57,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentLinkedQueue;
@@ -137,7 +138,6 @@ public class StructuralCodeGraph implements AutoCloseable {
     private volatile boolean batchFlushScheduled;
     private volatile GraphStore graph;
     private volatile CodeGraphIndex index;
-    private volatile List<String> pendingRefreshPaths = List.of();
     private final AtomicBoolean readyStarted = new AtomicBoolean();
     private final ReentrantLock readinessLock = new ReentrantLock();
     private volatile CompletableFuture<Void> readyFuture;
@@ -186,7 +186,7 @@ public class StructuralCodeGraph implements AutoCloseable {
         final var scg = configuration.structuralCodeGraph();
         this.ignoreRules = FileIgnore.of(projectDir, scg.effectiveIgnoreGlobs()).rules();
         this.configNoRefresh = scg.noRefresh();
-        this.refreshAwaitMs = 3000L; // bound for ensureRefreshedReady() when a background refresh is pending
+        this.refreshAwaitMs = 3000L; // bound for refreshPrimary() when a background refresh is pending
         this.batchRefreshDebounceMs = scg.batchRefreshDebounceMillis();
         this.scheduler = scheduler;
         this.ownsScheduler = false;
@@ -223,18 +223,92 @@ public class StructuralCodeGraph implements AutoCloseable {
         this.docEnricher = null;
     }
 
+    private void prepareParsers() {
+        final var available =
+                registeredParsers.stream().filter(GraphParser::available).toList();
+        final var extensions = new HashMap<String, GraphParser>();
+        for (final var parser : available) {
+            for (final var extension : parser.extensions()) {
+                extensions.put(extension.toLowerCase(Locale.ROOT), parser);
+            }
+        }
+        parsers = available;
+        byExtension = Map.copyOf(extensions);
+    }
+
+    public void ensureReady(final Path root) {
+        Objects.requireNonNull(root, "workdir");
+        if (root.equals(projectDir)) {
+            preparePrimary();
+        } else if (enabled()) {
+            queryIndex(root);
+        }
+    }
+
+    public void ensureReadyAsync(final Path root) {
+        Objects.requireNonNull(root, "workdir");
+        if (root.equals(projectDir)) {
+            preparePrimaryAsync();
+        } else if (enabled()) {
+            scheduler.execute(() -> queryIndex(root));
+        }
+    }
+
+    public GraphStore graph(final Path root) {
+        Objects.requireNonNull(root, "workdir");
+        if (!enabled()) {
+            return GraphStore.empty();
+        }
+        return root.equals(projectDir) ? primaryGraph() : queryIndex(root).toStore();
+    }
+
+    public Path storeRoot(final Path root) {
+        Objects.requireNonNull(root, "workdir");
+        return Path.of(configuration.structuralCodeGraph().resolvedStoreDir(root.toString()))
+                .toAbsolutePath()
+                .normalize();
+    }
+
+    public String freshness(final Path root) {
+        Objects.requireNonNull(root, "workdir");
+        if (!enabled()) {
+            return "disabled (enable yca.structural-code-graph.enabled)";
+        }
+        if (root.equals(projectDir)) {
+            return primaryFreshness();
+        }
+        final var current = queryIndex(root);
+        return "root " + root + ": symbols=" + current.symbolCount() + " edges=" + current.edgeCount();
+    }
+
+    public void ensureRefreshedReady(final Path root) {
+        Objects.requireNonNull(root, "workdir");
+        if (root.equals(projectDir)) {
+            refreshPrimary();
+        } else {
+            ensureReady(root);
+        }
+    }
+
+    public void flushPersist(final Path root) {
+        Objects.requireNonNull(root, "workdir");
+        if (root.equals(projectDir)) {
+            persistPrimary();
+        }
+    }
+
     private record PersistJob(GraphStore store, Map<String, Long> mtimes) {}
 
     public boolean enabled() {
         return configuration != null && configuration.structuralCodeGraph().enabled() && !registeredParsers.isEmpty();
     }
 
-    public Path storeRoot() {
+    private Path primaryStoreRoot() {
         return storeRoot;
     }
 
     /** Absolute, normalized project root the graph is indexed from; symbol {@code file()} paths are relative to it. */
-    public Path projectDir() {
+    private Path primaryProjectDir() {
         return projectDir;
     }
 
@@ -252,7 +326,7 @@ public class StructuralCodeGraph implements AutoCloseable {
         if (ownsScheduler && scheduler != null) {
             scheduler.shutdownNow();
         }
-        flushPersist();
+        persistPrimary();
     }
 
     private void startWatchService() {
@@ -319,7 +393,7 @@ public class StructuralCodeGraph implements AutoCloseable {
                 final var path = (Path) event.context();
                 final var absolute = projectDir.resolve(path);
                 if (Files.isRegularFile(absolute) && absolute.toString().endsWith(".java")) {
-                    final var rel = rel(absolute);
+                    final var rel = primaryRel(absolute);
                     if (!isIgnored(rel, absolute)) {
                         enqueueRefresh(absolute);
                     }
@@ -333,17 +407,17 @@ public class StructuralCodeGraph implements AutoCloseable {
 
     /**
      * Ensures the code graph index is ready before serving a query. Synchronous and blocking so graph tools see an
-     * authoritative index: the background preload (see {@link #ensureReadyAsync()}) is awaited - short bound first, then
+     * authoritative index: the background preload (see {@link #preparePrimaryAsync()}) is awaited - short bound first, then
      * a generous ceiling while there is still nothing to serve - because an empty graph handed to a tool is strictly
-     * worse than waiting a few extra seconds for a cold build (a timeout used to let {@code graph()} and
-     * {@code queryIndex()} serve an empty store whenever the build outran the first bound). When nothing has been
+     * worse than waiting a few extra seconds for a cold build (a timeout used to let {@code primaryGraph()} and
+     * {@code primaryIndex()} serve an empty store whenever the build outran the first bound). When nothing has been
      * scheduled yet, schedules it now.
      */
-    public void ensureReady() {
+    private void preparePrimary() {
         if (!enabled() || index != null) {
             return;
         }
-        ensureReadyAsync();
+        preparePrimaryAsync();
         final var future = readyFuture;
         if (future == null) {
             return;
@@ -356,7 +430,7 @@ public class StructuralCodeGraph implements AutoCloseable {
         }
         // Still nothing to serve (both graph and index null): the build is in flight - keep awaiting it up to a
         // generous ceiling instead of handing an empty store to the caller (the first, short bound used to expire
-        // under a cold start or heavy parallel load and graph()/queryIndex() then served an empty graph).
+        // under a cold start or heavy parallel load and primaryGraph()/primaryIndex() then served an empty graph).
         if (!awaitReady(future, refreshAwaitMs * 10L)) {
             throw new IllegalStateException("Timed out waiting for structural code graph readiness");
         }
@@ -386,7 +460,7 @@ public class StructuralCodeGraph implements AutoCloseable {
      * provider's first LLM round-trip (the dominant cost of a session's first call). Idempotent: only the first call
      * schedules the work, and the scheduled job no-ops once an index is already present. Never blocks.
      */
-    public void ensureReadyAsync() {
+    private void preparePrimaryAsync() {
         readinessLock.lock();
         try {
             if (!enabled() || index != null || indexFile == null || projectDir == null || readyStarted.get()) return;
@@ -419,9 +493,9 @@ public class StructuralCodeGraph implements AutoCloseable {
     }
 
     /**
-     * The synchronous load body, run on the background thread by {@link #ensureReadyAsync()} (and never re-run once an
+     * The synchronous load body, run on the background thread by {@link #preparePrimaryAsync()} (and never re-run once an
      * index is present). A test double short-circuits here because it has no persisted-index machinery
-     * (storeRoot/indexFile/projectDir are null), leaving {@code queryIndex()} to build a transient index over {@code graph()}.
+     * (storeRoot/indexFile/projectDir are null), leaving {@code primaryIndex()} to build a transient index over {@code primaryGraph()}.
      */
     private void ensureReadyNow() {
         if (!enabled() || index != null) {
@@ -481,17 +555,17 @@ public class StructuralCodeGraph implements AutoCloseable {
         }
     }
 
-    public GraphStore graph() {
+    private GraphStore primaryGraph() {
         if (!enabled()) {
             return GraphStore.empty();
         }
-        ensureReady();
+        preparePrimary();
         final var g = graph;
         if (g != null) {
             return g;
         }
         // When only the binary index is loaded (fast path), materialise the store on demand for legacy callers/tests;
-        // the structured tools use queryIndex() and never pay this decode at query time.
+        // the structured tools use primaryIndex() and never pay this decode at query time.
         final var idx = index;
         return idx == null ? GraphStore.empty() : idx.toStore();
     }
@@ -499,10 +573,10 @@ public class StructuralCodeGraph implements AutoCloseable {
     /**
      * The fast, canonical query surface for the structured graph tools: a {@link CodeGraphIndex} held in memory and,
      * when configured, memory-mapped straight off the on-disk {@code index.bin}. Query tools must use this, never
-     * {@link #graph()} (which stays the transient ingest scratch), so no full graph is materialised at query time.
+     * {@link #primaryGraph()} (which stays the transient ingest scratch), so no full graph is materialised at query time.
      */
-    public CodeGraphIndex queryIndex() {
-        ensureReady();
+    private CodeGraphIndex primaryIndex() {
+        preparePrimary();
         var current = index;
         if (current == null) {
             // A background patch/rebuild is still running after the bounded wait: serve the last persisted
@@ -515,10 +589,10 @@ public class StructuralCodeGraph implements AutoCloseable {
         }
         if (current == null) {
             // No persisted binary index is available at all (fresh project, or a test double exposing only
-            // graph()): serve queries off a transient index built from the current GraphStore so tools keep
+            // primaryGraph()): serve queries off a transient index built from the current GraphStore so tools keep
             // a single query API. Cache it only when it is non-empty - caching an empty index would make
-            // ensureReady() believe an index exists and serve empty results until the next reload.
-            final var scratch = graph();
+            // preparePrimary() believe an index exists and serve empty results until the next reload.
+            final var scratch = primaryGraph();
             if (scratch != null) {
                 current = CodeGraphIndex.load(CodeGraphIndexWriter.toBytes(toIndexGraph(scratch)));
                 if (!scratch.fingerprints().isEmpty()) {
@@ -530,26 +604,33 @@ public class StructuralCodeGraph implements AutoCloseable {
     }
 
     /**
-     * Root-aware variant of {@link #queryIndex()} for a per-session working directory. When
-     * {@code root} is {@code null} or equals the process-wide project root, this is exactly the
-     * default {@link #queryIndex()} (byte-identical behaviour, one shared index). For any other root
+     * Root-aware variant of {@link #primaryIndex()} for a per-session working directory. When
+     * {@code root} equals the process-wide project root, this is exactly the
+     * default {@link #primaryIndex()} (byte-identical behaviour, one shared index). For any other root
      * a read-only {@link CodeGraphIndex} is built lazily from that root's files (a fresh parse, no
      * persistence, no file watcher) and cached per root, so sessions working on different projects
      * resolve symbols against their own tree without disturbing the default graph. Unlike the plain
      * default graph, the per-root cache has no live file watcher, so each distinct staged root is
      * re-validated on access: the cached index is served only while its {@code rel -> lastModified}
      * snapshot still matches the live tree, otherwise the root is re-indexed so edits made under a
-     * per-session root (web {@code session.setProject} / on-the-fly switches) become visible on the
+     * per-session root (web {@code session.setProject} / replacement runtimes) become visible on the
      * next query instead of an ever-stale snapshot.
      */
     public CodeGraphIndex queryIndex(final Path root) {
-        if (root == null || root.equals(projectDir)) {
-            return queryIndex();
+        Objects.requireNonNull(root, "workdir");
+        if (!root.isAbsolute() || !root.equals(root.normalize())) {
+            throw new IllegalArgumentException("workdir must be absolute and normalized: " + root);
         }
-        ensureReady();
-        final var normalized = root.toAbsolutePath().normalize();
+        if (configuration == null) {
+            return CodeGraphIndex.load(CodeGraphIndexWriter.toBytes(toIndexGraph(graph(root))));
+        }
+        if (root.equals(projectDir)) {
+            return primaryIndex();
+        }
+        prepareParsers();
+        final var normalized = root;
         if (!Files.isDirectory(normalized)) {
-            return queryIndex();
+            throw new IllegalArgumentException("workdir is not a directory: " + root);
         }
         var entry = rootIndexes.get(normalized);
         if (entry == null || isRootStale(normalized, entry)) {
@@ -584,19 +665,15 @@ public class StructuralCodeGraph implements AutoCloseable {
         return false;
     }
 
-    /** Root-aware project directory: the per-session root when one is given, else the process default. */
-    public Path projectDir(final Path root) {
-        return root == null ? projectDir() : root.toAbsolutePath().normalize();
-    }
-
     /** Root-aware relativization used to render symbol file paths against a per-session root. */
     public String rel(final Path root, final Path file) {
-        if (root == null || root.equals(projectDir)) {
-            return rel(file);
+        Objects.requireNonNull(root, "workdir");
+        if (root.equals(projectDir)) {
+            return primaryRel(file);
         }
         try {
-            final var abs = file.toAbsolutePath().normalize();
-            final var r = root.toAbsolutePath().normalize();
+            final var r = Objects.requireNonNull(root, "workdir");
+            final var abs = (file.isAbsolute() ? file : r.resolve(file)).normalize();
             return abs.startsWith(r) ? r.relativize(abs).toString().replace('\\', '/') : file.toString();
         } catch (final RuntimeException e) {
             return file.toString();
@@ -758,7 +835,7 @@ public class StructuralCodeGraph implements AutoCloseable {
     }
 
     /**
-     * Raw load of the on-disk index, bypassing the freshness gate: used by {@link #queryIndex()} while a
+     * Raw load of the on-disk index, bypassing the freshness gate: used by {@link #primaryIndex()} while a
      * background patch/rebuild is still running so tools serve a complete (slightly stale) graph instead of
      * an empty one. */
     private CodeGraphIndex loadPersistedIndex() {
@@ -779,11 +856,11 @@ public class StructuralCodeGraph implements AutoCloseable {
      * whose timestamp changed (and whose SHA would then differ) drive a re-index. This avoids the O(symbols) stat
      * churn of the previous per-file freshness and the full-tree SHA walk on session start.
      */
-    public String freshness() {
+    private String primaryFreshness() {
         if (!enabled()) {
             return "disabled (enable yca.structural-code-graph.enabled)";
         }
-        ensureReady();
+        preparePrimary();
         final var g = graph == null ? GraphStore.empty() : graph;
         return "symbols="
                 + (index != null ? index.symbolCount() : g.symbols().size())
@@ -808,11 +885,11 @@ public class StructuralCodeGraph implements AutoCloseable {
      *
      * @return a short human-readable status describing the resync.
      */
-    public String resync() {
+    private String resyncPrimary() {
         if (!enabled()) {
             return "disabled (enable yca.structural-code-graph.enabled)";
         }
-        ensureReady();
+        preparePrimary();
         final var loaded = load();
         final GraphStore rebuilt;
         if (loaded != null) {
@@ -822,11 +899,11 @@ public class StructuralCodeGraph implements AutoCloseable {
         }
         graph = rebuilt;
         assignIndexFrom(rebuilt);
-        return freshness();
+        return primaryFreshness();
     }
 
     /**
-     * Root-aware re-sync: for the process default root (or {@code null}) this is exactly {@link #resync()}; for any
+     * Root-aware re-sync: for the process default root this is exactly {@link #resyncPrimary()}; for any
      * other root it force-rebuilds that root's cached per-session index (invalidate + re-parse) regardless of the
      * mtime freshness gate, so a web caller can explicitly refresh a session's active project root on demand. The
      * default root keeps its full persisted+watched path; only the per-root cache entry is touched here.
@@ -834,13 +911,15 @@ public class StructuralCodeGraph implements AutoCloseable {
      * @return a short human-readable status describing the resync.
      */
     public String resync(final Path root) {
+        Objects.requireNonNull(root, "workdir");
         if (!enabled()) {
             return "disabled (enable yca.structural-code-graph.enabled)";
         }
-        if (root == null || root.equals(projectDir)) {
-            return resync();
+        if (root.equals(projectDir)) {
+            return resyncPrimary();
         }
-        final var normalized = root.toAbsolutePath().normalize();
+        prepareParsers();
+        final var normalized = root;
         if (!Files.isDirectory(normalized)) {
             return "not a directory: " + normalized;
         }
@@ -850,21 +929,19 @@ public class StructuralCodeGraph implements AutoCloseable {
                 + entry.index().symbolCount() + " edges=" + entry.index().edgeCount();
     }
 
-    public void onBeforeTool(@OnEvent final BeforeToolExecutionEvent event) {
-        if (enabled() && isFileTool(event.tool())) {
-            pendingRefreshPaths = extractPaths(event.tool(), event.args());
-        }
-    }
-
     public void onToolExecuted(@OnEvent final AfterToolExecutionEvent event) {
         if (!enabled() || !isFileTool(event.tool()) || !event.success()) {
             return;
         }
-        final var paths = pendingRefreshPaths;
-        pendingRefreshPaths = List.of();
+        if (!event.workdir().equals(projectDir)) {
+            rootIndexes.remove(event.workdir());
+            return;
+        }
+        final var paths = extractPaths(event.tool(), event.args());
+        final var context = ToolContext.empty(event.workdir());
         for (final var path : paths) {
             if (path != null && !path.isBlank()) {
-                enqueueRefresh(Path.of(path));
+                enqueueRefresh(context.resolvePath(path));
             }
         }
     }
@@ -917,7 +994,7 @@ public class StructuralCodeGraph implements AutoCloseable {
         if (!absolute.startsWith(projectDir)) {
             return;
         }
-        final var rel = rel(absolute);
+        final var rel = primaryRel(absolute);
         if (isIgnored(rel, absolute)) {
             return;
         }
@@ -1013,7 +1090,7 @@ public class StructuralCodeGraph implements AutoCloseable {
                 return;
             }
             for (final var file : owned) {
-                final var rel = rel(file);
+                final var rel = primaryRel(file);
                 final var model = models.getOrDefault(
                         file, GraphModel.empty(parser.extensions().iterator().next()));
                 if (model == null || (model.symbols().isEmpty() && model.edges().isEmpty())) {
@@ -1034,10 +1111,10 @@ public class StructuralCodeGraph implements AutoCloseable {
         }
     }
 
-    /** A5: graph-reading tools call this before queryIndex() so a pending background refresh is seen as authoritative
+    /** A5: graph-reading tools call this before primaryIndex() so a pending background refresh is seen as authoritative
      * (single-thread FIFO: awaiting the latest enqueued job implies all earlier ones finished too). Bounded by
      * {@link #refreshAwaitMs} so a slow/broken re-index never hangs a tool - on timeout we proceed with the current index. */
-    public void ensureRefreshedReady() {
+    private void refreshPrimary() {
         if (configNoRefresh) {
             return;
         }
@@ -1080,7 +1157,7 @@ public class StructuralCodeGraph implements AutoCloseable {
         if (!absolute.startsWith(projectDir)) {
             return;
         }
-        final var rel = rel(absolute);
+        final var rel = primaryRel(absolute);
         if (isIgnored(rel, absolute)) {
             return;
         }
@@ -1216,7 +1293,7 @@ public class StructuralCodeGraph implements AutoCloseable {
         final var filesToParse = new ArrayList<Path>();
         final var fileRels = new HashMap<Path, String>();
         for (final Path file : candidateFiles()) {
-            final var rel = rel(file);
+            final var rel = primaryRel(file);
             visited.add(rel);
             mtimes.put(rel, lastModified(file));
             final var fp = fingerprint(file);
@@ -1319,7 +1396,7 @@ public class StructuralCodeGraph implements AutoCloseable {
         final var filesToParse = new ArrayList<Path>();
         final var fileRels = new HashMap<Path, String>();
         for (final Path file : candidateFiles()) {
-            final var rel = rel(file);
+            final var rel = primaryRel(file);
             final var fp = fingerprint(file);
             if (fp == null) {
                 continue;
@@ -1433,7 +1510,7 @@ public class StructuralCodeGraph implements AutoCloseable {
     private boolean walkCandidates(final Consumer<Path> sink) {
         final Path root;
         try {
-            root = configuration.resolveProjectDir();
+            root = projectDir;
         } catch (final RuntimeException e) {
             return false;
         }
@@ -1501,7 +1578,7 @@ public class StructuralCodeGraph implements AutoCloseable {
     }
 
     private boolean isSkipped(final Path dir) {
-        return isIgnored(rel(dir), dir);
+        return isIgnored(primaryRel(dir), dir);
     }
 
     /** A1: true when {@code path} (relative path {@code relPath}, or absolute) matches any configured ignore rule.
@@ -1510,7 +1587,7 @@ public class StructuralCodeGraph implements AutoCloseable {
         if (ignoreRules == null || ignoreRules.isEmpty()) {
             return false;
         }
-        final var rel = (relPath == null || relPath.isEmpty()) ? rel(absolute) : relPath;
+        final var rel = (relPath == null || relPath.isEmpty()) ? primaryRel(absolute) : relPath;
         if (rel == null || rel.isEmpty()) {
             return false;
         }
@@ -1532,9 +1609,9 @@ public class StructuralCodeGraph implements AutoCloseable {
                 : name.substring(idx + 1).toLowerCase(Locale.ROOT);
     }
 
-    public String rel(final Path file) {
+    private String primaryRel(final Path file) {
         try {
-            return configuration.resolveProjectDir().relativize(file).toString();
+            return projectDir.relativize(file).toString();
         } catch (final RuntimeException e) {
             return file.toString();
         }
@@ -1585,7 +1662,7 @@ public class StructuralCodeGraph implements AutoCloseable {
     }
 
     /** Flushes any pending persist job immediately (used on shutdown and resync). */
-    public void flushPersist() {
+    private void persistPrimary() {
         PersistJob job;
         while ((job = persistQueue.poll()) != null) {
             writePersist(job.store(), job.mtimes());
@@ -1714,7 +1791,7 @@ public class StructuralCodeGraph implements AutoCloseable {
 
     /**
      * Load a current binary index from disk into memory (memory-mapped when configured). Serves as the session-start
-     * fast path in {@link #ensureReady()}: when present and current it avoids the full-tree re-scan / index.bin
+     * fast path in {@link #preparePrimary()}: when present and current it avoids the full-tree re-scan / index.bin
      * deserialisation. Returns {@code true} on success.
      */
     private boolean loadIndex() {
@@ -1794,6 +1871,15 @@ public class StructuralCodeGraph implements AutoCloseable {
                     final var eldest = map.keySet().iterator().next();
                     map.remove(eldest);
                 }
+            } finally {
+                lock.unlock();
+            }
+        }
+
+        private void remove(final Path root) {
+            lock.lock();
+            try {
+                map.remove(root);
             } finally {
                 lock.unlock();
             }

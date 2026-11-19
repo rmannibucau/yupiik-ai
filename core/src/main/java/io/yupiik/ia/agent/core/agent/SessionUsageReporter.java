@@ -21,7 +21,9 @@ import io.yupiik.ia.agent.core.llm.ChatSettings;
 import io.yupiik.ia.agent.core.llm.Message;
 import io.yupiik.ia.agent.core.llm.Usage;
 import io.yupiik.ia.agent.core.usage.QuotaSnapshotStore;
+import java.nio.file.Path;
 import java.util.List;
+import java.util.Objects;
 import java.util.function.Supplier;
 
 /**
@@ -31,6 +33,7 @@ import java.util.function.Supplier;
  * renders the volatile-tail usage line and nudges).
  */
 public class SessionUsageReporter {
+    private final Path workdir;
     private final UsageTracker usageTracker;
     private final QuotaSnapshotStore quotaStore;
     private final Emitter emitter;
@@ -55,7 +58,9 @@ public class SessionUsageReporter {
             final String sessionId,
             final Supplier<ChatSettings> chatSettings,
             final String subagentId,
-            final String subagentName) {
+            final String subagentName,
+            final Path workdir) {
+        this.workdir = Objects.requireNonNull(workdir, "workdir");
         this.usageTracker = usageTracker;
         this.quotaStore = quotaStore;
         this.emitter = emitter;
@@ -245,7 +250,8 @@ public class SessionUsageReporter {
                 subagentId,
                 subagentName,
                 quota,
-                usageTracker == null ? null : usageTracker.lastContextMeasurement());
+                usageTracker == null ? null : usageTracker.lastContextMeasurement(),
+                workdir);
     }
 
     private void emit(final AgentEvent.UsageUpdated event) {

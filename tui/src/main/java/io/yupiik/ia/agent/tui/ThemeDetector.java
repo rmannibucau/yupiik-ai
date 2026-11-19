@@ -24,6 +24,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Supplier;
+import java.util.regex.Pattern;
 
 /**
  * Best-effort detection of the OS light/dark preference for {@code yca.tui.theme.name=auto}.
@@ -40,6 +41,7 @@ import java.util.function.Supplier;
  * without touching the process environment.
  */
 public final class ThemeDetector {
+    private static final Pattern LINE_BREAK = Pattern.compile("\\R");
     private static final long TIMEOUT_MILLIS = 500L;
 
     /**
@@ -162,7 +164,7 @@ public final class ThemeDetector {
 
     /** Package-private for tests: parses a GTK settings.ini content. */
     static Optional<String> gtkFromSettings(final String content) {
-        for (final var rawLine : content.split("\\R")) {
+        for (final var rawLine : LINE_BREAK.split(content)) {
             final var line = rawLine.strip();
             if (!line.startsWith("gtk-application-prefer-dark-theme")) {
                 continue;

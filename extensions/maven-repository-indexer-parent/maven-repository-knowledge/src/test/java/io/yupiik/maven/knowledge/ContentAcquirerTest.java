@@ -320,7 +320,8 @@ class ContentAcquirerTest {
             final var acquired = acquirer.acquire(Gav.of("g", "d", "1"));
             assertEquals(ContentKind.SOURCES, acquired.kind());
             final var content = acquired.content();
-            final var occurrences = content.split("Duplicate", -1).length - 1;
+            final var occurrences =
+                    (content.length() - content.replace("Duplicate", "").length()) / "Duplicate".length();
             assertEquals(1, occurrences, "identical file content must be deduplicated to a single occurrence");
         }
     }

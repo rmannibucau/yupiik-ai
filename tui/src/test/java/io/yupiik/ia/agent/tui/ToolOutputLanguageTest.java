@@ -23,6 +23,8 @@ import java.util.regex.Pattern;
 import org.junit.jupiter.api.Test;
 
 class ToolOutputLanguageTest {
+    private static final Pattern LEGACY_FILE_REFERENCE = Pattern.compile("[A-Za-z0-9_./~+-]+\\.[A-Za-z0-9_]{1,8}\\b");
+
     @Test
     void commandProgramWins() {
         assertEquals("python", ToolOutputLanguage.guess("42\n", "python3 -c 'print(42)'"));
@@ -153,7 +155,6 @@ class ToolOutputLanguageTest {
 
     @Test
     void scannerAgreesWithLegacyRegexOnDeterministicInputs() {
-        final var reference = Pattern.compile("[A-Za-z0-9_./~+-]+\\.[A-Za-z0-9_]{1,8}\\b");
         final var random = new Random(731);
         final var fragments = new String[] {
             "a",
@@ -185,7 +186,7 @@ class ToolOutputLanguageTest {
                 output.append(fragments[random.nextInt(fragments.length)]);
             }
             final var text = output.toString();
-            final var matcher = reference.matcher(text);
+            final var matcher = LEGACY_FILE_REFERENCE.matcher(text);
             String expected = null;
             var hits = 0;
             while (matcher.find()) {

@@ -27,7 +27,12 @@ import io.yupiik.ia.agent.core.memory.MemoryProductionPolicy;
 import io.yupiik.ia.agent.core.permissions.PermissionService;
 import io.yupiik.ia.agent.core.question.UserFeedbackService;
 import io.yupiik.ia.agent.core.runtime.StatusReporter;
+import io.yupiik.ia.agent.core.session.SessionMetadata;
 import io.yupiik.ia.agent.core.todo.TodoStore;
+import java.nio.file.Path;
+import java.util.List;
+import java.util.Objects;
+import java.util.function.BooleanSupplier;
 
 /**
  * Everything a single session (one TUI tab, the CLI session, a sub-agent) owns:
@@ -42,6 +47,7 @@ import io.yupiik.ia.agent.core.todo.TodoStore;
  */
 public final class SessionRuntime {
     private final AgentLoop loop;
+    private final Path workdir;
     private final PermissionService permissions;
     private final UserFeedbackService feedback;
     private final UsageTracker usage;
@@ -62,8 +68,20 @@ public final class SessionRuntime {
             final TodoStore todos,
             final StatusReporter status,
             final ContextManager contextManager,
-            final SystemPromptBuilder systemPromptBuilder) {
-        this(loop, permissions, feedback, usage, todos, status, contextManager, systemPromptBuilder, null, null);
+            final SystemPromptBuilder systemPromptBuilder,
+            final Path workdir) {
+        this(
+                loop,
+                permissions,
+                feedback,
+                usage,
+                todos,
+                status,
+                contextManager,
+                systemPromptBuilder,
+                null,
+                null,
+                workdir);
     }
 
     SessionRuntime(
@@ -76,7 +94,9 @@ public final class SessionRuntime {
             final ContextManager contextManager,
             final SystemPromptBuilder systemPromptBuilder,
             final MemoryProductionPolicy memoryProductionPolicy,
-            final String memoryProductionKey) {
+            final String memoryProductionKey,
+            final Path workdir) {
+        this.workdir = Objects.requireNonNull(workdir, "workdir");
         this.loop = loop;
         this.permissions = permissions;
         this.feedback = feedback;
@@ -87,6 +107,22 @@ public final class SessionRuntime {
         this.systemPromptBuilder = systemPromptBuilder;
         this.memoryProductionPolicy = memoryProductionPolicy;
         this.memoryProductionKey = memoryProductionKey;
+    }
+
+    public Path workdir() {
+        return workdir;
+    }
+
+    /** Session setup instructions and extra context roots; does not widen this runtime's permission ceiling. */
+    public void configureSessionContext(final List<Path> directories, final SessionMetadata.Instructions instructions) {
+        if (systemPromptBuilder == null) {
+            if (!directories.isEmpty() || instructions != null) {
+                throw new IllegalArgumentException("Session context is unavailable");
+            }
+            return;
+        }
+        systemPromptBuilder.attach(chatSettings());
+        systemPromptBuilder.configureSessionContext(directories, instructions);
     }
 
     /** The session's own agent loop (turn execution, per-turn metrics). */
@@ -155,7 +191,18 @@ public final class SessionRuntime {
 
     /** Applies a new session selection (mid-turn changes take effect from the next round/tool call). */
     public void updateChatSettings(final ChatSettings value) {
+        if (systemPromptBuilder != null) {
+            systemPromptBuilder.validateChatSettings(value);
+        }
         loop.updateChatSettings(value);
+    }
+
+    /** Cancellable selection; admission and close checks are owned by the loop, after its hooks. */
+    public boolean updateChatSettings(final ChatSettings value, final BooleanSupplier cancelled) {
+        if (systemPromptBuilder != null) {
+            systemPromptBuilder.validateChatSettings(value);
+        }
+        return loop.updateChatSettings(value, cancelled);
     }
 
     /** Attaches the current provider's quota and pushes a UsageUpdated so the TUI/web gauges reflect it

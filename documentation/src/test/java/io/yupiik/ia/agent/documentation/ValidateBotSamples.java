@@ -29,6 +29,16 @@ import java.util.regex.Pattern;
  * java documentation/src/test/java/io/yupiik/ia/agent/documentation/ValidateBotSamples.java
  */
 public class ValidateBotSamples {
+    private static final Pattern REFERENCES = Pattern.compile("xref:([^\\s\\[]+)\\[");
+    private static final Pattern BREADCRUMBS = Pattern.compile("\\[([^] ]+\\.html)]");
+    private static final Pattern PROVIDER_TARGET =
+            Pattern.compile("(?m)^SLACK_EXECUTOR_DOCKER_SERVICES_PROVIDERTARGET=(.+)$");
+    private static final Pattern EXPLICIT_ANCHOR = Pattern.compile("\\[\\[([^],]+)(?:,[^]]*)?]]|\\[#([^]]+)]");
+    private static final Pattern HEADING = Pattern.compile("={1,6} .+");
+    private static final Pattern HEADING_PREFIX = Pattern.compile("^=+ +");
+    private static final Pattern ANCHOR_PUNCTUATION = Pattern.compile("[^a-z0-9 _-]");
+    private static final Pattern ANCHOR_SEPARATOR = Pattern.compile("[ _-]+");
+
     public static void main(final String[] args) throws Exception {
         new ValidateBotSamples().validate();
     }
@@ -36,8 +46,6 @@ public class ValidateBotSamples {
     private void validate() throws Exception {
         final var content = Path.of("documentation/src/main/minisite/content");
         final var slack = Path.of("extensions/bot-parent/slack-bot/src/main");
-        final var references = Pattern.compile("xref:([^\\s\\[]+)\\[");
-        final var breadcrumbs = Pattern.compile("\\[([^] ]+\\.html)]");
         int links = 0;
         for (final var relative : List.of(
                 "slack-bot/index.adoc",
@@ -52,7 +60,7 @@ public class ValidateBotSamples {
                 "bots/docker-shared-slots.adoc")) {
             final var page = content.resolve(relative);
             final var source = Files.readString(page);
-            final var matcher = references.matcher(source);
+            final var matcher = REFERENCES.matcher(source);
             while (matcher.find()) {
                 final var parts = matcher.group(1).split("#", 2);
                 final var target = page.getParent().resolve(parts[0]).normalize();
@@ -64,7 +72,7 @@ public class ValidateBotSamples {
                 }
                 links++;
             }
-            final var breadcrumb = breadcrumbs.matcher(source.lines()
+            final var breadcrumb = BREADCRUMBS.matcher(source.lines()
                     .filter(line -> line.startsWith(":minisite-breadcrumb:"))
                     .findFirst()
                     .orElse(""));
@@ -136,8 +144,7 @@ public class ValidateBotSamples {
         for (final var name : List.of("OPENAI_API_KEY", "YCA_SERVICES_KEYSTORE_PASSWORD")) {
             require(wrapper.contains("--env " + name), "Missing explicit controller credential forwarding: " + name);
         }
-        final var target = Pattern.compile("(?m)^SLACK_EXECUTOR_DOCKER_SERVICES_PROVIDERTARGET=(.+)$")
-                .matcher(environment);
+        final var target = PROVIDER_TARGET.matcher(environment);
         require(target.find() && agent.contains("\"baseUrl\": \"" + target.group(1) + "\""), "Provider targets differ");
         require(agent.contains("\"yca\": {"), "Sample must use the supported yca wrapper");
         require(agent.contains("\"api\": \"COMPLETIONS\""), "Unsupported provider API");
@@ -236,18 +243,15 @@ public class ValidateBotSamples {
 
     private HashSet<String> anchors(final String source) {
         final var result = new HashSet<String>();
-        final var explicit =
-                Pattern.compile("\\[\\[([^],]+)(?:,[^]]*)?]]|\\[#([^]]+)]").matcher(source);
+        final var explicit = EXPLICIT_ANCHOR.matcher(source);
         while (explicit.find()) {
             result.add(explicit.group(1) == null ? explicit.group(2) : explicit.group(1));
         }
-        source.lines()
-                .filter(line -> line.matches("={1,6} .+"))
-                .forEach(line -> result.add("_"
-                        + line.replaceFirst("^=+ +", "")
-                                .toLowerCase(Locale.ROOT)
-                                .replaceAll("[^a-z0-9 _-]", "")
-                                .replaceAll("[ _-]+", "_")));
+        source.lines().filter(line -> HEADING.matcher(line).matches()).forEach(line -> {
+            final var title = HEADING_PREFIX.matcher(line).replaceFirst("").toLowerCase(Locale.ROOT);
+            final var plain = ANCHOR_PUNCTUATION.matcher(title).replaceAll("");
+            result.add("_" + ANCHOR_SEPARATOR.matcher(plain).replaceAll("_"));
+        });
         return result;
     }
 

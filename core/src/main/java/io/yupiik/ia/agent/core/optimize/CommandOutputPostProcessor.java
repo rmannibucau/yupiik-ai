@@ -33,6 +33,7 @@ import java.util.regex.Pattern;
  */
 @ApplicationScoped
 public class CommandOutputPostProcessor {
+    private static final Pattern WHITESPACE = Pattern.compile("\\s+");
     private static final Pattern UNSIGNED_INTEGER = Pattern.compile("\\d+");
     private static final Pattern ENVIRONMENT_ASSIGNMENT = Pattern.compile("[A-Za-z_][A-Za-z0-9_]*=.*");
 
@@ -89,7 +90,7 @@ public class CommandOutputPostProcessor {
     }
 
     public String secondToken(final String command) {
-        final var tokens = command.strip().split("\\s+");
+        final var tokens = WHITESPACE.split(command.strip());
         for (var i = 1; i < tokens.length; i++) {
             if (!tokens[i].startsWith("-")) {
                 return tokens[i];
@@ -103,7 +104,7 @@ public class CommandOutputPostProcessor {
      * {@code gh run list} -> {@code list}, {@code gh api} -> {@code ""}.
      */
     public String thirdToken(final String command) {
-        final var tokens = command.strip().split("\\s+");
+        final var tokens = WHITESPACE.split(command.strip());
         int found = 0;
         for (var i = 1; i < tokens.length; i++) {
             if (tokens[i].startsWith("-")) {

@@ -40,6 +40,7 @@ import io.yupiik.llm.client.openai.OpenAIResponsesDialect;
 import io.yupiik.llm.client.spi.ProviderSpec;
 import java.lang.reflect.Method;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.LinkedHashMap;
@@ -50,6 +51,7 @@ import java.util.stream.Collectors;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.api.io.TempDir;
 
 /**
  * Component-level display isolation guard, not a TurnRunner/AgentLoop integration test.
@@ -58,6 +60,9 @@ import org.junit.jupiter.api.extension.ExtendWith;
  */
 @ExtendWith(TestJsonMapper.class)
 class TuiPayloadInvarianceTest {
+    @TempDir
+    private static Path eventWorkdir;
+
     private static final String SESSION = "payload-invariance-session";
     private static final Method TO_REQUEST = requestTranslator();
     private static JsonMapper mapper;
@@ -114,12 +119,15 @@ class TuiPayloadInvarianceTest {
                 unchanged(mapper, historyJson, request, expected, payload, dialect, "replay");
 
                 display.startUserTurn("display-only prompt");
-                display.onEvent(new AgentEvent.ThinkingDelta("private display thought", SESSION));
-                display.onEvent(new AgentEvent.TextDelta("display answer\n", SESSION));
-                display.onEvent(new AgentEvent.ToolStarted("read_file", "{\"path\":\"README.md\"}", SESSION));
-                display.onEvent(new AgentEvent.ToolStream("read_file", "display tool fragment\n", SESSION));
-                display.onEvent(new AgentEvent.ToolFinished("read_file", "display result", true, SESSION));
-                display.onEvent(new AgentEvent.TurnDone("display final", SESSION));
+                display.onEvent(new AgentEvent.ThinkingDelta("private display thought", SESSION, eventWorkdir));
+                display.onEvent(new AgentEvent.TextDelta("display answer\n", SESSION, eventWorkdir));
+                display.onEvent(
+                        new AgentEvent.ToolStarted("read_file", "{\"path\":\"README.md\"}", SESSION, eventWorkdir));
+                display.onEvent(
+                        new AgentEvent.ToolStream("read_file", "display tool fragment\n", SESSION, eventWorkdir));
+                display.onEvent(
+                        new AgentEvent.ToolFinished("read_file", "display result", true, SESSION, eventWorkdir));
+                display.onEvent(new AgentEvent.TurnDone("display final", SESSION, eventWorkdir));
                 unchanged(mapper, historyJson, request, expected, payload, dialect, "stream events");
 
                 final var markdown = display.markdown("|", "welcome");
@@ -154,7 +162,7 @@ class TuiPayloadInvarianceTest {
             model.maxViewOffset(100);
             model.anchorRow(7);
             model.userScrolled(true);
-            model.onEvent(new AgentEvent.TextDelta("offscreen display tail", SESSION));
+            model.onEvent(new AgentEvent.TextDelta("offscreen display tail", SESSION, eventWorkdir));
             assertEquals(7, model.anchorRow());
             unchanged(mapper, historyJson, request, expected, payload, dialect, "scroll");
 

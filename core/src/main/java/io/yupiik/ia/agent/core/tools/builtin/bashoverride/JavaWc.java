@@ -20,10 +20,13 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.regex.Pattern;
 
 /** Faithful {@code wc -l | -c | -w <file>...} reimplementation. */
 @ApplicationScoped
 public class JavaWc implements JavaCommand {
+    private static final Pattern WHITESPACE = Pattern.compile("\\s+");
+
     @Override
     public String name() {
         return "wc";
@@ -76,7 +79,7 @@ public class JavaWc implements JavaCommand {
                 continue;
             }
             final long words = lines.stream()
-                    .mapToLong(l -> l.trim().isEmpty() ? 0 : l.trim().split("\\s+").length)
+                    .mapToLong(l -> l.trim().isEmpty() ? 0 : WHITESPACE.split(l.trim()).length)
                     .sum();
             tl += lines.size();
             tb += bytes;

@@ -17,6 +17,7 @@ package io.yupiik.ia.agent.core.agent;
 
 import io.yupiik.fusion.framework.api.event.Emitter;
 import io.yupiik.fusion.json.JsonMapper;
+import io.yupiik.ia.agent.core.agent.AgentEvent.CompactionPass;
 import io.yupiik.ia.agent.core.codegraph.StructuralCodeGraph;
 import io.yupiik.ia.agent.core.configuration.AgentMode;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
@@ -71,7 +72,9 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
@@ -82,6 +85,7 @@ import java.util.function.Function;
 import java.util.function.Supplier;
 import java.util.logging.Logger;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 
 public class AgentLoop {
     static final Logger LOGGER = Logger.getLogger(AgentLoop.class.getName());
@@ -211,12 +215,11 @@ public class AgentLoop {
     volatile String currentSessionId;
     /**
      * The session's resolved working/project directory, set once by
-     * {@code SessionRuntimeFactory}. Null means the process default
-     * ({@code configuration.resolveProjectDir()}). Injected into every per-turn
+     * {@code SessionRuntimeFactory}. Required and immutable. Injected into every per-turn
      * {@link ToolContext} so file-rooted tools resolve paths against the session's
      * root. A mid-session change rebuilds the runtime rather than mutating this field.
      */
-    volatile Path sessionWorkdir;
+    final Path sessionWorkdir;
     /**
      * The session's sub-agent admission budget (the {@code yca.subagents.maxConcurrent} per-session
      * cap), set once by {@code SessionRuntimeFactory} like {@link #sessionWorkdir}. Null for loops
@@ -226,6 +229,8 @@ public class AgentLoop {
     volatile SubagentBudget subagentBudget;
     /** Set when the loop/session is closed so {@link #close()} fires the SessionEnded hook only once. */
     volatile boolean closed;
+
+    private final ReentrantLock lifecycleLock = new ReentrantLock();
     /** True when the last persistContext failed: the on-disk session lags the in-memory one until the next retry. */
     volatile boolean persistDirty;
     /** Effective agent of the current turn (set at {@code doRun} start), used for identity capture. */
@@ -490,7 +495,8 @@ public class AgentLoop {
             final SnapshotStore snapshotStore,
             final TodoStore todoStore,
             final ExecutorService executor,
-            final NotificationService notificationService) {
+            final NotificationService notificationService,
+            final Path workdir) {
         this(
                 chatClient,
                 toolRegistry,
@@ -523,7 +529,8 @@ public class AgentLoop {
                 notificationService,
                 null,
                 null,
-                null);
+                null,
+                workdir);
     }
 
     AgentLoop(
@@ -551,7 +558,8 @@ public class AgentLoop {
             final ExecutorService executor,
             final String subagentId,
             final String subagentName,
-            final NotificationService notificationService) {
+            final NotificationService notificationService,
+            final Path workdir) {
         this(
                 chatClient,
                 toolRegistry,
@@ -584,13 +592,14 @@ public class AgentLoop {
                 notificationService,
                 null,
                 null,
-                null);
+                null,
+                workdir);
     }
 
-    protected AgentLoop() {
+    protected AgentLoop(final Path workdir) {
         this(
                 null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null,
-                null, null, null, null, null, null, null, null, null, null, null, null, null, null, null);
+                null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, workdir);
     }
 
     /**
@@ -632,7 +641,9 @@ public class AgentLoop {
             final NotificationService notificationService,
             final TodoContinuation todoContinuation,
             final TurnNotificationReporter turnNotificationReporter,
-            final AgentTurnExecutor turnExecutor) {
+            final AgentTurnExecutor turnExecutor,
+            final Path workdir) {
+        this.sessionWorkdir = Objects.requireNonNull(workdir, "workdir");
         this.chatClient = chatClient;
         this.toolRegistry = toolRegistry;
         this.toolExecutionService = toolExecutionService;
@@ -680,7 +691,8 @@ public class AgentLoop {
                 this.sessionId,
                 () -> this.chatSettings,
                 subagentId,
-                subagentName);
+                subagentName,
+                sessionWorkdir);
         this.toolExecution = new ToolCallExecution(
                 toolRegistry,
                 toolExecutionService,
@@ -701,7 +713,8 @@ public class AgentLoop {
                 () -> this.subagentBudget,
                 this::effectiveAllowedTools,
                 () -> this.servedToolNames,
-                this::chatSettings);
+                this::chatSettings,
+                () -> this.closed);
         this.todoContinuation = todoContinuation == null
                 ? new TodoContinuation(
                         configuration,
@@ -711,7 +724,8 @@ public class AgentLoop {
                         clock,
                         () -> this.currentSessionId,
                         () -> this.subagentId,
-                        () -> this.subagentName)
+                        () -> this.subagentName,
+                        sessionWorkdir)
                 : todoContinuation;
         this.turnNotificationReporter = turnNotificationReporter == null
                 ? new TurnNotificationReporter(
@@ -725,7 +739,8 @@ public class AgentLoop {
                         () -> this.subagentName,
                         () -> this.lastTurnEndedWithContent,
                         value -> this.lastTurnEndedWithContent = value,
-                        this::emit)
+                        this::emit,
+                        sessionWorkdir)
                 : turnNotificationReporter;
         this.loopGuards = new LoopGuards(providerManager, configuration, () -> this.maxIterationsCap);
         this.turnExecutor = turnExecutor == null ? new AgentTurnExecutor(this) : turnExecutor;
@@ -753,33 +768,73 @@ public class AgentLoop {
 
     /** Applies a new selection value (mid-turn changes take effect from the next round/tool call). */
     public void updateChatSettings(final ChatSettings value) {
+        updateChatSettings(value, () -> false);
+    }
+
+    /**
+     * Applies a selection only if its owner has not cancelled at post-hook commit admission.
+     * The last predicate read under the lifecycle lock is the admission point. Cancellation
+     * after admission does not roll back settings or their already-admitted notifications.
+     * The predicate must be nonblocking and must not invoke hooks or acquire frontend locks.
+     */
+    public boolean updateChatSettings(final ChatSettings value, final BooleanSupplier cancelled) {
+        Objects.requireNonNull(cancelled, "cancelled");
         final var alt = value == null ? ChatSettings.EMPTY : value;
-        final var current = chatSettings;
+        final ChatSettings current;
+        lifecycleLock.lock();
+        try {
+            if (closed || cancelled.getAsBoolean()) {
+                return false;
+            }
+            current = chatSettings;
+        } finally {
+            lifecycleLock.unlock();
+        }
         // the model-switch hook is emitted before the swap so a forbid vetoes the switch (the turn keeps the old model)
         if (emitter != null) {
             final var hookResult = new HookResult();
             emitter.emit(new ModelSwitchingEvent(
-                    new EventContextBuilder(configuration)
-                            .build(permissionService, current, currentSessionId, subagentId, subagentName, null),
+                    new EventContextBuilder()
+                            .build(
+                                    permissionService,
+                                    current,
+                                    currentSessionId,
+                                    subagentId,
+                                    subagentName,
+                                    sessionWorkdir),
                     current == null || current.model() == null ? null : current.model(),
                     alt.model(),
                     alt.variant(),
                     hookResult));
             if (hookResult.forbidden()) {
-                emit(AgentEvent.Notice.warn(
-                        "Model switch rejected" + (hookResult.reason() == null ? "" : ": " + hookResult.reason()),
-                        currentSessionId));
-                return;
+                if (!closed && !cancelled.getAsBoolean()) {
+                    emit(AgentEvent.Notice.warn(
+                            "Model switch rejected" + (hookResult.reason() == null ? "" : ": " + hookResult.reason()),
+                            currentSessionId,
+                            sessionWorkdir));
+                }
+                return false;
             }
         }
-        this.chatSettings = alt;
-        if (usageTracker != null) {
-            usageTracker.attach(alt);
+        // Hooks can block or re-enter close(). Commit only while the session is still alive;
+        // attaching the local usage selection is part of the same short state transition.
+        lifecycleLock.lock();
+        try {
+            if (closed || cancelled.getAsBoolean()) {
+                return false;
+            }
+            this.chatSettings = alt;
+            if (usageTracker != null) {
+                usageTracker.attach(alt);
+            }
+        } finally {
+            lifecycleLock.unlock();
         }
-        if (emitter != null) {
+        // Never run observer hooks or provider I/O under the lifecycle lock.
+        if (emitter != null && !closed) {
             emitter.emit(new ModelSwitchedEvent(
-                    new EventContextBuilder(configuration)
-                            .build(permissionService, alt, currentSessionId, subagentId, subagentName, null),
+                    new EventContextBuilder()
+                            .build(permissionService, alt, currentSessionId, subagentId, subagentName, sessionWorkdir),
                     current == null || current.model() == null ? null : current.model(),
                     alt.model(),
                     alt.variant()));
@@ -789,7 +844,7 @@ public class AgentLoop {
         // switch time instead of keeping the old provider's cached quota until the next turn, and a
         // fully-reached quota is visible. Only a provider change pushes a quota event: a model-only
         // switch reuses the already-attached snapshot and must not clobber the live context gauge.
-        if (providerChanged(current, alt)) {
+        if (!closed && providerChanged(current, alt)) {
             if (quotaStore != null) {
                 // before the first turn currentSessionId is still null: key the quota on the loop's
                 // stable session id (the id doRun will set later), otherwise a switch issued as the
@@ -798,6 +853,7 @@ public class AgentLoop {
             }
             pushUsageQuota();
         }
+        return true;
     }
 
     /** True when the resolved provider id differs between two selections (blank = process default). */
@@ -826,10 +882,15 @@ public class AgentLoop {
      * first call only (a TUI may dispose a tab and later re-close, or the CLI and process shutdown may overlap).
      */
     public void close() {
-        if (closed) {
-            return;
+        lifecycleLock.lock();
+        try {
+            if (closed) {
+                return;
+            }
+            closed = true;
+        } finally {
+            lifecycleLock.unlock();
         }
-        closed = true;
         usageReporter.close();
         if (contextManager != null) {
             contextManager.shutdownSpeculation();
@@ -837,10 +898,20 @@ public class AgentLoop {
         if (emitter != null) {
             final var id = currentSessionId != null ? currentSessionId : this.sessionId;
             emitter.emit(new SessionEndedEvent(
-                    new EventContextBuilder(configuration)
-                            .build(permissionService, chatSettings(), id, subagentId, subagentName, null),
+                    new EventContextBuilder()
+                            .build(permissionService, chatSettings(), id, subagentId, subagentName, sessionWorkdir),
                     id,
                     null));
+        }
+    }
+
+    /** Publishes an applied mode change, including when the session has not run a turn yet. */
+    public void notifyModeChanged(final AgentMode mode) {
+        if (emitter != null && !closed) {
+            emit(AgentEvent.Notice.info(
+                    "mode: " + mode.name().toLowerCase(Locale.ROOT),
+                    currentSessionId != null ? currentSessionId : sessionId,
+                    sessionWorkdir));
         }
     }
 
@@ -927,8 +998,8 @@ public class AgentLoop {
         }
         final var toolCeiling = effectiveAllowedTools();
         final var tools = toolCeiling == null
-                ? toolRegistry.toWireTools()
-                : toolRegistry.toWireTools(tool -> toolCeiling.contains(tool.name()));
+                ? toolRegistry.toWireTools(sessionWorkdir)
+                : toolRegistry.toWireTools(sessionWorkdir, tool -> toolCeiling.contains(tool.name()));
         if (permissionService == null || permissionService.mode() != AgentMode.PLAN) {
             return tools;
         }
@@ -938,6 +1009,22 @@ public class AgentLoop {
                     return embedded == null || embedded.category() != ToolCategory.EDIT;
                 })
                 .toList();
+    }
+
+    /** Borrowed registry owned by this loop's runtime, never by a child or side question. */
+    public ToolRegistry effectiveToolRegistry() {
+        if (closed) {
+            throw new IllegalStateException("Session is closed");
+        }
+        return toolRegistry;
+    }
+
+    /** Captures the current projection, including profile, run, usability and PLAN restrictions. */
+    public Set<String> availableToolNames() {
+        if (closed) {
+            throw new IllegalStateException("Session is closed");
+        }
+        return wireTools().stream().map(tool -> tool.function().name()).collect(Collectors.toUnmodifiableSet());
     }
 
     Set<String> effectiveAllowedTools() {
@@ -1050,12 +1137,12 @@ public class AgentLoop {
     void emitPhase(final String name) {
         if (emitter != null) {
             emitter.emit(new AgentEvent.Phase(
-                    name, currentSessionId != null ? currentSessionId : this.sessionId, subagentId, subagentName));
+                    name,
+                    currentSessionId != null ? currentSessionId : this.sessionId,
+                    subagentId,
+                    subagentName,
+                    sessionWorkdir));
         }
-    }
-
-    public void sessionWorkdir(final Path dir) {
-        this.sessionWorkdir = dir;
     }
 
     /**
@@ -1112,6 +1199,34 @@ public class AgentLoop {
         return compacted(List.of(kind), mode, null);
     }
 
+    /** A speculative candidate becomes a public pass only when actually adopted, not while prepared. */
+    void emitAdoptedCompaction(final CompactionResult result) {
+        if (emitter != null) {
+            final var id = "compaction-" + UUID.randomUUID();
+            try {
+                emitter.emit(new CompactionPass(
+                        id,
+                        CompactionPass.Status.STARTED,
+                        null,
+                        null,
+                        currentSessionId,
+                        subagentId,
+                        subagentName,
+                        sessionWorkdir));
+            } finally {
+                emitter.emit(new CompactionPass(
+                        id,
+                        CompactionPass.Status.SUCCEEDED,
+                        result.mode(),
+                        "Context compacted (" + result.mode().name() + ").",
+                        currentSessionId,
+                        subagentId,
+                        subagentName,
+                        sessionWorkdir));
+            }
+        }
+    }
+
     AgentEvent.Compacted compacted(
             final String kind, final String mode, final AgentEvent.Compacted.CompactionTokens tokens) {
         return compacted(List.of(kind), mode, tokens);
@@ -1123,7 +1238,8 @@ public class AgentLoop {
 
     AgentEvent.Compacted compacted(
             final List<String> kinds, final String mode, final AgentEvent.Compacted.CompactionTokens tokens) {
-        return new AgentEvent.Compacted(kinds, mode, currentSessionId, subagentId, subagentName, tokens);
+        return new AgentEvent.Compacted(
+                kinds, mode, currentSessionId, subagentId, subagentName, tokens, sessionWorkdir);
     }
 
     /** Bounded before/after pair for a Compacted event (raw estimates, never negative). */
@@ -1169,19 +1285,21 @@ public class AgentLoop {
                         + hardLimit
                         + "). Run /compact urgent to force local truncation, or "
                         + "reduce the session size. Continuing and monitoring the provider hard limit.",
-                currentSessionId));
+                currentSessionId,
+                sessionWorkdir));
     }
 
     AgentEvent.Status status(final String message) {
-        return new AgentEvent.Status(message, currentSessionId, subagentId, subagentName);
+        return new AgentEvent.Status(message, currentSessionId, subagentId, subagentName, sessionWorkdir);
     }
 
     AgentEvent.Notice notice(final AgentEvent.Notice.Level level, final String message) {
-        return new AgentEvent.Notice(level, message, null, currentSessionId, subagentId, subagentName);
+        return new AgentEvent.Notice(level, message, null, currentSessionId, subagentId, subagentName, sessionWorkdir);
     }
 
     AgentEvent.Notice notice(final AgentEvent.Notice.Level level, final String message, final String finishReason) {
-        return new AgentEvent.Notice(level, message, finishReason, currentSessionId, subagentId, subagentName);
+        return new AgentEvent.Notice(
+                level, message, finishReason, currentSessionId, subagentId, subagentName, sessionWorkdir);
     }
 
     AgentEvent.Notice notice(
@@ -1189,19 +1307,20 @@ public class AgentLoop {
             final String message,
             final String finishReason,
             final Throwable cause) {
-        return new AgentEvent.Notice(level, message, finishReason, currentSessionId, subagentId, subagentName, cause);
+        return new AgentEvent.Notice(
+                level, message, finishReason, currentSessionId, subagentId, subagentName, cause, sessionWorkdir);
     }
 
     AgentEvent.TurnDone turnDone(final String content) {
-        return new AgentEvent.TurnDone(content, currentSessionId, subagentId, subagentName);
+        return new AgentEvent.TurnDone(content, currentSessionId, subagentId, subagentName, sessionWorkdir);
     }
 
     AgentEvent.Error error(final String message) {
-        return new AgentEvent.Error(message, currentSessionId, subagentId, subagentName);
+        return new AgentEvent.Error(message, currentSessionId, subagentId, subagentName, sessionWorkdir);
     }
 
     AgentEvent.PromptIntegrated promptIntegrated(final String text) {
-        return new AgentEvent.PromptIntegrated(text, currentSessionId, subagentId, subagentName);
+        return new AgentEvent.PromptIntegrated(text, currentSessionId, subagentId, subagentName, sessionWorkdir);
     }
 
     AgentEvent.TurnMetrics turnMetrics(
@@ -1229,13 +1348,21 @@ public class AgentLoop {
                         turnState.outputEstimated),
                 currentSessionId,
                 subagentId,
-                subagentName);
+                subagentName,
+                sessionWorkdir);
     }
 
     AgentEvent.ToolTimingEvent toolTimingEvent(
             final String toolName, final long durationMs, final long wallDurationMs, final boolean parallelBatch) {
         return new AgentEvent.ToolTimingEvent(
-                toolName, durationMs, wallDurationMs, parallelBatch, currentSessionId, subagentId, subagentName);
+                toolName,
+                durationMs,
+                wallDurationMs,
+                parallelBatch,
+                currentSessionId,
+                subagentId,
+                subagentName,
+                sessionWorkdir);
     }
 
     /**

@@ -17,11 +17,11 @@ package io.yupiik.ia.agent.core.tools;
 
 import static java.util.stream.Collectors.joining;
 
-import io.yupiik.ia.agent.core.context.TokenEstimator;
 import io.yupiik.fusion.framework.api.event.Emitter;
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.ia.agent.core.agent.AgentEvent;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
+import io.yupiik.ia.agent.core.context.TokenEstimator;
 import io.yupiik.ia.agent.core.optimize.AfterToolExecutionEvent;
 import io.yupiik.ia.agent.core.optimize.BeforeToolExecutionEvent;
 import io.yupiik.ia.agent.core.optimize.CommandOutputPostProcessor;
@@ -30,6 +30,7 @@ import io.yupiik.ia.agent.core.security.ToolExecutionPrepare;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
@@ -80,17 +81,13 @@ public class ToolExecutionService {
         this(null, null, null, null, null, null);
     }
 
-    public ToolResult execute(final EmbeddedTool tool, final Map<String, Object> args) {
-        return execute(tool, args, ToolContext.empty());
-    }
-
     /**
      * Executes a tool with the session context of the running turn: timing events are tagged with
      * that session (and subagent, when any) and the output-optimization notices are reported through
      * the context's own status reporter so they land in the tab that owns the turn.
      */
     public ToolResult execute(final EmbeddedTool tool, final Map<String, Object> args, final ToolContext context) {
-        final var ctx = context == null ? ToolContext.empty() : context;
+        final var ctx = Objects.requireNonNull(context, "context");
         final var optimize = configuration.optimize();
         final var optimizeThis = optimize.enabled() && !commandOutput.isDisabled(optimize, List.of(tool.name()));
         if (optimizeThis) {
@@ -114,6 +111,22 @@ public class ToolExecutionService {
             result = ToolResult.error("Tool " + tool.name() + " failed: " + e);
         }
         final var durationMs = (System.nanoTime() - startNanos) / 1_000_000;
+        if (!result.fileMutations().isEmpty()) {
+            try {
+                emitter.emit(new AgentEvent.ToolFilesChanged(
+                        tool.name(),
+                        result.fileMutations(),
+                        ctx.ordinal(),
+                        ctx.sessionId(),
+                        ctx.subagentId(),
+                        ctx.subagentName(),
+                        ctx.projectDir()));
+            } catch (final RuntimeException | Error observerFailure) {
+                // Mutation already completed. Never log observer diagnostics containing file data or
+                // credentials, or turn a completed write into a failed tool result.
+                LOGGER.warning("file-mutation event observer failed");
+            }
+        }
         var output = result.output();
         if (result.success() && optimizeThis) {
             output = optimizeOutput(tool, args, output, ctx);
@@ -121,7 +134,14 @@ public class ToolExecutionService {
         if (optimizeThis) {
             try {
                 emitter.emit(new AfterToolExecutionEvent(
-                        tool.name(), result.success(), output, ctx.sessionId(), ctx.subagentId(), ctx.subagentName()));
+                        tool.name(),
+                        result.success(),
+                        output,
+                        ctx.sessionId(),
+                        ctx.subagentId(),
+                        ctx.subagentName(),
+                        args,
+                        ctx.projectDir()));
             } catch (final RuntimeException | Error e) {
                 // a ToolUsePost hook (or any other after-tool observer) failing must never lose the tool result:
                 // the outcome is still returned to the caller so the card can close normally.
@@ -130,14 +150,21 @@ public class ToolExecutionService {
         }
         try {
             emitter.emit(new AgentEvent.ToolTimingEvent(
-                    tool.name(), durationMs, durationMs, false, ctx.sessionId(), ctx.subagentId(), ctx.subagentName()));
+                    tool.name(),
+                    durationMs,
+                    durationMs,
+                    false,
+                    ctx.sessionId(),
+                    ctx.subagentId(),
+                    ctx.subagentName(),
+                    ctx.projectDir()));
         } catch (final RuntimeException | Error e) {
             // a timing/statistics observer failing is non-fatal for the tool itself (it already ran to completion)
             LOGGER.log(Level.WARNING, "tool timing event observer failed for '" + tool.name() + "'", e);
         }
         // preserve the tri-state (OK/PENDING/ERROR) so a PENDING result is not collapsed to ERROR:
         // use the status-preserving copy rather than the legacy boolean constructor.
-        return new ToolResult(result.status(), output);
+        return new ToolResult(result.status(), output, result.fileMutations());
     }
 
     private String optimizeOutput(
@@ -170,10 +197,11 @@ public class ToolExecutionService {
                                     + " -> " + processed.length() + " chars)");
                         }
                         if (context.usage() != null) {
-                            context.usage().recordOptimization(
-                                    output.length(),
-                                    processed.length(),
-                                    TokenEstimator.estimate(output) - TokenEstimator.estimate(processed));
+                            context.usage()
+                                    .recordOptimization(
+                                            output.length(),
+                                            processed.length(),
+                                            TokenEstimator.estimate(output) - TokenEstimator.estimate(processed));
                         }
                         return processed;
                     }

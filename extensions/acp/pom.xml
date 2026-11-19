@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.1.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.1.0 http://maven.apache.org/xsd/maven-4.1.0.xsd">
+  <modelVersion>4.1.0</modelVersion>
+  <parent />
+  <artifactId>acp</artifactId>
+  <name>YCA :: ACP</name>
+  <description>Agent Client Protocol v1 stdio frontend, including session-owned client MCP servers.</description>
+  <dependencies>
+    <dependency>
+      <groupId>io.yupiik.ia.agent</groupId>
+      <artifactId>core</artifactId>
+      <version>${project.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>io.yupiik.fusion</groupId>
+      <artifactId>fusion-build-api</artifactId>
+      <scope>provided</scope>
+    </dependency>
+    <dependency>
+      <groupId>io.yupiik.fusion</groupId>
+      <artifactId>fusion-processor</artifactId>
+      <scope>provided</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.junit.jupiter</groupId>
+      <artifactId>junit-jupiter</artifactId>
+    </dependency>
+  </dependencies>
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-compiler-plugin</artifactId>
+        <configuration>
+          <compilerArgs>
+            <compilerArg>-Afusion.moduleFqn=io.yupiik.ia.agent.acp.AcpModule</compilerArg>
+          </compilerArgs>
+        </configuration>
+        <executions>
+          <execution>
+            <id>default-testCompile</id>
+            <configuration>
+              <compilerArgs>
+                <compilerArg>-Afusion.moduleFqn=io.yupiik.ia.agent.acp.AcpTestModule</compilerArg>
+              </compilerArgs>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+    </plugins>
+  </build>
+</project>

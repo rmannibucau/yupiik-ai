@@ -22,6 +22,7 @@ import io.yupiik.ia.agent.core.shell.ShellEnv;
 import io.yupiik.ia.agent.core.shell.ShellOutcome;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.regex.Pattern;
 
 /**
  * Session-scoped permission-anchor management: inspect what the session has
@@ -30,6 +31,8 @@ import java.util.List;
  * {@code yca.permissions.bash.rules} allowlist and the per-approval flow.
  */
 public class PermissionCommands implements SlashCommandSet {
+    private static final Pattern WHITESPACE = Pattern.compile("\\s+");
+
     @Override
     public String title() {
         return "Permission commands";
@@ -108,7 +111,7 @@ public class PermissionCommands implements SlashCommandSet {
             return ShellOutcome.error("usage: /permission-remove <anchor...>");
         }
         final var removed = new ArrayList<String>();
-        for (final var token : arg.strip().split("\\s+")) {
+        for (final var token : WHITESPACE.split(arg.strip())) {
             if (token.isBlank()) {
                 continue;
             }

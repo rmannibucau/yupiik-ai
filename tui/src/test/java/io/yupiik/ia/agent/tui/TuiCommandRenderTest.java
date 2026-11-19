@@ -146,6 +146,12 @@ import org.junit.jupiter.params.provider.CsvSource;
 @ResourceLock("io.yupiik-jul-handler")
 @ExtendWith(TestJsonMapper.class)
 class TuiCommandRenderTest {
+    @TempDir
+    private static Path eventWorkdir;
+
+    @TempDir
+    private static Path testWorkdir;
+
     @Test
     @SuppressWarnings("unchecked")
     void capturedThoughtHeadingIsIdenticalInLiveAndFlushedLayouts() throws Exception {
@@ -290,7 +296,7 @@ class TuiCommandRenderTest {
     void shiftEnterInsertsNewlineInsteadOfSubmitting() throws Exception {
         final var shellRegistry = testRegistry();
         final var received = new AtomicReference<String>();
-        final var agentLoop = new AgentLoop() {
+        final var agentLoop = new AgentLoop(testWorkdir) {
             @Override
             public String run(
                     final String prompt,
@@ -300,7 +306,7 @@ class TuiCommandRenderTest {
                     final BooleanSupplier cancelled) {
                 received.set(prompt);
                 shellRegistry.onEvent(
-                        new AgentEvent.TurnDone("done:" + prompt.lines().count(), sessionId));
+                        new AgentEvent.TurnDone("done:" + prompt.lines().count(), sessionId, eventWorkdir));
                 return "ok";
             }
 
@@ -363,7 +369,7 @@ class TuiCommandRenderTest {
     void altEnterInsertsNewlineInsteadOfSubmitting() throws Exception {
         final var shellRegistry = testRegistry();
         final var received = new AtomicReference<String>();
-        final var agentLoop = new AgentLoop() {
+        final var agentLoop = new AgentLoop(testWorkdir) {
             @Override
             public String run(
                     final String prompt,
@@ -373,7 +379,7 @@ class TuiCommandRenderTest {
                     final BooleanSupplier cancelled) {
                 received.set(prompt);
                 shellRegistry.onEvent(
-                        new AgentEvent.TurnDone("done:" + prompt.lines().count(), sessionId));
+                        new AgentEvent.TurnDone("done:" + prompt.lines().count(), sessionId, eventWorkdir));
                 return "ok";
             }
 
@@ -478,7 +484,7 @@ class TuiCommandRenderTest {
     @Test
     void rendersTurnHeadersWithRule() throws Exception {
         final var shellRegistry = testRegistry();
-        final var agentLoop = new AgentLoop() {
+        final var agentLoop = new AgentLoop(testWorkdir) {
             @Override
             public String run(
                     final String prompt,
@@ -486,8 +492,8 @@ class TuiCommandRenderTest {
                     final String sessionId,
                     final List<Message> history,
                     final BooleanSupplier cancelled) {
-                shellRegistry.onEvent(new AgentEvent.TextDelta("hello from stub", sessionId));
-                shellRegistry.onEvent(new AgentEvent.TurnDone("hello from stub", sessionId));
+                shellRegistry.onEvent(new AgentEvent.TextDelta("hello from stub", sessionId, eventWorkdir));
+                shellRegistry.onEvent(new AgentEvent.TurnDone("hello from stub", sessionId, eventWorkdir));
                 return "ok";
             }
 
@@ -556,7 +562,7 @@ class TuiCommandRenderTest {
         // anchor or a partial fragment on any frame: the transcript scrubs at its render chokepoint
         final var shellRegistry = testRegistry();
         final var sessionId = new AtomicReference<String>();
-        final var agentLoop = new AgentLoop() {
+        final var agentLoop = new AgentLoop(testWorkdir) {
             @Override
             public String run(
                     final String prompt,
@@ -566,13 +572,14 @@ class TuiCommandRenderTest {
                     final BooleanSupplier cancelled) {
                 sessionId.set(sessionIdArg);
                 final var sid = sessionIdArg;
-                shellRegistry.onEvent(new AgentEvent.TextDelta("Let me commit.\n\n@", sid));
-                shellRegistry.onEvent(new AgentEvent.TextDelta("1", sid));
-                shellRegistry.onEvent(new AgentEvent.TextDelta("@", sid));
-                shellRegistry.onEvent(new AgentEvent.ToolStarted("bash", "{\"command\":\"git status\"}", sid));
-                shellRegistry.onEvent(new AgentEvent.ToolFinished("bash", "clean", true, sid));
-                shellRegistry.onEvent(new AgentEvent.TextDelta("done with the turn", sid));
-                shellRegistry.onEvent(new AgentEvent.TurnDone("done with the turn", sid));
+                shellRegistry.onEvent(new AgentEvent.TextDelta("Let me commit.\n\n@", sid, eventWorkdir));
+                shellRegistry.onEvent(new AgentEvent.TextDelta("1", sid, eventWorkdir));
+                shellRegistry.onEvent(new AgentEvent.TextDelta("@", sid, eventWorkdir));
+                shellRegistry.onEvent(
+                        new AgentEvent.ToolStarted("bash", "{\"command\":\"git status\"}", sid, eventWorkdir));
+                shellRegistry.onEvent(new AgentEvent.ToolFinished("bash", "clean", true, sid, eventWorkdir));
+                shellRegistry.onEvent(new AgentEvent.TextDelta("done with the turn", sid, eventWorkdir));
+                shellRegistry.onEvent(new AgentEvent.TurnDone("done with the turn", sid, eventWorkdir));
                 return "ok";
             }
 
@@ -618,7 +625,7 @@ class TuiCommandRenderTest {
         // must never render, even though they are frozen into the durable transcript mid-block
         final var shellRegistry = testRegistry();
         final var sessionId = new AtomicReference<String>();
-        final var agentLoop = new AgentLoop() {
+        final var agentLoop = new AgentLoop(testWorkdir) {
             @Override
             public String run(
                     final String prompt,
@@ -628,14 +635,15 @@ class TuiCommandRenderTest {
                     final BooleanSupplier cancelled) {
                 sessionId.set(sessionIdArg);
                 final var sid = sessionIdArg;
+                shellRegistry.onEvent(new AgentEvent.TextDelta(
+                        "Good picture forming. Let me look at the tests.\n\n@129", sid, eventWorkdir));
+                shellRegistry.onEvent(new AgentEvent.TextDelta("0", sid, eventWorkdir));
+                shellRegistry.onEvent(new AgentEvent.TextDelta("\n\n@1291", sid, eventWorkdir));
                 shellRegistry.onEvent(
-                        new AgentEvent.TextDelta("Good picture forming. Let me look at the tests.\n\n@129", sid));
-                shellRegistry.onEvent(new AgentEvent.TextDelta("0", sid));
-                shellRegistry.onEvent(new AgentEvent.TextDelta("\n\n@1291", sid));
-                shellRegistry.onEvent(new AgentEvent.ToolStarted("bash", "{\"command\":\"git status\"}", sid));
-                shellRegistry.onEvent(new AgentEvent.ToolFinished("bash", "clean", true, sid));
-                shellRegistry.onEvent(new AgentEvent.TextDelta("done with the turn", sid));
-                shellRegistry.onEvent(new AgentEvent.TurnDone("done with the turn", sid));
+                        new AgentEvent.ToolStarted("bash", "{\"command\":\"git status\"}", sid, eventWorkdir));
+                shellRegistry.onEvent(new AgentEvent.ToolFinished("bash", "clean", true, sid, eventWorkdir));
+                shellRegistry.onEvent(new AgentEvent.TextDelta("done with the turn", sid, eventWorkdir));
+                shellRegistry.onEvent(new AgentEvent.TurnDone("done with the turn", sid, eventWorkdir));
                 return "ok";
             }
 
@@ -760,8 +768,8 @@ class TuiCommandRenderTest {
         awaitTui();
         awaitText("yca coding agent");
         final var source = "---\nname: example\n---\n# Skill instructions\n\nUse **careful changes**.\n";
-        registry.onEvent(new AgentEvent.ToolStarted("skill", "{\"name\":\"example\"}", sid(registry)));
-        registry.onEvent(new AgentEvent.ToolFinished("skill", source, true, sid(registry)));
+        registry.onEvent(new AgentEvent.ToolStarted("skill", "{\"name\":\"example\"}", sid(registry), eventWorkdir));
+        registry.onEvent(new AgentEvent.ToolFinished("skill", source, true, sid(registry), eventWorkdir));
         awaitText("✓ skill");
         tuiRef.get().dispatch(MouseEvent.press(MouseButton.LEFT, 2, rowOf("✓ skill")));
         awaitText("full output");
@@ -896,16 +904,23 @@ class TuiCommandRenderTest {
         onEvent.setAccessible(true);
         final var firstArgs = "{\"command\":\"echo first\"}";
         final var secondArgs = "{\"command\":\"echo second\"}";
-        onEvent.invoke(command, new AgentEvent.ToolStarted("bash", firstArgs, 10, "", null, null), state);
-        onEvent.invoke(command, new AgentEvent.ToolStarted("bash", secondArgs, 11, "", null, null), state);
-        onEvent.invoke(command, new AgentEvent.ToolFinished("bash", "second", true, false, 11, "", null, null), state);
+        onEvent.invoke(command, new AgentEvent.ToolStarted("bash", firstArgs, 10, "", null, null, eventWorkdir), state);
+        onEvent.invoke(
+                command, new AgentEvent.ToolStarted("bash", secondArgs, 11, "", null, null, eventWorkdir), state);
+        onEvent.invoke(
+                command,
+                new AgentEvent.ToolFinished("bash", "second", true, false, 11, "", null, null, eventWorkdir),
+                state);
         assertEquals(secondArgs, state.toolOutputs.get(11).args());
         assertEquals(firstArgs, state.toolOutputs.get(10).args());
         assertTrue(state.toolOutputs.get(10).running());
         assertEquals(List.of(firstArgs), new ArrayList<>(state.pendingToolArgs.get("bash")));
         assertEquals(List.of(10L), new ArrayList<>(state.pendingToolOrdinals.get("bash")));
         assertFalse(state.pendingToolOrdinals.containsKey("echo second"));
-        onEvent.invoke(command, new AgentEvent.ToolFinished("bash", "first", true, false, 10, "", null, null), state);
+        onEvent.invoke(
+                command,
+                new AgentEvent.ToolFinished("bash", "first", true, false, 10, "", null, null, eventWorkdir),
+                state);
         assertEquals(firstArgs, state.toolOutputs.get(10).args());
         assertEquals("first", state.toolOutputs.get(10).output());
         assertEquals("second", state.toolOutputs.get(11).output());
@@ -966,8 +981,8 @@ class TuiCommandRenderTest {
         final var onEvent = TuiCommand.class.getDeclaredMethod("onEvent", AgentEvent.class, UiState.class);
         onEvent.setAccessible(true);
         final var args = "{\"command\":\"echo legacy\"}";
-        onEvent.invoke(command, new AgentEvent.ToolStarted("bash", args, ""), state);
-        onEvent.invoke(command, new AgentEvent.ToolFinished("bash", "legacy", true, ""), state);
+        onEvent.invoke(command, new AgentEvent.ToolStarted("bash", args, "", eventWorkdir), state);
+        onEvent.invoke(command, new AgentEvent.ToolFinished("bash", "legacy", true, "", eventWorkdir), state);
         assertEquals(args, state.toolOutputs.get(state.model.toolCallCount()).args());
         assertTrue(state.pendingToolArgs.isEmpty());
         assertTrue(state.pendingToolOrdinals.isEmpty());
@@ -1416,7 +1431,7 @@ class TuiCommandRenderTest {
         final var command = command(testRegistry(), stubAgentLoop());
         final var state = new UiState(new ThinkTagSplitter(), Clock.systemUTC());
         state.showThinking = true;
-        state.model.onEvent(new AgentEvent.ThinkingDelta("pondering", null));
+        state.model.onEvent(new AgentEvent.ThinkingDelta("pondering", null, eventWorkdir));
         final var render = TuiCommand.class.getDeclaredMethod(
                 "appendLiveChunks", List.class, int.class, UiState.class, List.class);
         render.setAccessible(true);
@@ -1427,7 +1442,7 @@ class TuiCommandRenderTest {
         assertEquals(2, first.size());
         Assertions.assertSame(first.getFirst(), next.getFirst());
         Assertions.assertNotSame(first.getLast(), next.getLast());
-        state.model.onEvent(new AgentEvent.ThinkingDelta(" more", null));
+        state.model.onEvent(new AgentEvent.ThinkingDelta(" more", null, eventWorkdir));
         final var changed = new ArrayList<>();
         render.invoke(command, changed, 40, state, new ArrayList<>());
         Assertions.assertNotSame(first.getFirst(), changed.getFirst());
@@ -1538,7 +1553,7 @@ class TuiCommandRenderTest {
     void streamingParagraphBreakAcrossFlushBoundaryIsPreserved() throws Exception {
         // Text flushed around a tool boundary must remain visible as the answer resumes.
         final var shellRegistry = testRegistry();
-        final var agentLoop = new AgentLoop() {
+        final var agentLoop = new AgentLoop(testWorkdir) {
             @Override
             public String run(
                     final String prompt,
@@ -1546,12 +1561,14 @@ class TuiCommandRenderTest {
                     final String sessionId,
                     final List<Message> history,
                     final BooleanSupplier cancelled) {
-                shellRegistry.onEvent(new AgentEvent.TextDelta("first paragraph", sessionId));
-                shellRegistry.onEvent(new AgentEvent.ToolStarted("bash", "{\"command\":\"tool run\"}", sessionId));
-                shellRegistry.onEvent(new AgentEvent.ToolFinished("bash", "done", true, sessionId));
+                shellRegistry.onEvent(new AgentEvent.TextDelta("first paragraph", sessionId, eventWorkdir));
+                shellRegistry.onEvent(
+                        new AgentEvent.ToolStarted("bash", "{\"command\":\"tool run\"}", sessionId, eventWorkdir));
+                shellRegistry.onEvent(new AgentEvent.ToolFinished("bash", "done", true, sessionId, eventWorkdir));
                 // the pre-tool text was flushed into the durable head; the answer resumes streaming
-                shellRegistry.onEvent(new AgentEvent.TextDelta("\n\nsecond paragraph", sessionId));
-                shellRegistry.onEvent(new AgentEvent.TurnDone("first paragraph\n\nsecond paragraph", sessionId));
+                shellRegistry.onEvent(new AgentEvent.TextDelta("\n\nsecond paragraph", sessionId, eventWorkdir));
+                shellRegistry.onEvent(
+                        new AgentEvent.TurnDone("first paragraph\n\nsecond paragraph", sessionId, eventWorkdir));
                 return "ok";
             }
 
@@ -1593,7 +1610,7 @@ class TuiCommandRenderTest {
         // and keep rendering the surviving tail (the region-memo must be invalidated on the
         // new head instance instead of replaying stale rows).
         final var shellRegistry = testRegistry();
-        final var agentLoop = new AgentLoop() {
+        final var agentLoop = new AgentLoop(testWorkdir) {
             @Override
             public String run(
                     final String prompt,
@@ -1602,8 +1619,8 @@ class TuiCommandRenderTest {
                     final List<Message> history,
                     final BooleanSupplier cancelled) {
                 // enough history that a small maxHistoryCharacters trims the head
-                shellRegistry.onEvent(new AgentEvent.TextDelta("trimmable head content", sessionId));
-                shellRegistry.onEvent(new AgentEvent.TurnDone("trimmable head content", sessionId));
+                shellRegistry.onEvent(new AgentEvent.TextDelta("trimmable head content", sessionId, eventWorkdir));
+                shellRegistry.onEvent(new AgentEvent.TurnDone("trimmable head content", sessionId, eventWorkdir));
                 return "ok";
             }
 
@@ -1645,7 +1662,7 @@ class TuiCommandRenderTest {
     @Test
     void rendersSidebarAndAnswer() throws Exception {
         final var shellRegistry = testRegistry();
-        final var agentLoop = new AgentLoop() {
+        final var agentLoop = new AgentLoop(testWorkdir) {
             @Override
             public String run(
                     final String prompt,
@@ -1653,8 +1670,8 @@ class TuiCommandRenderTest {
                     final String sessionId,
                     final List<Message> history,
                     final BooleanSupplier cancelled) {
-                shellRegistry.onEvent(new AgentEvent.TextDelta("hello from stub", sessionId));
-                shellRegistry.onEvent(new AgentEvent.TurnDone("hello from stub", sessionId));
+                shellRegistry.onEvent(new AgentEvent.TextDelta("hello from stub", sessionId, eventWorkdir));
+                shellRegistry.onEvent(new AgentEvent.TurnDone("hello from stub", sessionId, eventWorkdir));
                 return "ok";
             }
 
@@ -1735,7 +1752,8 @@ class TuiCommandRenderTest {
                     null,
                     null,
                     new AgentEvent.UsageUpdated.Quota(
-                            true, true, "a-very-long-codex-plan-name", percent, 0, 0, null, null, false)));
+                            true, true, "a-very-long-codex-plan-name", percent, 0, 0, null, null, false),
+                    eventWorkdir));
             final var usedPercent = Math.round(Math.clamp(percent, 0, 100));
             final var usageRowMarker = usedPercent + "%"; // fallback kind row renders "quota <bar> N%"
             awaitText(usageRowMarker);
@@ -1762,7 +1780,8 @@ class TuiCommandRenderTest {
                 sessionId,
                 null,
                 null,
-                new AgentEvent.UsageUpdated.Quota(true, false, "plus", 42, 0, 0, null, null, false)));
+                new AgentEvent.UsageUpdated.Quota(true, false, "plus", 42, 0, 0, null, null, false),
+                eventWorkdir));
         awaitTextGone("%/quota");
         assertTrue(backend.text().lines().toList().stream().anyMatch(r -> r.contains("18% context")));
 
@@ -1777,9 +1796,10 @@ class TuiCommandRenderTest {
                 sessionId,
                 null,
                 null,
-                new AgentEvent.UsageUpdated.Quota(false, true, "plus", 42, 0, 0, null, null, false)));
+                new AgentEvent.UsageUpdated.Quota(false, true, "plus", 42, 0, 0, null, null, false),
+                eventWorkdir));
         awaitText("42%");
-        frontend.onEvent(new AgentEvent.UsageUpdated(new Usage(0, 0, 0), 72000, 18, sessionId));
+        frontend.onEvent(new AgentEvent.UsageUpdated(new Usage(0, 0, 0), 72000, 18, sessionId, eventWorkdir));
         awaitTextGone("%/quota");
         assertTrue(backend.text().lines().toList().stream().anyMatch(r -> r.contains("18% context")));
         quit();
@@ -1817,7 +1837,8 @@ class TuiCommandRenderTest {
                 null,
                 null,
                 new AgentEvent.UsageUpdated.Quota(
-                        true, true, "plus", 90.0, fiveHours, 1_705_000_000L, "primary", null, false, windows)));
+                        true, true, "plus", 90.0, fiveHours, 1_705_000_000L, "primary", null, false, windows),
+                eventWorkdir));
 
         awaitText("18% context");
 
@@ -1901,7 +1922,8 @@ class TuiCommandRenderTest {
                         "0",
                         false,
                         List.of(new AgentEvent.UsageUpdated.Quota.Window(
-                                "PRIMARY", "primary", 100.0, fiveHours, 1_705_000_000L)))));
+                                "PRIMARY", "primary", 100.0, fiveHours, 1_705_000_000L))),
+                eventWorkdir));
         awaitText("100%");
         awaitText("18% context");
         final var rows = backend.text().lines().toList();
@@ -1926,7 +1948,7 @@ class TuiCommandRenderTest {
         final var sessionId = shellRegistry.sessions().iterator().next();
         final var frontend = shellRegistry.active(sessionId).frontend();
         // a non-zero context estimate so the chip shows a k/M-formatted size
-        frontend.onEvent(new AgentEvent.UsageUpdated(new Usage(0, 0, 0), 72_000, 18, sessionId));
+        frontend.onEvent(new AgentEvent.UsageUpdated(new Usage(0, 0, 0), 72_000, 18, sessionId, eventWorkdir));
         awaitText("18% context");
 
         // locate the context gauge row from the rendered text and hover it: the size chip appears
@@ -1972,7 +1994,7 @@ class TuiCommandRenderTest {
         final var sessionId = shellRegistry.sessions().iterator().next();
         final var frontend = shellRegistry.active(sessionId).frontend();
         // a non-zero context estimate but a still-unresolved window (contextPercent = 0)
-        frontend.onEvent(new AgentEvent.UsageUpdated(new Usage(0, 0, 0), 72_000, 0, sessionId));
+        frontend.onEvent(new AgentEvent.UsageUpdated(new Usage(0, 0, 0), 72_000, 0, sessionId, eventWorkdir));
         awaitText("0% context");
 
         // locate the context gauge row from the rendered text and hover it
@@ -2029,7 +2051,8 @@ class TuiCommandRenderTest {
                 null,
                 null,
                 new AgentEvent.UsageUpdated.Quota(
-                        true, true, "plus", 90.0, fiveHours, resetAt, "primary", null, false, List.of(window))));
+                        true, true, "plus", 90.0, fiveHours, resetAt, "primary", null, false, List.of(window)),
+                eventWorkdir));
         awaitText("5h");
 
         // locate the gauge row from the rendered text and hover it: the reset chip appears
@@ -2064,7 +2087,8 @@ class TuiCommandRenderTest {
                 null,
                 null,
                 new AgentEvent.UsageUpdated.Quota(
-                        true, false, "plus", 10.0, fiveHours, resetAt, "primary", null, false, List.of(window))));
+                        true, false, "plus", 10.0, fiveHours, resetAt, "primary", null, false, List.of(window)),
+                eventWorkdir));
         awaitTextGoneWithin("5h", 2_000);
         tuiRef.get().dispatch(MouseEvent.move(gaugeX, gaugeY));
         awaitTextGoneWithin("Resets in ", 2_000);
@@ -2108,7 +2132,7 @@ class TuiCommandRenderTest {
         final var frontend = shellRegistry.active(sessionId).frontend();
 
         // no anchor yet: the "last real" row must be absent and "context ~" stays
-        frontend.onEvent(new AgentEvent.UsageUpdated(new Usage(0, 0, 0), 72000, 7.0, "s1"));
+        frontend.onEvent(new AgentEvent.UsageUpdated(new Usage(0, 0, 0), 72000, 7.0, "s1", eventWorkdir));
         awaitText("context ~");
         awaitTextGone("last real");
 
@@ -2123,7 +2147,8 @@ class TuiCommandRenderTest {
                 "s1",
                 null,
                 null,
-                AgentEvent.UsageUpdated.Quota.NONE));
+                AgentEvent.UsageUpdated.Quota.NONE,
+                eventWorkdir));
         awaitText("last real  68k tok");
 
         quit();
@@ -2143,7 +2168,11 @@ class TuiCommandRenderTest {
         awaitText("yca coding agent");
 
         shellRegistry.onEvent(new AgentEvent.UsageUpdated(
-                new Usage(rawInput, 10, rawInput + 10, cachedInput, 0, 0, 0, 125000), 125000, 50, sid(shellRegistry)));
+                new Usage(rawInput, 10, rawInput + 10, cachedInput, 0, 0, 0, 125000),
+                125000,
+                50,
+                sid(shellRegistry),
+                eventWorkdir));
         awaitText("tokens in  125k");
         awaitText("cached     " + (cachedInput == 100000 ? "100k" : "125k") + " (" + cachedPercent + "%)");
         awaitText("tokens out 10");
@@ -2174,7 +2203,8 @@ class TuiCommandRenderTest {
                         new Usage(rawInput, 10, rawInput + 10, cachedInput, 0, 0, 0, 125000),
                         125000,
                         50,
-                        state.sessionId),
+                        state.sessionId,
+                        eventWorkdir),
                 state);
 
         // Exercise the narrow strip on a roomy buffer so trailing cache metrics are not clipped.
@@ -2253,7 +2283,8 @@ class TuiCommandRenderTest {
         awaitText("yca coding agent");
 
         // a tool is genuinely in flight (tracked by the transcript model, most-recent-first)
-        shellRegistry.onEvent(new AgentEvent.ToolStarted("bash", "{\"command\":\"sleep 10\"}", sid(shellRegistry)));
+        shellRegistry.onEvent(
+                new AgentEvent.ToolStarted("bash", "{\"command\":\"sleep 10\"}", sid(shellRegistry), eventWorkdir));
 
         tuiRef.get().dispatch(new PasteEvent("/executing-tools"));
         tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ENTER));
@@ -2319,7 +2350,7 @@ class TuiCommandRenderTest {
         shellRegistry
                 .active(sessionId)
                 .frontend()
-                .onEvent(new AgentEvent.Status("MARKER" + "x".repeat(300) + "TAIL", sessionId));
+                .onEvent(new AgentEvent.Status("MARKER" + "x".repeat(300) + "TAIL", sessionId, eventWorkdir));
 
         awaitText("ⓘ");
         awaitText("MARKER");
@@ -2373,8 +2404,8 @@ class TuiCommandRenderTest {
 
         final var sessionId = shellRegistry.sessions().iterator().next();
         final var frontend = shellRegistry.active(sessionId).frontend();
-        frontend.onEvent(
-                new AgentEvent.Status("NOTICEHEAD\n" + "line of detail\n".repeat(30) + "NOTICETAIL", sessionId));
+        frontend.onEvent(new AgentEvent.Status(
+                "NOTICEHEAD\n" + "line of detail\n".repeat(30) + "NOTICETAIL", sessionId, eventWorkdir));
         awaitText("NOTICEHEAD");
         // Age the fixture on the UI thread instead of sleeping through the status-strip TTL.
         final var tabManagerField = TuiCommand.class.getDeclaredField("tabManager");
@@ -2394,7 +2425,7 @@ class TuiCommandRenderTest {
         tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.PAGE_DOWN));
         tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.PAGE_DOWN));
         awaitText("NOTICETAIL");
-        frontend.onEvent(new AgentEvent.Status("NEWNOTICE", sessionId));
+        frontend.onEvent(new AgentEvent.Status("NEWNOTICE", sessionId, eventWorkdir));
         awaitText("NOTICETAIL"); // open modal keeps its original snapshot
         tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ESCAPE));
         tuiRef.get().dispatch(KeyEvent.ofChar('i', KeyModifiers.ALT));
@@ -2414,12 +2445,12 @@ class TuiCommandRenderTest {
         final var sessionId = shellRegistry.sessions().iterator().next();
         final var frontend = shellRegistry.active(sessionId).frontend();
         frontend.onEvent(new AgentEvent.Notice(
-                AgentEvent.Notice.Level.INFO, "INFOHEAD " + "x".repeat(180) + " INFOTAIL", sessionId));
+                AgentEvent.Notice.Level.INFO, "INFOHEAD " + "x".repeat(180) + " INFOTAIL", sessionId, eventWorkdir));
         tuiRef.get().dispatch(KeyEvent.ofChar('i', KeyModifiers.ALT));
         awaitText("INFOTAIL");
         tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ESCAPE));
         frontend.onEvent(new AgentEvent.Notice(
-                AgentEvent.Notice.Level.ERROR, "ERRORHEAD " + "x".repeat(180) + " ERRORTAIL", sessionId));
+                AgentEvent.Notice.Level.ERROR, "ERRORHEAD " + "x".repeat(180) + " ERRORTAIL", sessionId, eventWorkdir));
         awaitText("ERRORHEAD");
         tuiRef.get().dispatch(KeyEvent.ofChar('e', KeyModifiers.ALT));
         awaitText("ERRORTAIL");
@@ -2641,19 +2672,7 @@ class TuiCommandRenderTest {
         // Regression: model suggestions follow the active session's provider, even after a tab
         // with a different provider has populated its own model list.
         tuiConfig = twoProviderConfiguration();
-        sessionAgentLoopFactory = sessionId -> new AgentLoop() {
-            private volatile ChatSettings settings = ChatSettings.EMPTY;
-
-            @Override
-            public ChatSettings chatSettings() {
-                return settings;
-            }
-
-            @Override
-            public void updateChatSettings(final ChatSettings value) {
-                settings = value;
-            }
-
+        sessionAgentLoopFactory = sessionId -> new AgentLoop(testWorkdir) {
             @Override
             public String run(
                     final String prompt,
@@ -2743,7 +2762,7 @@ class TuiCommandRenderTest {
         final var shellRegistry = testRegistry();
         final var turnStarted = new CountDownLatch(1);
         final var releaseTurn = new CountDownLatch(1);
-        final var agentLoop = new AgentLoop() {
+        final var agentLoop = new AgentLoop(testWorkdir) {
             @Override
             public String run(
                     final String prompt,
@@ -2792,7 +2811,10 @@ class TuiCommandRenderTest {
         // (remaining count) while the leading agent state stays untouched - with the stub turn
         // parked the queue still holds the prompt, so the remaining-count form is expected
         final var sessionId = sid(shellRegistry);
-        shellRegistry.active(sessionId).frontend().onEvent(new AgentEvent.PromptIntegrated("follow up", sessionId));
+        shellRegistry
+                .active(sessionId)
+                .frontend()
+                .onEvent(new AgentEvent.PromptIntegrated("follow up", sessionId, eventWorkdir));
         awaitText("1 queued prompts still pending");
         awaitText("thinking..."); // the leading agent state was not replaced by the integration notice
 
@@ -2854,7 +2876,7 @@ class TuiCommandRenderTest {
         shellRegistry
                 .active(sessionId)
                 .frontend()
-                .onEvent(new AgentEvent.Error("HTTP/1.1 header parser received no bytes", sessionId));
+                .onEvent(new AgentEvent.Error("HTTP/1.1 header parser received no bytes", sessionId, eventWorkdir));
 
         // the trailing red segment carries the message (single space after the cross glyph);
         // the boxed banner below uses a double space, so this matches only the trailing one
@@ -2894,7 +2916,8 @@ class TuiCommandRenderTest {
                 .onEvent(new AgentEvent.Notice(
                         AgentEvent.Notice.Level.ERROR,
                         "Response truncated by the output token limit (finish_reason=length)",
-                        sessionId));
+                        sessionId,
+                        eventWorkdir));
 
         awaitText("✗ Response truncated by the output token limit");
         awaitText("ready");
@@ -2928,7 +2951,8 @@ class TuiCommandRenderTest {
                         sessionId,
                         null,
                         null,
-                        cause));
+                        cause,
+                        eventWorkdir));
 
         awaitText("✗ Stream interrupted (Index 2 out of bounds for length 2)");
         awaitText("ready");
@@ -2962,12 +2986,14 @@ class TuiCommandRenderTest {
                 sessionId,
                 null,
                 null,
-                new IOException("broken pipe")));
+                new IOException("broken pipe"),
+                eventWorkdir));
 
         awaitText("✗ Stream interrupted (broken pipe)");
 
         // the retry then succeeds: the banner must clear itself
-        frontend.onEvent(new AgentEvent.LlmRequestCompleted(new Usage(0, 0, 0), "test-model", 1, sessionId));
+        frontend.onEvent(
+                new AgentEvent.LlmRequestCompleted(new Usage(0, 0, 0), "test-model", 1, sessionId, eventWorkdir));
         awaitNoText("✗ Stream interrupted (broken pipe)");
         awaitText("ready");
 
@@ -2996,12 +3022,14 @@ class TuiCommandRenderTest {
                 sessionId,
                 null,
                 null,
-                null));
+                null,
+                eventWorkdir));
 
         awaitText("✗ model returned an empty completion");
 
         // a successful request must NOT clear a persistent error
-        frontend.onEvent(new AgentEvent.LlmRequestCompleted(new Usage(0, 0, 0), "test-model", 1, sessionId));
+        frontend.onEvent(
+                new AgentEvent.LlmRequestCompleted(new Usage(0, 0, 0), "test-model", 1, sessionId, eventWorkdir));
         awaitText("✗ model returned an empty completion");
 
         // Alt+X dismisses it
@@ -3034,7 +3062,8 @@ class TuiCommandRenderTest {
                         sessionId,
                         null,
                         null,
-                        new IOException("broken pipe")));
+                        new IOException("broken pipe"),
+                        eventWorkdir));
 
         awaitText("✗ Stream interrupted (broken pipe)");
         // the status-slot trailing line carries "✗ Stream interrupted"; the boxed banner is 2 rows
@@ -3060,7 +3089,8 @@ class TuiCommandRenderTest {
                         sessionId,
                         null,
                         null,
-                        new IOException("broken pipe")));
+                        new IOException("broken pipe"),
+                        eventWorkdir));
         awaitText("✗ Stream interrupted (broken pipe)");
         final var row2 = rowOf("✗ Stream interrupted");
         final var col2 = lines[row2 + 2].indexOf("✖");
@@ -3087,7 +3117,14 @@ class TuiCommandRenderTest {
                 .active(sessionId)
                 .frontend()
                 .onEvent(new AgentEvent.Notice(
-                        AgentEvent.Notice.Level.ERROR, "mode switch failed: boom", null, sessionId, null, null, null));
+                        AgentEvent.Notice.Level.ERROR,
+                        "mode switch failed: boom",
+                        null,
+                        sessionId,
+                        null,
+                        null,
+                        null,
+                        eventWorkdir));
 
         awaitText("✗ mode switch failed: boom");
         tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ESCAPE));
@@ -3119,7 +3156,8 @@ class TuiCommandRenderTest {
                         AgentEvent.Pause.Kind.RETRY,
                         "LLM call failed, retrying in ~0s (attempt 2/3)",
                         2000,
-                        sessionId));
+                        sessionId,
+                        eventWorkdir));
 
         // the ⓘ notification slot carries the message; the leading status stays "ready"
         awaitText("ⓘ LLM call failed, retrying in ~0s (attempt 2/3)");
@@ -3135,7 +3173,7 @@ class TuiCommandRenderTest {
     @Test
     void clearRestoresWelcomeScreen() throws Exception {
         final var shellRegistry = testRegistry();
-        final var agentLoop = new AgentLoop() {
+        final var agentLoop = new AgentLoop(testWorkdir) {
             @Override
             public String run(
                     final String prompt,
@@ -3143,7 +3181,7 @@ class TuiCommandRenderTest {
                     final String sessionId,
                     final List<Message> history,
                     final BooleanSupplier cancelled) {
-                shellRegistry.onEvent(new AgentEvent.TurnDone("some answer", sessionId));
+                shellRegistry.onEvent(new AgentEvent.TurnDone("some answer", sessionId, eventWorkdir));
                 return "ok";
             }
 
@@ -3183,7 +3221,7 @@ class TuiCommandRenderTest {
         // /btw modal is exercised over a deterministically-live turn instead of a sleep
         final var turnStarted = new CountDownLatch(1);
         final var releaseTurn = new CountDownLatch(1);
-        final var agentLoop = new AgentLoop() {
+        final var agentLoop = new AgentLoop(testWorkdir) {
             @Override
             public String run(
                     final String prompt,
@@ -3197,8 +3235,8 @@ class TuiCommandRenderTest {
                 } catch (final InterruptedException e) {
                     Thread.currentThread().interrupt();
                 }
-                shellRegistry.onEvent(new AgentEvent.TextDelta("hello from stub", sessionId));
-                shellRegistry.onEvent(new AgentEvent.TurnDone("hello from stub", sessionId));
+                shellRegistry.onEvent(new AgentEvent.TextDelta("hello from stub", sessionId, eventWorkdir));
+                shellRegistry.onEvent(new AgentEvent.TurnDone("hello from stub", sessionId, eventWorkdir));
                 return "ok";
             }
 
@@ -3250,7 +3288,7 @@ class TuiCommandRenderTest {
         llm.answer("default-provider answer");
         llm2.answer("tab-provider answer");
         final var settings = new AtomicReference<ChatSettings>(ChatSettings.EMPTY);
-        sessionAgentLoopFactory = sessionId -> new AgentLoop() {
+        sessionAgentLoopFactory = sessionId -> new AgentLoop(testWorkdir) {
             @Override
             public String run(
                     final String prompt,
@@ -3449,7 +3487,7 @@ class TuiCommandRenderTest {
         final var shellRegistry = testRegistry();
         final var turnStarted = new CountDownLatch(1);
         final var releaseTurn = new CountDownLatch(1);
-        final var agentLoop = new AgentLoop() {
+        final var agentLoop = new AgentLoop(testWorkdir) {
             @Override
             public String run(
                     final String prompt,
@@ -3463,8 +3501,8 @@ class TuiCommandRenderTest {
                 } catch (final InterruptedException e) {
                     Thread.currentThread().interrupt();
                 }
-                shellRegistry.onEvent(new AgentEvent.TextDelta("hello from stub", sessionId));
-                shellRegistry.onEvent(new AgentEvent.TurnDone("hello from stub", sessionId));
+                shellRegistry.onEvent(new AgentEvent.TextDelta("hello from stub", sessionId, eventWorkdir));
+                shellRegistry.onEvent(new AgentEvent.TurnDone("hello from stub", sessionId, eventWorkdir));
                 return "ok";
             }
 
@@ -3526,12 +3564,12 @@ class TuiCommandRenderTest {
         final var sessionId = shellRegistry.sessions().iterator().next();
         final var frontend = shellRegistry.active(sessionId).frontend();
         frontend.onEvent(AgentEvent.Notice.compactionStart(
-                "Compaction in progress... (\u2248 51234 estimated tokens)", sessionId));
+                "Compaction in progress... (\u2248 51234 estimated tokens)", sessionId, eventWorkdir));
 
         awaitText("ⓘ compacting...");
 
         // the result notice replaces the pinned indicator with the outcome
-        frontend.onEvent(AgentEvent.Notice.compacted("Compacted: context 68% -> 41%", sessionId));
+        frontend.onEvent(AgentEvent.Notice.compacted("Compacted: context 68% -> 41%", sessionId, eventWorkdir));
         awaitText("ⓘ Compacted: context 68% -> 41%");
         awaitTextGone("ⓘ compacting...");
 
@@ -3554,14 +3592,15 @@ class TuiCommandRenderTest {
         final var sessionId = shellRegistry.sessions().iterator().next();
         final var frontend = shellRegistry.active(sessionId).frontend();
         frontend.onEvent(AgentEvent.Notice.compactionStart(
-                "Compaction in progress... (\u2248 51234 estimated tokens)", sessionId));
+                "Compaction in progress... (\u2248 51234 estimated tokens)", sessionId, eventWorkdir));
         awaitText("ⓘ compacting...");
 
         frontend.onEvent(AgentEvent.Notice.compactionGateEscalated(
                 "Compaction gate: the context cannot be compacted below the trigger. Run /compact urgent "
                         + "to force local truncation, or reduce the session size. Continuing and monitoring "
                         + "the provider hard limit.",
-                sessionId));
+                sessionId,
+                eventWorkdir));
         awaitText("✗ Compaction gate: the context cannot be compacted below the trigger");
         awaitTextGone("ⓘ compacting...");
 
@@ -3584,17 +3623,17 @@ class TuiCommandRenderTest {
         final var sessionId = shellRegistry.sessions().iterator().next();
         final var frontend = shellRegistry.active(sessionId).frontend();
         frontend.onEvent(AgentEvent.Notice.compactionStart(
-                "Compaction in progress... (\u2248 51234 estimated tokens)", sessionId));
+                "Compaction in progress... (\u2248 51234 estimated tokens)", sessionId, eventWorkdir));
         awaitText("ⓘ compacting...");
 
-        frontend.onEvent(new AgentEvent.TurnCancelled(sessionId));
+        frontend.onEvent(new AgentEvent.TurnCancelled(sessionId, eventWorkdir));
         awaitTextGone("ⓘ compacting...");
 
         quit();
     }
 
     private AgentLoop stubAgentLoop() {
-        return new AgentLoop() {
+        return new AgentLoop(testWorkdir) {
             @Override
             public String run(
                     final String prompt,
@@ -3773,7 +3812,7 @@ class TuiCommandRenderTest {
         final var providerManager = new ProviderManager(configuration, mapper);
         // one shared permission service like in production: the TUI and the slash
         // commands must observe the same mode for the gutter to follow /mode
-        final var permissionService = new PermissionService(configuration);
+        final var permissionService = new PermissionService(configuration, (configuration).resolveWorkingDir());
         final var agentSessionService = new AgentSessionService(
                 chatClient,
                 mcpManager,
@@ -3800,7 +3839,12 @@ class TuiCommandRenderTest {
                 shellRegistry,
                 new SessionRuntimeFactory() {
                     @Override
-                    public SessionRuntime create(final String sessionId) {
+                    public Path resolveWorkdir(final Path explicitWorkdir, final String resumedSessionId) {
+                        return explicitWorkdir == null ? testWorkdir : explicitWorkdir;
+                    }
+
+                    @Override
+                    public SessionRuntime create(final String sessionId, final Path workdir) {
                         return new SessionRuntime(
                                 sessionAgentLoopFactory == null ? agentLoop : sessionAgentLoopFactory.apply(sessionId),
                                 permissionService,
@@ -3809,7 +3853,8 @@ class TuiCommandRenderTest {
                                 todoStore,
                                 new StatusReporter(),
                                 null,
-                                null);
+                                null,
+                                workdir);
                     }
                 },
                 sessionStore,
@@ -3870,7 +3915,7 @@ class TuiCommandRenderTest {
         awaitText("yca coding agent");
 
         // live thinking renders inline in the conversation panel (no dedicated panel)
-        shellRegistry.onEvent(new AgentEvent.ThinkingDelta("pondering", sid(shellRegistry)));
+        shellRegistry.onEvent(new AgentEvent.ThinkingDelta("pondering", sid(shellRegistry), eventWorkdir));
         awaitText("pondering");
 
         tuiRef.get().dispatch(KeyEvent.ofChar('t', KeyModifiers.CTRL));
@@ -3899,7 +3944,7 @@ class TuiCommandRenderTest {
         // the strip must switch to the same SQUARE_CORNERS family as the pinned/in-pane line
         tuiRef.get().dispatch(new PasteEvent("say hi"));
         tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ENTER));
-        shellRegistry.onEvent(new AgentEvent.ThinkingDelta("pondering same spinner", sid(shellRegistry)));
+        shellRegistry.onEvent(new AgentEvent.ThinkingDelta("pondering same spinner", sid(shellRegistry), eventWorkdir));
 
         awaitText("thinking... (0s)");
         // both busy lines must show the SQUARE_CORNERS family: the clock frames (U+1F550-1F55B)
@@ -3954,8 +3999,10 @@ class TuiCommandRenderTest {
         // reasoning deltas can stream while a tool is running (subagent output, parallel
         // batches): the timer must arm on the first indicator frame even though the
         // pinned footer is busy showing the tool line
-        shellRegistry.onEvent(new AgentEvent.ToolStarted("bash", "{\"command\":\"mvn test\"}", sid(shellRegistry)));
-        shellRegistry.onEvent(new AgentEvent.ThinkingDelta("pondering while building", sid(shellRegistry)));
+        shellRegistry.onEvent(
+                new AgentEvent.ToolStarted("bash", "{\"command\":\"mvn test\"}", sid(shellRegistry), eventWorkdir));
+        shellRegistry.onEvent(
+                new AgentEvent.ThinkingDelta("pondering while building", sid(shellRegistry), eventWorkdir));
         awaitTextWithin("thinking... (0s)", TIMEOUT_MS);
 
         clock.advance(5_000);
@@ -3973,7 +4020,7 @@ class TuiCommandRenderTest {
         final var shellRegistry = testRegistry();
         final var turnStarted = new CountDownLatch(1);
         final var releaseTurn = new CountDownLatch(1);
-        final var agentLoop = new AgentLoop() {
+        final var agentLoop = new AgentLoop(testWorkdir) {
             @Override
             public String run(
                     final String prompt,
@@ -4013,7 +4060,8 @@ class TuiCommandRenderTest {
         tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ENTER));
         assertTrue(
                 turnStarted.await(TIMEOUT_MS, TimeUnit.MILLISECONDS), "the stub turn did not start before the timeout");
-        shellRegistry.onEvent(new AgentEvent.ToolStarted("bash", "{\"command\":\"mvn test\"}", sid(shellRegistry)));
+        shellRegistry.onEvent(
+                new AgentEvent.ToolStarted("bash", "{\"command\":\"mvn test\"}", sid(shellRegistry), eventWorkdir));
 
         // the status strip is the bottom row; the call line is the row directly above it
         final var stripRow = HeadlessBackend.HEIGHT - 1;
@@ -4055,7 +4103,7 @@ class TuiCommandRenderTest {
         final var shellRegistry = testRegistry();
         final var turnStarted = new CountDownLatch(1);
         final var releaseTurn = new CountDownLatch(1);
-        final var agentLoop = new AgentLoop() {
+        final var agentLoop = new AgentLoop(testWorkdir) {
             @Override
             public String run(
                     final String prompt,
@@ -4125,19 +4173,19 @@ class TuiCommandRenderTest {
         awaitTui();
         awaitText("yca coding agent");
 
-        shellRegistry.onEvent(new AgentEvent.ThinkingDelta("first round", sid(shellRegistry)));
+        shellRegistry.onEvent(new AgentEvent.ThinkingDelta("first round", sid(shellRegistry), eventWorkdir));
         awaitTextWithin("thinking... (0s)", TIMEOUT_MS);
         clock.advance(30_000);
         awaitTextWithin("thinking... (30s)", TIMEOUT_MS);
 
         // the turn ends while no idle frame may ever catch the reset condition: the
         // next thinking round must restart from zero, not resume the stale timer
-        shellRegistry.onEvent(new AgentEvent.TurnDone("answer", sid(shellRegistry)));
+        shellRegistry.onEvent(new AgentEvent.TurnDone("answer", sid(shellRegistry), eventWorkdir));
         awaitText("answer");
         awaitTextGoneWithin("thinking... (30s)", TIMEOUT_MS);
 
         clock.advance(5_000);
-        shellRegistry.onEvent(new AgentEvent.ThinkingDelta("second round", sid(shellRegistry)));
+        shellRegistry.onEvent(new AgentEvent.ThinkingDelta("second round", sid(shellRegistry), eventWorkdir));
         awaitTextWithin("thinking... (0s)", TIMEOUT_MS);
         clock.advance(2_000);
         awaitTextWithin("thinking... (2s)", TIMEOUT_MS);
@@ -4158,8 +4206,8 @@ class TuiCommandRenderTest {
         // reasoning containing a fenced block must survive the split/highlight path and
         // render the code text inline (it used to fall through as plain prose)
         shellRegistry.onEvent(new AgentEvent.ThinkingDelta(
-                "let's inspect\n```java\npublic int x() {\n return 1;\n}\n```", sid(shellRegistry)));
-        shellRegistry.onEvent(new AgentEvent.TurnDone("answer", sid(shellRegistry)));
+                "let's inspect\n```java\npublic int x() {\n return 1;\n}\n```", sid(shellRegistry), eventWorkdir));
+        shellRegistry.onEvent(new AgentEvent.TurnDone("answer", sid(shellRegistry), eventWorkdir));
         awaitText("public int x()");
 
         quit();
@@ -4178,14 +4226,14 @@ class TuiCommandRenderTest {
         // a paragraph separator streamed while the thought is still open must survive on screen:
         // the live tail is cut at a newline and the two halves parsed independently, so without
         // restoring the separator the paragraphs render glued (which is what made thoughts read dense)
-        shellRegistry.onEvent(new AgentEvent.ThinkingDelta("first paragraph", sid(shellRegistry)));
+        shellRegistry.onEvent(new AgentEvent.ThinkingDelta("first paragraph", sid(shellRegistry), eventWorkdir));
         awaitText("first paragraph");
-        shellRegistry.onEvent(new AgentEvent.ThinkingDelta("\n\nsecond", sid(shellRegistry)));
+        shellRegistry.onEvent(new AgentEvent.ThinkingDelta("\n\nsecond", sid(shellRegistry), eventWorkdir));
         awaitText("second");
-        shellRegistry.onEvent(new AgentEvent.ThinkingDelta(" paragraph", sid(shellRegistry)));
+        shellRegistry.onEvent(new AgentEvent.ThinkingDelta(" paragraph", sid(shellRegistry), eventWorkdir));
         awaitText("second paragraph");
         // the flushed render (the live region is replaced by the memoized one) must keep it too
-        shellRegistry.onEvent(new AgentEvent.TurnDone("answer", sid(shellRegistry)));
+        shellRegistry.onEvent(new AgentEvent.TurnDone("answer", sid(shellRegistry), eventWorkdir));
         awaitText("answer");
         assertBlankRowBetween("first paragraph", "second paragraph");
 
@@ -4205,9 +4253,9 @@ class TuiCommandRenderTest {
         // a fenced block is split out of the prose and highlighted on its own: it must not glue to
         // the paragraph above it, and must not leave a phantom row after it either
         shellRegistry.onEvent(new AgentEvent.ThinkingDelta(
-                "let's inspect\n\n```java\npublic int x() {\n return 1;\n}\n```", sid(shellRegistry)));
+                "let's inspect\n\n```java\npublic int x() {\n return 1;\n}\n```", sid(shellRegistry), eventWorkdir));
         awaitText("public int x()");
-        shellRegistry.onEvent(new AgentEvent.TurnDone("answer", sid(shellRegistry)));
+        shellRegistry.onEvent(new AgentEvent.TurnDone("answer", sid(shellRegistry), eventWorkdir));
         awaitText("answer");
         assertBlankRowBetween("let's inspect", "public int x()");
 
@@ -4233,8 +4281,8 @@ class TuiCommandRenderTest {
                     return (BiPredicate) field.get(null);
                 }
                 """;
-        shellRegistry.onEvent(
-                new AgentEvent.TurnDone("here is the method:\n```java\n" + code + "```", sid(shellRegistry)));
+        shellRegistry.onEvent(new AgentEvent.TurnDone(
+                "here is the method:\n```java\n" + code + "```", sid(shellRegistry), eventWorkdir));
 
         // the code reached rendering (not dropped) and its body indentation survived
         awaitText("public static native BiPredicate declaredType");
@@ -4295,8 +4343,8 @@ class TuiCommandRenderTest {
         awaitText("yca coding agent");
 
         // a flushed thought region sits in the transcript
-        shellRegistry.onEvent(new AgentEvent.ThinkingDelta("secret reasoning", sid(shellRegistry)));
-        shellRegistry.onEvent(new AgentEvent.TurnDone("answer", sid(shellRegistry)));
+        shellRegistry.onEvent(new AgentEvent.ThinkingDelta("secret reasoning", sid(shellRegistry), eventWorkdir));
+        shellRegistry.onEvent(new AgentEvent.TurnDone("answer", sid(shellRegistry), eventWorkdir));
         awaitText("secret reasoning");
 
         tuiRef.get().dispatch(new PasteEvent("/thinking hide"));
@@ -4320,10 +4368,10 @@ class TuiCommandRenderTest {
         awaitTui();
         awaitText("yca coding agent");
 
-        shellRegistry.onEvent(
-                new AgentEvent.ToolStarted("bash", "{\"command\":\"cd /tmp && ls -la\"}", sid(shellRegistry)));
-        shellRegistry.onEvent(new AgentEvent.ToolStream("bash", "file.txt", sid(shellRegistry)));
-        shellRegistry.onEvent(new AgentEvent.ToolFinished("bash", "file.txt", true, sid(shellRegistry)));
+        shellRegistry.onEvent(new AgentEvent.ToolStarted(
+                "bash", "{\"command\":\"cd /tmp && ls -la\"}", sid(shellRegistry), eventWorkdir));
+        shellRegistry.onEvent(new AgentEvent.ToolStream("bash", "file.txt", sid(shellRegistry), eventWorkdir));
+        shellRegistry.onEvent(new AgentEvent.ToolFinished("bash", "file.txt", true, sid(shellRegistry), eventWorkdir));
         // collapsed by default: the dim one-liner carries the significant command, not the output
         awaitText("✓ bash");
         awaitText("ls -la");
@@ -4355,9 +4403,11 @@ class TuiCommandRenderTest {
         awaitTui();
         awaitText("yca coding agent");
 
-        shellRegistry.onEvent(new AgentEvent.ToolStarted("bash", "{\"command\":\"ls -la\"}", sid(shellRegistry)));
-        shellRegistry.onEvent(new AgentEvent.ToolStream("bash", "secret-out", sid(shellRegistry)));
-        shellRegistry.onEvent(new AgentEvent.ToolFinished("bash", "secret-out", true, sid(shellRegistry)));
+        shellRegistry.onEvent(
+                new AgentEvent.ToolStarted("bash", "{\"command\":\"ls -la\"}", sid(shellRegistry), eventWorkdir));
+        shellRegistry.onEvent(new AgentEvent.ToolStream("bash", "secret-out", sid(shellRegistry), eventWorkdir));
+        shellRegistry.onEvent(
+                new AgentEvent.ToolFinished("bash", "secret-out", true, sid(shellRegistry), eventWorkdir));
         awaitText("✓ bash"); // collapsed default
 
         tuiRef.get().dispatch(new PasteEvent("/tool-output hide"));
@@ -4385,9 +4435,14 @@ class TuiCommandRenderTest {
 
         // finished read of a .java file: the numbered body must render with the content
         // syntax-highlighted (the card falls into the special read/read_symbol path)
-        shellRegistry.onEvent(new AgentEvent.ToolStarted("read", "{\"path\":\"src/Foo.java\"}", sid(shellRegistry)));
+        shellRegistry.onEvent(
+                new AgentEvent.ToolStarted("read", "{\"path\":\"src/Foo.java\"}", sid(shellRegistry), eventWorkdir));
         shellRegistry.onEvent(new AgentEvent.ToolFinished(
-                "read", " 1\tpublic class Foo {\n 2\t  private int x;\n 3\t}\n", true, sid(shellRegistry)));
+                "read",
+                " 1\tpublic class Foo {\n 2\t  private int x;\n 3\t}\n",
+                true,
+                sid(shellRegistry),
+                eventWorkdir));
 
         awaitText("✓ read");
         // collapsed by default: expand to reveal the body
@@ -4420,8 +4475,8 @@ class TuiCommandRenderTest {
         awaitTui();
         awaitText("yca coding agent");
 
-        shellRegistry.onEvent(
-                new AgentEvent.ToolStarted("read_symbol", "{\"symbol\":\"Foo#bar\"}", sid(shellRegistry)));
+        shellRegistry.onEvent(new AgentEvent.ToolStarted(
+                "read_symbol", "{\"symbol\":\"Foo#bar\"}", sid(shellRegistry), eventWorkdir));
         shellRegistry.onEvent(new AgentEvent.ToolFinished(
                 "read_symbol",
                 "symbol method Foo#bar (src/Foo.java:12-14)\n"
@@ -4429,7 +4484,8 @@ class TuiCommandRenderTest {
                         + " 2\t  return;\n"
                         + " 3\t}\n",
                 true,
-                sid(shellRegistry)));
+                sid(shellRegistry),
+                eventWorkdir));
 
         // the finished card is collapsed by default (no args in the header: the summary
         // shows only the name); expand it to reveal the header + numbered body
@@ -4458,10 +4514,13 @@ class TuiCommandRenderTest {
         awaitText("yca coding agent");
 
         // two consecutive finished calls (grep then read) become one run
-        shellRegistry.onEvent(new AgentEvent.ToolStarted("bash", "{\"command\":\"grep x src\"}", sid(shellRegistry)));
-        shellRegistry.onEvent(new AgentEvent.ToolFinished("bash", "hit", true, sid(shellRegistry)));
-        shellRegistry.onEvent(new AgentEvent.ToolStarted("read", "{\"path\":\"a.java\"}", sid(shellRegistry)));
-        shellRegistry.onEvent(new AgentEvent.ToolFinished("read", "class A {}", true, sid(shellRegistry)));
+        shellRegistry.onEvent(
+                new AgentEvent.ToolStarted("bash", "{\"command\":\"grep x src\"}", sid(shellRegistry), eventWorkdir));
+        shellRegistry.onEvent(new AgentEvent.ToolFinished("bash", "hit", true, sid(shellRegistry), eventWorkdir));
+        shellRegistry.onEvent(
+                new AgentEvent.ToolStarted("read", "{\"path\":\"a.java\"}", sid(shellRegistry), eventWorkdir));
+        shellRegistry.onEvent(
+                new AgentEvent.ToolFinished("read", "class A {}", true, sid(shellRegistry), eventWorkdir));
 
         // collapsed by default in COLLAPSED mode: only the run header survives (the header
         // carries the command names in its summary, but member outputs are hidden)
@@ -4493,19 +4552,25 @@ class TuiCommandRenderTest {
         awaitText("yca coding agent");
 
         // burst A: two consecutive finished calls
-        shellRegistry.onEvent(new AgentEvent.ToolStarted("bash", "{\"command\":\"grep x src\"}", sid(shellRegistry)));
-        shellRegistry.onEvent(new AgentEvent.ToolFinished("bash", "hit", true, sid(shellRegistry)));
-        shellRegistry.onEvent(new AgentEvent.ToolStarted("read", "{\"path\":\"a.java\"}", sid(shellRegistry)));
-        shellRegistry.onEvent(new AgentEvent.ToolFinished("read", "class A {}", true, sid(shellRegistry)));
+        shellRegistry.onEvent(
+                new AgentEvent.ToolStarted("bash", "{\"command\":\"grep x src\"}", sid(shellRegistry), eventWorkdir));
+        shellRegistry.onEvent(new AgentEvent.ToolFinished("bash", "hit", true, sid(shellRegistry), eventWorkdir));
+        shellRegistry.onEvent(
+                new AgentEvent.ToolStarted("read", "{\"path\":\"a.java\"}", sid(shellRegistry), eventWorkdir));
+        shellRegistry.onEvent(
+                new AgentEvent.ToolFinished("read", "class A {}", true, sid(shellRegistry), eventWorkdir));
 
         // a user turn separates the bursts: the runs must not merge into one mega-run
-        shellRegistry.onEvent(new AgentEvent.PromptIntegrated("second question", sid(shellRegistry)));
+        shellRegistry.onEvent(new AgentEvent.PromptIntegrated("second question", sid(shellRegistry), eventWorkdir));
 
         // burst B: another two consecutive finished calls
-        shellRegistry.onEvent(new AgentEvent.ToolStarted("bash", "{\"command\":\"ls -la\"}", sid(shellRegistry)));
-        shellRegistry.onEvent(new AgentEvent.ToolFinished("bash", "total 8", true, sid(shellRegistry)));
-        shellRegistry.onEvent(new AgentEvent.ToolStarted("read", "{\"path\":\"b.java\"}", sid(shellRegistry)));
-        shellRegistry.onEvent(new AgentEvent.ToolFinished("read", "class B {}", true, sid(shellRegistry)));
+        shellRegistry.onEvent(
+                new AgentEvent.ToolStarted("bash", "{\"command\":\"ls -la\"}", sid(shellRegistry), eventWorkdir));
+        shellRegistry.onEvent(new AgentEvent.ToolFinished("bash", "total 8", true, sid(shellRegistry), eventWorkdir));
+        shellRegistry.onEvent(
+                new AgentEvent.ToolStarted("read", "{\"path\":\"b.java\"}", sid(shellRegistry), eventWorkdir));
+        shellRegistry.onEvent(
+                new AgentEvent.ToolFinished("read", "class B {}", true, sid(shellRegistry), eventWorkdir));
 
         // both runs are collapsed by default in COLLAPSED mode: two independent run headers,
         // and no member line is rendered while a run is collapsed (the toggle is observable)
@@ -4582,10 +4647,13 @@ class TuiCommandRenderTest {
 
         // two consecutive finished calls group into one collapsible run (the box renders
         // in every visibility mode; SHOWN keeps it open with its member cards)
-        shellRegistry.onEvent(new AgentEvent.ToolStarted("bash", "{\"command\":\"grep x src\"}", sid(shellRegistry)));
-        shellRegistry.onEvent(new AgentEvent.ToolFinished("bash", "hit", true, sid(shellRegistry)));
-        shellRegistry.onEvent(new AgentEvent.ToolStarted("read", "{\"path\":\"a.java\"}", sid(shellRegistry)));
-        shellRegistry.onEvent(new AgentEvent.ToolFinished("read", "class A {}", true, sid(shellRegistry)));
+        shellRegistry.onEvent(
+                new AgentEvent.ToolStarted("bash", "{\"command\":\"grep x src\"}", sid(shellRegistry), eventWorkdir));
+        shellRegistry.onEvent(new AgentEvent.ToolFinished("bash", "hit", true, sid(shellRegistry), eventWorkdir));
+        shellRegistry.onEvent(
+                new AgentEvent.ToolStarted("read", "{\"path\":\"a.java\"}", sid(shellRegistry), eventWorkdir));
+        shellRegistry.onEvent(
+                new AgentEvent.ToolFinished("read", "class A {}", true, sid(shellRegistry), eventWorkdir));
         awaitText("2 tools");
 
         // SHOWN opens the run: the member cards render inside the box
@@ -4601,10 +4669,11 @@ class TuiCommandRenderTest {
         assertTrue(backend.bg(10, runTop + 1).isEmpty(), "run box interior must not be tinted:\n" + backend.text());
 
         // a turn boundary flushes the run; the next lone tool renders as a single tinted card
-        shellRegistry.onEvent(new AgentEvent.TurnDone("wrapped up", sid(shellRegistry)));
+        shellRegistry.onEvent(new AgentEvent.TurnDone("wrapped up", sid(shellRegistry), eventWorkdir));
         awaitText("wrapped up");
-        shellRegistry.onEvent(new AgentEvent.ToolStarted("bash", "{\"command\":\"ls -la\"}", sid(shellRegistry)));
-        shellRegistry.onEvent(new AgentEvent.ToolFinished("bash", "total 8", true, sid(shellRegistry)));
+        shellRegistry.onEvent(
+                new AgentEvent.ToolStarted("bash", "{\"command\":\"ls -la\"}", sid(shellRegistry), eventWorkdir));
+        shellRegistry.onEvent(new AgentEvent.ToolFinished("bash", "total 8", true, sid(shellRegistry), eventWorkdir));
         awaitText("ls -la");
         final var header = rowOf("ls -la"); // first content row, right below the card top border
         final var expected = TuiColors.blend("#eeeeee", "#141414", 0.95).toRgb();
@@ -4626,8 +4695,9 @@ class TuiCommandRenderTest {
         uiThread.start();
         awaitTui();
         awaitText("yca coding agent");
-        shellRegistry.onEvent(new AgentEvent.ToolStarted("bash", "{\"command\":\"ls -la\"}", sid(shellRegistry)));
-        shellRegistry.onEvent(new AgentEvent.ToolFinished("bash", "total 8", true, sid(shellRegistry)));
+        shellRegistry.onEvent(
+                new AgentEvent.ToolStarted("bash", "{\"command\":\"ls -la\"}", sid(shellRegistry), eventWorkdir));
+        shellRegistry.onEvent(new AgentEvent.ToolFinished("bash", "total 8", true, sid(shellRegistry), eventWorkdir));
         tuiRef.get().dispatch(new PasteEvent("/tool-output show"));
         tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ENTER));
         // see hoveringLoneShownCardHeaderReversesTheHeaderRow: "ls -la" also matches the
@@ -4660,8 +4730,9 @@ class TuiCommandRenderTest {
         uiThread.start();
         awaitTui();
         awaitText("yca coding agent");
-        shellRegistry.onEvent(new AgentEvent.ToolStarted("bash", "{\"command\":\"ls -la\"}", sid(shellRegistry)));
-        shellRegistry.onEvent(new AgentEvent.ToolFinished("bash", "total 8", true, sid(shellRegistry)));
+        shellRegistry.onEvent(
+                new AgentEvent.ToolStarted("bash", "{\"command\":\"ls -la\"}", sid(shellRegistry), eventWorkdir));
+        shellRegistry.onEvent(new AgentEvent.ToolFinished("bash", "total 8", true, sid(shellRegistry), eventWorkdir));
         tuiRef.get().dispatch(new PasteEvent("/tool-output show"));
         tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ENTER));
         // the SHOWN card title (" #1 - 4ms") only exists once the bordered card replaced
@@ -4705,7 +4776,8 @@ class TuiCommandRenderTest {
         awaitText("yca coding agent");
         tuiRef.get().dispatch(new PasteEvent("/tool-output show"));
         tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ENTER));
-        shellRegistry.onEvent(new AgentEvent.ToolStarted("bash", "{\"command\":\"sleep 30\"}", sid(shellRegistry)));
+        shellRegistry.onEvent(
+                new AgentEvent.ToolStarted("bash", "{\"command\":\"sleep 30\"}", sid(shellRegistry), eventWorkdir));
         awaitText("sleep 30");
         final var headerRow = rowOf("sleep 30");
         // click the header strip of the running card: opens the live overlay
@@ -4808,9 +4880,11 @@ class TuiCommandRenderTest {
         awaitTui();
         awaitText("yca coding agent");
 
-        shellRegistry.onEvent(new AgentEvent.ToolStarted("bash", "{\"command\":\"ls -la\"}", sid(shellRegistry)));
-        shellRegistry.onEvent(new AgentEvent.ToolStream("bash", "out-a\nout-b", sid(shellRegistry)));
-        shellRegistry.onEvent(new AgentEvent.ToolFinished("bash", "out-a\nout-b", true, sid(shellRegistry)));
+        shellRegistry.onEvent(
+                new AgentEvent.ToolStarted("bash", "{\"command\":\"ls -la\"}", sid(shellRegistry), eventWorkdir));
+        shellRegistry.onEvent(new AgentEvent.ToolStream("bash", "out-a\nout-b", sid(shellRegistry), eventWorkdir));
+        shellRegistry.onEvent(
+                new AgentEvent.ToolFinished("bash", "out-a\nout-b", true, sid(shellRegistry), eventWorkdir));
         awaitText("✓ bash"); // condensed dim line
 
         // clicking the dim line opens the full-output modal even while blocks are hidden
@@ -4846,10 +4920,10 @@ class TuiCommandRenderTest {
                 | bob  | 42  |
                 - bob is 42
                 """;
-        shellRegistry.onEvent(
-                new AgentEvent.ToolStarted("bash", "{\"command\":\"python3 report.py\"}", sid(shellRegistry)));
-        shellRegistry.onEvent(new AgentEvent.ToolStream("bash", output, sid(shellRegistry)));
-        shellRegistry.onEvent(new AgentEvent.ToolFinished("bash", output, true, sid(shellRegistry)));
+        shellRegistry.onEvent(new AgentEvent.ToolStarted(
+                "bash", "{\"command\":\"python3 report.py\"}", sid(shellRegistry), eventWorkdir));
+        shellRegistry.onEvent(new AgentEvent.ToolStream("bash", output, sid(shellRegistry), eventWorkdir));
+        shellRegistry.onEvent(new AgentEvent.ToolFinished("bash", output, true, sid(shellRegistry), eventWorkdir));
         awaitText("✓ bash");
 
         tuiRef.get().dispatch(MouseEvent.press(MouseButton.LEFT, 2, rowOf("✓ bash")));
@@ -4876,8 +4950,8 @@ class TuiCommandRenderTest {
         uiThread.start();
         awaitTui();
         awaitText("yca coding agent");
-        registry.onEvent(new AgentEvent.TextDelta("```text\n@123@\n```", sid(registry)));
-        registry.onEvent(new AgentEvent.TurnDone("```text\n@123@\n```", sid(registry)));
+        registry.onEvent(new AgentEvent.TextDelta("```text\n@123@\n```", sid(registry), eventWorkdir));
+        registry.onEvent(new AgentEvent.TurnDone("```text\n@123@\n```", sid(registry), eventWorkdir));
         awaitText("@123@");
         final var row = rowOf("@123@");
         final var from = columnOfLineContaining("@123@");
@@ -5041,7 +5115,7 @@ class TuiCommandRenderTest {
         assertEquals(2, dragBatch(runner -> {
             runner.dispatch(MouseEvent.press(MouseButton.LEFT, from, row));
             runner.dispatch(MouseEvent.drag(MouseButton.LEFT, from + 3, row));
-            registry.onEvent(new AgentEvent.Status("BACKGROUND_DURING_DRAG", sid(registry)));
+            registry.onEvent(new AgentEvent.Status("BACKGROUND_DURING_DRAG", sid(registry), eventWorkdir));
         }));
         assertTrue(backend.text().contains("BACKGROUND_DURING_DRAG"), backend.text());
         quit();
@@ -5078,11 +5152,14 @@ class TuiCommandRenderTest {
         awaitTui();
         awaitText("yca coding agent");
         if (modal) {
-            registry.onEvent(new AgentEvent.ToolStarted("bash", "{}", sid(registry)));
-            registry.onEvent(new AgentEvent.ToolFinished("bash", "abcdefghijklmnopqrstuvwxyz", true, sid(registry)));
+            registry.onEvent(new AgentEvent.ToolStarted("bash", "{}", sid(registry), eventWorkdir));
+            registry.onEvent(new AgentEvent.ToolFinished(
+                    "bash", "abcdefghijklmnopqrstuvwxyz", true, sid(registry), eventWorkdir));
         } else {
-            registry.onEvent(new AgentEvent.TextDelta("```text\nabcdefghijklmnopqrstuvwxyz\n```", sid(registry)));
-            registry.onEvent(new AgentEvent.TurnDone("```text\nabcdefghijklmnopqrstuvwxyz\n```", sid(registry)));
+            registry.onEvent(
+                    new AgentEvent.TextDelta("```text\nabcdefghijklmnopqrstuvwxyz\n```", sid(registry), eventWorkdir));
+            registry.onEvent(
+                    new AgentEvent.TurnDone("```text\nabcdefghijklmnopqrstuvwxyz\n```", sid(registry), eventWorkdir));
         }
         // Registry updates queue UI work. This explicit input paints it without an automatic tick.
         tuiRef.get().dispatch(new PasteEvent(""));
@@ -5124,9 +5201,11 @@ class TuiCommandRenderTest {
         awaitTui();
         awaitText("yca coding agent");
 
-        shellRegistry.onEvent(new AgentEvent.ToolStarted("bash", "{\"command\":\"cat out.txt\"}", sid(shellRegistry)));
-        shellRegistry.onEvent(new AgentEvent.ToolStream("bash", "copy-me-line", sid(shellRegistry)));
-        shellRegistry.onEvent(new AgentEvent.ToolFinished("bash", "copy-me-line", true, sid(shellRegistry)));
+        shellRegistry.onEvent(
+                new AgentEvent.ToolStarted("bash", "{\"command\":\"cat out.txt\"}", sid(shellRegistry), eventWorkdir));
+        shellRegistry.onEvent(new AgentEvent.ToolStream("bash", "copy-me-line", sid(shellRegistry), eventWorkdir));
+        shellRegistry.onEvent(
+                new AgentEvent.ToolFinished("bash", "copy-me-line", true, sid(shellRegistry), eventWorkdir));
         awaitText("✓ bash");
 
         tuiRef.get().dispatch(MouseEvent.press(MouseButton.LEFT, 2, rowOf("✓ bash")));
@@ -5161,8 +5240,9 @@ class TuiCommandRenderTest {
         awaitTui();
         awaitText("yca coding agent");
 
-        shellRegistry.onEvent(new AgentEvent.ToolStarted("bash", "{\"command\":\"tail -f log\"}", sid(shellRegistry)));
-        shellRegistry.onEvent(new AgentEvent.ToolStream("bash", "streamed line", sid(shellRegistry)));
+        shellRegistry.onEvent(
+                new AgentEvent.ToolStarted("bash", "{\"command\":\"tail -f log\"}", sid(shellRegistry), eventWorkdir));
+        shellRegistry.onEvent(new AgentEvent.ToolStream("bash", "streamed line", sid(shellRegistry), eventWorkdir));
         awaitTextGone("streamed line"); // condensed default hides the live stream
         awaitText("tail -f log"); // dim one-liner with the significant command
         awaitText("running...");
@@ -5179,7 +5259,7 @@ class TuiCommandRenderTest {
         awaitText("streamed line"); // the ToolStream fragment reached the overlay body
 
         // a later stream chunk keeps the open modal live
-        shellRegistry.onEvent(new AgentEvent.ToolStream("bash", "second line", sid(shellRegistry)));
+        shellRegistry.onEvent(new AgentEvent.ToolStream("bash", "second line", sid(shellRegistry), eventWorkdir));
         awaitText("second line");
 
         // Esc closes the running overlay (no tool cancel: the loop is the stub)
@@ -5203,9 +5283,10 @@ class TuiCommandRenderTest {
         awaitTui();
         awaitText("yca coding agent");
 
+        shellRegistry.onEvent(new AgentEvent.ToolStarted(
+                "bash", "{\"command\":\"mvn -q test\"}", 7, sid(shellRegistry), null, null, eventWorkdir));
         shellRegistry.onEvent(
-                new AgentEvent.ToolStarted("bash", "{\"command\":\"mvn -q test\"}", 7, sid(shellRegistry), null, null));
-        shellRegistry.onEvent(new AgentEvent.ToolStream("bash", "compiling...", 7, sid(shellRegistry), null, null));
+                new AgentEvent.ToolStream("bash", "compiling...", 7, sid(shellRegistry), null, null, eventWorkdir));
         awaitText("running...");
         final var row = rowOf("mvn -q test");
         tuiRef.get().dispatch(MouseEvent.press(MouseButton.LEFT, 2, row));
@@ -5217,8 +5298,8 @@ class TuiCommandRenderTest {
         // the tool finishes while the overlay is still open: the modal must leave the
         // running state (regression: it used to keep the stale running entry forever,
         // because only ToolStream re-armed the overlay, never ToolFinished)
-        shellRegistry.onEvent(
-                new AgentEvent.ToolFinished("bash", "Exit code: 1", false, false, 7, sid(shellRegistry), null, null));
+        shellRegistry.onEvent(new AgentEvent.ToolFinished(
+                "bash", "Exit code: 1", false, false, 7, sid(shellRegistry), null, null, eventWorkdir));
         awaitTextGone("pending"); // overlay no longer pending
         awaitTextGone("bash - running");
         awaitText("Exit code: 1"); // finished output visible in the (now closed-state) overlay
@@ -5238,7 +5319,7 @@ class TuiCommandRenderTest {
         awaitTui();
         awaitText("yca coding agent");
 
-        shellRegistry.onEvent(new AgentEvent.TurnMetrics(3, 120, 400, 500, 2, 1500, sid(shellRegistry)));
+        shellRegistry.onEvent(new AgentEvent.TurnMetrics(3, 120, 400, 500, 2, 1500, sid(shellRegistry), eventWorkdir));
         awaitText("3 LLM");
         awaitText("1.5s");
         awaitText("session: 1 LLM calls");
@@ -5266,7 +5347,8 @@ class TuiCommandRenderTest {
                 2,
                 1500,
                 new AgentEvent.Throughput(150, 0, 3000, 0, 0, 3, 0, false),
-                sid(shellRegistry)));
+                sid(shellRegistry),
+                eventWorkdir));
         awaitText("3 LLM");
         awaitText("request 50.0 tok/s");
 
@@ -5278,11 +5360,12 @@ class TuiCommandRenderTest {
                 2,
                 1500,
                 new AgentEvent.Throughput(150, 0, 3000, 0, 0, 3, 0, true),
-                sid(shellRegistry)));
+                sid(shellRegistry),
+                eventWorkdir));
         awaitText("request ~50.0 tok/s");
 
         // a turn whose throughput cannot be measured shows no segment at all
-        shellRegistry.onEvent(new AgentEvent.TurnMetrics(3, 120, 400, 500, 2, 1500, sid(shellRegistry)));
+        shellRegistry.onEvent(new AgentEvent.TurnMetrics(3, 120, 400, 500, 2, 1500, sid(shellRegistry), eventWorkdir));
         awaitNoText("tok/s");
 
         quit();
@@ -5308,7 +5391,8 @@ class TuiCommandRenderTest {
                 2,
                 1500,
                 new AgentEvent.Throughput(150, 0, 3000, 4000, 150, 3, 3, false),
-                sid(shellRegistry)));
+                sid(shellRegistry),
+                eventWorkdir));
         awaitText("request 50.0 tok/s · server 37.5 tok/s");
 
         shellRegistry.onEvent(new AgentEvent.TurnMetrics(
@@ -5319,7 +5403,8 @@ class TuiCommandRenderTest {
                 2,
                 1500,
                 new AgentEvent.Throughput(150, 0, 3000, 2000, 80, 3, 1, false),
-                sid(shellRegistry)));
+                sid(shellRegistry),
+                eventWorkdir));
         awaitText("request 50.0 tok/s · server 40.0 tok/s (partial)");
 
         quit();
@@ -5329,7 +5414,7 @@ class TuiCommandRenderTest {
     void multilinePasteStaysInPromptUntilSubmitted() throws Exception {
         final var shellRegistry = testRegistry();
         final var received = new AtomicReference<String>();
-        final var agentLoop = new AgentLoop() {
+        final var agentLoop = new AgentLoop(testWorkdir) {
             @Override
             public String run(
                     final String prompt,
@@ -5339,7 +5424,7 @@ class TuiCommandRenderTest {
                     final BooleanSupplier cancelled) {
                 received.set(prompt);
                 shellRegistry.onEvent(
-                        new AgentEvent.TurnDone("lines:" + prompt.lines().count(), sessionId));
+                        new AgentEvent.TurnDone("lines:" + prompt.lines().count(), sessionId, eventWorkdir));
                 return "ok";
             }
 
@@ -5375,7 +5460,7 @@ class TuiCommandRenderTest {
     void tabsRouteEventsPerSessionAndShowStatusIcons() throws Exception {
         final var shellRegistry = testRegistry();
         final var lastSid = new AtomicReference<String>();
-        final var agentLoop = new AgentLoop() {
+        final var agentLoop = new AgentLoop(testWorkdir) {
             @Override
             public String run(
                     final String prompt,
@@ -5384,7 +5469,7 @@ class TuiCommandRenderTest {
                     final List<Message> history,
                     final BooleanSupplier cancelled) {
                 lastSid.set(sessionId);
-                shellRegistry.onEvent(new AgentEvent.TurnDone("ran:" + sessionId, sessionId));
+                shellRegistry.onEvent(new AgentEvent.TurnDone("ran:" + sessionId, sessionId, eventWorkdir));
                 return "ok";
             }
 
@@ -5422,7 +5507,8 @@ class TuiCommandRenderTest {
         awaitTextGone("ran:");
 
         // an event for the background tab two is routed to its own transcript, never the visible one
-        shellRegistry.onEvent(new AgentEvent.Notice(AgentEvent.Notice.Level.INFO, "bg-for-two", secondSid));
+        shellRegistry.onEvent(
+                new AgentEvent.Notice(AgentEvent.Notice.Level.INFO, "bg-for-two", secondSid, eventWorkdir));
         awaitTextGone("bg-for-two");
 
         // back on tab two: the background text arrived while hidden, and the bar shows the done icon
@@ -5482,7 +5568,7 @@ class TuiCommandRenderTest {
     void tabHoverShowsFullTitleTooltip() throws Exception {
         final var shellRegistry = testRegistry();
         final var lastSid = new AtomicReference<String>();
-        final var agentLoop = new AgentLoop() {
+        final var agentLoop = new AgentLoop(testWorkdir) {
             @Override
             public String run(
                     final String prompt,
@@ -5491,7 +5577,7 @@ class TuiCommandRenderTest {
                     final List<Message> history,
                     final BooleanSupplier cancelled) {
                 lastSid.set(sessionId);
-                shellRegistry.onEvent(new AgentEvent.TurnDone("ran:" + sessionId, sessionId));
+                shellRegistry.onEvent(new AgentEvent.TurnDone("ran:" + sessionId, sessionId, eventWorkdir));
                 return "ok";
             }
 
@@ -5884,8 +5970,10 @@ class TuiCommandRenderTest {
         shellRegistry.onEvent(new AgentEvent.ToolStarted(
                 "edit_file",
                 "{\"path\":\"README.md\",\"oldString\":\"old\",\"newString\":\"new\"}",
-                sid(shellRegistry)));
-        shellRegistry.onEvent(new AgentEvent.ToolFinished("edit_file", "patched", true, sid(shellRegistry)));
+                sid(shellRegistry),
+                eventWorkdir));
+        shellRegistry.onEvent(
+                new AgentEvent.ToolFinished("edit_file", "patched", true, sid(shellRegistry), eventWorkdir));
         awaitText("edit_file"); // condensed card rendered
         awaitTextGone("-old"); // the diff preview only exists inside the overlay
 
@@ -5912,9 +6000,12 @@ class TuiCommandRenderTest {
 
         // spawn/done markers fold into the parent transcript, no inline child stream
         final var sessionId = sid(shellRegistry);
-        shellRegistry.onEvent(new AgentEvent.SubagentStarted("do the thing", sessionId, "sub-1", "child"));
-        shellRegistry.onEvent(new AgentEvent.ThinkingDelta("child reasoning", sessionId, "sub-1", "child"));
-        shellRegistry.onEvent(new AgentEvent.SubagentCompleted("done", true, sessionId, "sub-1", "child"));
+        shellRegistry.onEvent(
+                new AgentEvent.SubagentStarted("do the thing", sessionId, "sub-1", "child", eventWorkdir));
+        shellRegistry.onEvent(
+                new AgentEvent.ThinkingDelta("child reasoning", sessionId, "sub-1", "child", eventWorkdir));
+        shellRegistry.onEvent(
+                new AgentEvent.SubagentCompleted("done", true, sessionId, "sub-1", "child", eventWorkdir));
         awaitText("subagent child started: do the thing");
         awaitTextGone("child reasoning");
 
@@ -5955,10 +6046,12 @@ class TuiCommandRenderTest {
         final var sub = subagentRegistry
                 .start(sessionId, "do the thing", "code reviewer")
                 .orElseThrow();
-        shellRegistry.onEvent(new AgentEvent.ThinkingDelta("kid thinks", sessionId, sub.id(), "child"));
-        shellRegistry.onEvent(new AgentEvent.TextDelta("kid answer", sessionId, sub.id(), "child"));
-        shellRegistry.onEvent(new AgentEvent.ToolStarted("grep", "{\"q\":\"x\"}", -1L, sessionId, sub.id(), "child"));
-        shellRegistry.onEvent(new AgentEvent.ToolFinished("grep", "match line", true, sessionId, sub.id(), "child"));
+        shellRegistry.onEvent(new AgentEvent.ThinkingDelta("kid thinks", sessionId, sub.id(), "child", eventWorkdir));
+        shellRegistry.onEvent(new AgentEvent.TextDelta("kid answer", sessionId, sub.id(), "child", eventWorkdir));
+        shellRegistry.onEvent(
+                new AgentEvent.ToolStarted("grep", "{\"q\":\"x\"}", -1L, sessionId, sub.id(), "child", eventWorkdir));
+        shellRegistry.onEvent(
+                new AgentEvent.ToolFinished("grep", "match line", true, sessionId, sub.id(), "child", eventWorkdir));
 
         // the detail view renders the captured regions - never the raw yca markers
         tuiRef.get().dispatch(new PasteEvent("/subagents code rev"));
@@ -6016,8 +6109,8 @@ class TuiCommandRenderTest {
         final var summary = "## Findings\n- item one\n\n```java\nvar x = 1;\n```\n";
         subagentRegistry.complete(
                 sub.id(), SubagentRegistry.SubagentResult.success(summary, "full conv", List.of("a.java")));
-        shellRegistry.onEvent(
-                new AgentEvent.SubagentCompleted(summary, true, false, sessionId, sub.id(), "child", "gpt-5.5"));
+        shellRegistry.onEvent(new AgentEvent.SubagentCompleted(
+                summary, true, false, sessionId, sub.id(), "child", "gpt-5.5", eventWorkdir));
 
         // the detail view renders the report card above the live capture
         tuiRef.get().dispatch(new PasteEvent("/subagents " + sub.id()));
@@ -6112,14 +6205,15 @@ class TuiCommandRenderTest {
                 IntStream.range(0, 60).mapToObj(i -> "tool line " + i).collect(Collectors.joining("\n"));
         final var transcript =
                 IntStream.range(0, 60).mapToObj(i -> "transcript line " + i).collect(Collectors.joining("\n"));
-        shellRegistry.onEvent(new AgentEvent.ToolStarted("bash", "{\"command\":\"ls -la\"}", sid(shellRegistry)));
-        shellRegistry.onEvent(new AgentEvent.ToolStream("bash", toolOutput, sid(shellRegistry)));
-        shellRegistry.onEvent(new AgentEvent.ToolFinished("bash", toolOutput, true, sid(shellRegistry)));
+        shellRegistry.onEvent(
+                new AgentEvent.ToolStarted("bash", "{\"command\":\"ls -la\"}", sid(shellRegistry), eventWorkdir));
+        shellRegistry.onEvent(new AgentEvent.ToolStream("bash", toolOutput, sid(shellRegistry), eventWorkdir));
+        shellRegistry.onEvent(new AgentEvent.ToolFinished("bash", toolOutput, true, sid(shellRegistry), eventWorkdir));
         awaitTextWithin("✓ bash", TIMEOUT_MS); // condensed tool block
 
         // the transcript now overflows the screen: TurnDone appends and auto-follows to the
         // bottom, away from the tool block and the first transcript line
-        shellRegistry.onEvent(new AgentEvent.TurnDone(transcript, sid(shellRegistry)));
+        shellRegistry.onEvent(new AgentEvent.TurnDone(transcript, sid(shellRegistry), eventWorkdir));
         awaitTextWithin("transcript line 59", TIMEOUT_MS);
 
         // prove the transcript really scrolls, otherwise the "does not move" guard below is void:
@@ -6169,10 +6263,10 @@ class TuiCommandRenderTest {
         final var longCommand =
                 "mvn install -DskipTests -Dmaven.javadoc.skip=true -Dspotless.check.skip=true -Dunique=ZZZTAIL -pl tui -am";
         final var output = "build finished\n";
-        shellRegistry.onEvent(
-                new AgentEvent.ToolStarted("bash", "{\"command\":\"" + longCommand + "\"}", sid(shellRegistry)));
-        shellRegistry.onEvent(new AgentEvent.ToolStream("bash", output, sid(shellRegistry)));
-        shellRegistry.onEvent(new AgentEvent.ToolFinished("bash", output, true, sid(shellRegistry)));
+        shellRegistry.onEvent(new AgentEvent.ToolStarted(
+                "bash", "{\"command\":\"" + longCommand + "\"}", sid(shellRegistry), eventWorkdir));
+        shellRegistry.onEvent(new AgentEvent.ToolStream("bash", output, sid(shellRegistry), eventWorkdir));
+        shellRegistry.onEvent(new AgentEvent.ToolFinished("bash", output, true, sid(shellRegistry), eventWorkdir));
         awaitTextWithin("✓ bash", TIMEOUT_MS); // condensed tool block
 
         // open the full output overlay: the command must lead the body, never ellipsized
@@ -6206,9 +6300,10 @@ class TuiCommandRenderTest {
         // BashTool streams "$ <command>" as its first output line; the modal must not
         // repeat it below the bold command header (which already leads the body with it).
         final var cmd = "mvn install";
-        shellRegistry.onEvent(new AgentEvent.ToolStarted("bash", "{\"command\":\"" + cmd + "\"}", sid(shellRegistry)));
-        shellRegistry.onEvent(new AgentEvent.ToolStream("bash", "$ " + cmd, sid(shellRegistry)));
-        shellRegistry.onEvent(new AgentEvent.ToolStream("bash", "build finished", sid(shellRegistry)));
+        shellRegistry.onEvent(
+                new AgentEvent.ToolStarted("bash", "{\"command\":\"" + cmd + "\"}", sid(shellRegistry), eventWorkdir));
+        shellRegistry.onEvent(new AgentEvent.ToolStream("bash", "$ " + cmd, sid(shellRegistry), eventWorkdir));
+        shellRegistry.onEvent(new AgentEvent.ToolStream("bash", "build finished", sid(shellRegistry), eventWorkdir));
 
         // open the running-tool overlay (Ctrl+O): a live bash call with the echoed command
         tuiRef.get().dispatch(KeyEvent.ofChar('o', KeyModifiers.CTRL));
@@ -6239,9 +6334,10 @@ class TuiCommandRenderTest {
         // BashTool streams "$ <command>" as its first output line; the running inline card
         // already carries the command as its header name, so the body must not re-echo it.
         final var cmd = "mvn install";
-        shellRegistry.onEvent(new AgentEvent.ToolStarted("bash", "{\"command\":\"" + cmd + "\"}", sid(shellRegistry)));
-        shellRegistry.onEvent(new AgentEvent.ToolStream("bash", "$ " + cmd, sid(shellRegistry)));
-        shellRegistry.onEvent(new AgentEvent.ToolStream("bash", "build finished", sid(shellRegistry)));
+        shellRegistry.onEvent(
+                new AgentEvent.ToolStarted("bash", "{\"command\":\"" + cmd + "\"}", sid(shellRegistry), eventWorkdir));
+        shellRegistry.onEvent(new AgentEvent.ToolStream("bash", "$ " + cmd, sid(shellRegistry), eventWorkdir));
+        shellRegistry.onEvent(new AgentEvent.ToolStream("bash", "build finished", sid(shellRegistry), eventWorkdir));
         awaitText("mvn install"); // the running card (or collapsed one-liner) shows the command
 
         // show full cards (default is collapsed): the running card body must not repeat the
@@ -6273,9 +6369,9 @@ class TuiCommandRenderTest {
         final var longCommand = "mvn install -DskipTests -Dtail=TAILTOKEN123 -pl tui -am";
         final var rawArgs = "{\"command\":\"" + longCommand + "\"}";
         final var output = "ok\n";
-        shellRegistry.onEvent(new AgentEvent.ToolStarted("bash", rawArgs, sid(shellRegistry)));
-        shellRegistry.onEvent(new AgentEvent.ToolStream("bash", output, sid(shellRegistry)));
-        shellRegistry.onEvent(new AgentEvent.ToolFinished("bash", output, true, sid(shellRegistry)));
+        shellRegistry.onEvent(new AgentEvent.ToolStarted("bash", rawArgs, sid(shellRegistry), eventWorkdir));
+        shellRegistry.onEvent(new AgentEvent.ToolStream("bash", output, sid(shellRegistry), eventWorkdir));
+        shellRegistry.onEvent(new AgentEvent.ToolFinished("bash", output, true, sid(shellRegistry), eventWorkdir));
         awaitTextWithin("✓ bash", TIMEOUT_MS);
 
         // open the overlay: the footer (holding the ellipsized args + the hint) is not hovered yet
@@ -6324,7 +6420,7 @@ class TuiCommandRenderTest {
         // transcript would be visible (the top row would leave the viewport)
         final var transcript =
                 IntStream.range(0, 60).mapToObj(i -> "transcript line " + i).collect(Collectors.joining("\n"));
-        shellRegistry.onEvent(new AgentEvent.TurnDone(transcript, sid(shellRegistry)));
+        shellRegistry.onEvent(new AgentEvent.TurnDone(transcript, sid(shellRegistry), eventWorkdir));
         awaitTextWithin("transcript line 59", TIMEOUT_MS); // appended, auto-followed to the bottom
 
         // bring the first transcript line back on screen: it must stay put while wheeling
@@ -6363,7 +6459,7 @@ class TuiCommandRenderTest {
         // A blocked tool must be woken by cancellation, without a test-side release.
         final var turnStarted = new CountDownLatch(1);
         final var turnStopped = new CountDownLatch(1);
-        final var agentLoop = new AgentLoop() {
+        final var agentLoop = new AgentLoop(testWorkdir) {
             @Override
             public String run(
                     final String prompt,
@@ -6378,7 +6474,7 @@ class TuiCommandRenderTest {
                     Thread.currentThread().interrupt();
                 }
                 if (cancelled.getAsBoolean()) {
-                    shellRegistry.onEvent(new AgentEvent.TurnCancelled(sessionId));
+                    shellRegistry.onEvent(new AgentEvent.TurnCancelled(sessionId, eventWorkdir));
                     turnStopped.countDown();
                 }
                 return "ok";
@@ -6418,7 +6514,8 @@ class TuiCommandRenderTest {
                         sessionId,
                         null,
                         null,
-                        null));
+                        null,
+                        eventWorkdir));
         awaitText("passive error must not swallow stop");
 
         // A passive banner must not consume Esc; the real blocked turn must stop.

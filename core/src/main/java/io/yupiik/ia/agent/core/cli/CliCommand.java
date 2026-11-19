@@ -34,8 +34,10 @@ import io.yupiik.ia.agent.core.session.FileSessionStore;
 import io.yupiik.ia.agent.core.shell.AnsiShellFrontend;
 import io.yupiik.ia.agent.core.shell.AnsiShellIO;
 import io.yupiik.ia.agent.core.shell.ConversationCoordinator;
+import io.yupiik.ia.agent.core.shell.ConversationTranscript;
 import io.yupiik.ia.agent.core.shell.InterruptCoordinator;
 import io.yupiik.ia.agent.core.shell.SessionLifecycle;
+import io.yupiik.ia.agent.core.shell.SessionRuntime;
 import io.yupiik.ia.agent.core.shell.SessionRuntimeFactory;
 import io.yupiik.ia.agent.core.shell.ShellEnv;
 import io.yupiik.ia.agent.core.shell.ShellOutcome;
@@ -71,6 +73,7 @@ import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.BooleanSupplier;
 import java.util.logging.Level;
 import java.util.logging.Logger;
+import java.util.regex.Pattern;
 
 /**
  * Interactive plain-terminal REPL for yca. Requires only a terminal
@@ -81,6 +84,7 @@ import java.util.logging.Logger;
 @DefaultScoped
 @Command(name = "cli", description = "Interactive plain-terminal yca session (REPL) with optional ANSI colors.")
 public class CliCommand implements Runnable {
+    private static final Pattern WHITESPACE = Pattern.compile("\\s+");
     private final CliConf conf;
     private final SessionLifecycle sessionLifecycle;
     private final FileSessionStore sessionStore;
@@ -355,7 +359,8 @@ public class CliCommand implements Runnable {
         }
         println(MarkdownColorizer.info("session " + sessionId + " - context file: " + contextPath));
         // the banner reads the session runtime (permission mode), wire it before printing
-        final var runtime = sessionRuntimeFactory.create(sessionId);
+        final var workdir = sessionRuntimeFactory.resolveWorkdir(null, sessionId);
+        final var runtime = sessionRuntimeFactory.create(sessionId, workdir);
         session.runtime(runtime);
         frontend.bindCompression(runtime.compression());
         printBanner();
@@ -389,6 +394,16 @@ public class CliCommand implements Runnable {
      * (finally) and the JVM shutdown hook share it.
      */
     private void cleanup() {
+        requestQuit();
+        turnLock.lock();
+        try {
+            cleanupSession();
+        } finally {
+            turnLock.unlock();
+        }
+    }
+
+    private void cleanupSession() {
         if (!cleaned.compareAndSet(false, true)) {
             return;
         }
@@ -409,7 +424,7 @@ public class CliCommand implements Runnable {
         }
         frontend.idle();
         shellRegistry.unregister(env());
-        sessionLifecycle.release(sessionId, session.runtime());
+        disposeRuntime(sessionId, session.runtime());
         System.out.flush();
         System.err.flush();
         if (LOGGER.isLoggable(Level.FINE)) {
@@ -765,38 +780,55 @@ public class CliCommand implements Runnable {
      * until completion, keeping the CLI REPL synchronous by nature.
      */
     private void startTurn(final String prompt, final String agentName, final String blockedMessage) {
-        if (quitRequested) {
-            // never start (or restart) a turn once quitting: it would reset the
-            // cancellation flag and pin the exit on a fresh completion
-            pendingPrompts.clear();
-            return;
+        final CompletableFuture<Boolean> future;
+        turnLock.lock();
+        try {
+            if (quitRequested) {
+                // Never restart a turn once quitting: resetting cancellation could pin the exit.
+                pendingPrompts.clear();
+                return;
+            }
+            cancelled.set(false);
+            final var runtime = session.runtime();
+            final var turnSessionId = sessionId;
+            final var todosBefore = runtime.todos().all();
+            activeTurns.incrementAndGet();
+            try {
+                future = turnRunner
+                        .submit(new TurnRunner.TurnRequest(
+                                runtime.loop(),
+                                env(),
+                                turnSessionId,
+                                agentName,
+                                prompt,
+                                () -> sessionStore.load(turnSessionId),
+                                cancelled::get,
+                                queueing ? () -> pendingPrompts.pollFirst() : null))
+                        .whenComplete((ran, error) -> {
+                            turnLock.lock();
+                            try {
+                                if (Boolean.FALSE.equals(ran)) {
+                                    println(MarkdownColorizer.status(blockedMessage));
+                                }
+                                printTodosIfChanged(todosBefore);
+                                printUsage();
+                            } finally {
+                                activeTurns.decrementAndGet();
+                                turnLock.unlock();
+                            }
+                            if (queueing) {
+                                drainQueueIfIdle();
+                            }
+                        })
+                        .toCompletableFuture();
+            } catch (final RuntimeException e) {
+                activeTurns.decrementAndGet();
+                throw e;
+            }
+            inFlight = future;
+        } finally {
+            turnLock.unlock();
         }
-        cancelled.set(false);
-        final var todosBefore = session.runtime().todos().all();
-        activeTurns.incrementAndGet();
-        final var future = turnRunner
-                .submit(new TurnRunner.TurnRequest(
-                        session.runtime().loop(),
-                        env(),
-                        sessionId,
-                        agentName,
-                        prompt,
-                        () -> sessionStore.load(sessionId),
-                        cancelled::get,
-                        queueing ? () -> pendingPrompts.pollFirst() : null))
-                .whenComplete((ran, error) -> {
-                    activeTurns.decrementAndGet();
-                    if (Boolean.FALSE.equals(ran)) {
-                        println(MarkdownColorizer.status(blockedMessage));
-                    }
-                    printTodosIfChanged(todosBefore);
-                    printUsage();
-                    if (queueing) {
-                        drainQueueIfIdle();
-                    }
-                })
-                .toCompletableFuture();
-        inFlight = future;
         if (!queueing) {
             awaitTurn(future);
         }
@@ -912,17 +944,21 @@ public class CliCommand implements Runnable {
      * keep the label they were written with, the next ones use the fresh render.
      */
     private void refreshLabels() {
+        refreshLabels(session, coordinator.transcript());
+    }
+
+    private void refreshLabels(final ShellSession target, final ConversationTranscript transcript) {
         final var ctx = new SpeakerLabels.Ctx(
-                chatClient.model(session.chatSettings()),
-                chatClient.providerId(session.chatSettings()),
-                activeAgent,
-                session.runtime() == null
+                chatClient.model(target.chatSettings()),
+                chatClient.providerId(target.chatSettings()),
+                target.activeAgent(),
+                target.runtime() == null
                         ? null
-                        : String.valueOf(session.runtime().permissions().mode()),
-                session.sessionId(),
+                        : String.valueOf(target.runtime().permissions().mode()),
+                target.sessionId(),
                 null);
-        coordinator.transcript().setLabels(speakerLabels.userLabel(ctx), speakerLabels.assistantLabel(ctx));
-        coordinator.transcript().setFeedbackLabelResolver((identity, user, at) -> {
+        transcript.setLabels(speakerLabels.userLabel(ctx), speakerLabels.assistantLabel(ctx));
+        transcript.setFeedbackLabelResolver((identity, user, at) -> {
             final var captured = identity == null
                     ? ctx.at(at)
                     : new SpeakerLabels.Ctx(identity.model(), identity.provider(), identity.agent(), null, null, null)
@@ -930,7 +966,7 @@ public class CliCommand implements Runnable {
             return user ? speakerLabels.userLabel(captured) : speakerLabels.assistantLabel(captured);
         });
         frontend.feedbackLabel(at -> speakerLabels.assistantLabel(ctx.at(at)));
-        coordinator.transcript().setLabelResolver((identity, user) -> {
+        transcript.setLabelResolver((identity, user) -> {
             final var ictx =
                     new SpeakerLabels.Ctx(identity.model(), identity.provider(), identity.agent(), null, null, null);
             return user ? speakerLabels.userLabel(ictx) : speakerLabels.assistantLabel(ictx);
@@ -938,6 +974,22 @@ public class CliCommand implements Runnable {
     }
 
     private void slash(final String text) {
+        final var command = WHITESPACE.split(text.substring(1), 2)[0].toLowerCase(Locale.ROOT);
+        if ("new".equals(command) || "resume".equals(command)) {
+            turnLock.lock();
+            try {
+                if (turnActive() || (inFlight != null && !inFlight.isDone()) || !pendingPrompts.isEmpty()) {
+                    frontend.error("cannot switch sessions while a turn or queued prompt is pending");
+                    return;
+                }
+                if (!quitRequested && !cleaned.get()) {
+                    switchSession(text, "new".equals(command));
+                }
+            } finally {
+                turnLock.unlock();
+            }
+            return;
+        }
         final ShellOutcome outcome;
         try {
             outcome = slashRegistry.dispatch(text, env()).toCompletableFuture().join();
@@ -956,6 +1008,116 @@ public class CliCommand implements Runnable {
         if (outcome instanceof ShellOutcome.Quit) {
             println(MarkdownColorizer.status("bye"));
             requestQuit();
+        }
+    }
+
+    /** Stage the slash action without changing the live session or its transcript on failure. */
+    private void switchSession(final String text, final boolean fresh) {
+        // The action selects a target id; no selection means a cancelled picker, not a same-id resume.
+        final var candidate = new ShellSession()
+                .activeAgent(activeAgent)
+                .runtime(session.runtime())
+                .showThinking(session.showThinking())
+                .showToolOutput(session.showToolOutput())
+                .metrics(session.metrics());
+        final var transcript = new ConversationTranscript();
+        refreshLabels(session, transcript);
+        try {
+            final var outcome = slashRegistry
+                    .dispatch(text, new ShellEnv(frontend, io, candidate, transcript))
+                    .toCompletableFuture()
+                    .join();
+            final var nextId = candidate.sessionId();
+            if (outcome instanceof ShellOutcome.Error || nextId == null) {
+                outcome.applyTo(frontend);
+                return;
+            }
+            if (sessionId.equals(nextId)) {
+                coordinator.transcript().reset();
+                coordinator.transcript().appendTranscript(transcript.markdown("", ""));
+                outcome.applyTo(frontend);
+                return;
+            }
+            if (!fresh
+                    && sessionStore.list().stream().noneMatch(info -> info.id().equals(nextId))) {
+                throw new IllegalArgumentException("unknown session: " + nextId);
+            }
+            final var nextPath = sessionStore.path(nextId);
+            // A fresh session stays in the active directory, even after resuming a different project.
+            // Resume resolves eligible persisted metadata, otherwise the actual invocation default.
+            final var root = sessionRuntimeFactory.resolveWorkdir(
+                    fresh ? session.runtime().workdir() : null, fresh ? null : nextId);
+            final var next = sessionRuntimeFactory.create(nextId, root);
+            try {
+                sessionLifecycle.installGates(io.approvalGate(), io.feedbackGate(), next);
+                if (fresh) {
+                    sessionStore.markProject(nextId, root.toString());
+                }
+            } catch (final RuntimeException e) {
+                disposeRuntime(null, next);
+                throw e;
+            }
+            // Unregister by the old id while the old session still owns its runtime.
+            shellRegistry.unregister(env());
+            disposeRuntime(sessionId, session.runtime());
+            session.runtime(next)
+                    .sessionId(nextId)
+                    .activeAgent(candidate.activeAgent())
+                    .pendingMode(null);
+            sessionId = nextId;
+            activeAgent = candidate.activeAgent() == null ? "" : candidate.activeAgent();
+            contextPath = nextPath;
+            sessionStore.keepSession(nextId);
+            frontend.bindCompression(next.compression());
+            frontend.stats().reset();
+            shellRegistry.register(env());
+            // Registration resets shared conversation state; publish the staged replay afterwards.
+            coordinator.reset();
+            coordinator.transcript().appendTranscript(transcript.markdown("", ""));
+            outcome.applyTo(frontend);
+        } catch (final RuntimeException e) {
+            // /new allocates storage before root/runtime creation. Apply the existing empty-session
+            // cleanup policy if that allocation never became the active session.
+            if (fresh && candidate.sessionId() != null && !candidate.sessionId().equals(sessionId)) {
+                try {
+                    if (sessionStore.isEmpty(candidate.sessionId())) {
+                        sessionStore.delete(candidate.sessionId());
+                    }
+                } catch (final RuntimeException cleanupFailure) {
+                    LOGGER.log(Level.FINE, "Failed to remove an aborted CLI session", cleanupFailure);
+                }
+            }
+            final var cause = e instanceof CompletionException && e.getCause() != null ? e.getCause() : e;
+            if (cause instanceof PromptInterruptException) {
+                onInterrupt();
+            } else {
+                frontend.error("session switch failed: " + cause.getMessage());
+            }
+        } finally {
+            refreshLabels();
+        }
+    }
+
+    /** Own only the per-session runtime; process-scoped services are borrowed. */
+    private void disposeRuntime(final String id, final SessionRuntime runtime) {
+        try {
+            if (id != null) {
+                runtime.loop().forceExtractNow(sessionStore.load(id), runtime.chatSettings());
+            }
+        } catch (final RuntimeException e) {
+            LOGGER.log(Level.FINE, "Forced memory extraction on CLI session end failed", e);
+        } finally {
+            try {
+                sessionLifecycle.release(id, runtime);
+            } catch (final RuntimeException e) {
+                LOGGER.log(Level.WARNING, "CLI session release failed", e);
+            } finally {
+                try {
+                    runtime.close();
+                } catch (final RuntimeException e) {
+                    LOGGER.log(Level.WARNING, "CLI runtime close failed", e);
+                }
+            }
         }
     }
 

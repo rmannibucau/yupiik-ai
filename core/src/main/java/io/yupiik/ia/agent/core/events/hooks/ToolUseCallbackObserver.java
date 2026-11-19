@@ -20,6 +20,7 @@ import io.yupiik.fusion.framework.build.api.event.OnEvent;
 import io.yupiik.fusion.framework.build.api.order.Order;
 import io.yupiik.ia.agent.core.events.HookResponse;
 import io.yupiik.ia.agent.core.events.ToolUsePreEvent;
+import java.nio.file.Path;
 
 /**
  * The "user callback" stage of the {@link ToolUsePreEvent} pipeline: it runs the {@code yca.hooks.ToolUsePreEvent}
@@ -45,7 +46,11 @@ public class ToolUseCallbackObserver {
             return; // built-in rules already denied: no need to run user callbacks
         }
         final var inherited = inheritedTimeout(event);
-        final var responses = runner.run(event.id(), event.payload(), inherited);
+        final var responses = runner.run(
+                event.id(),
+                event.payload(),
+                inherited,
+                Path.of(event.eventContext().cwd()));
         for (final var response : responses) {
             if (response.decision() == HookResponse.HookResponseDecision.forbid) {
                 event.result().forbid(response.reason() == null ? "forbidden by hook" : response.reason());

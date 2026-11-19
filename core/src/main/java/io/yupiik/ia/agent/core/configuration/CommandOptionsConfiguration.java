@@ -19,6 +19,7 @@ import io.yupiik.fusion.framework.build.api.configuration.Property;
 import io.yupiik.fusion.framework.build.api.json.JsonModel;
 import java.util.Arrays;
 import java.util.List;
+import java.util.regex.Pattern;
 
 @JsonModel
 public record CommandOptionsConfiguration(
@@ -28,6 +29,7 @@ public record CommandOptionsConfiguration(
                         "Tokens of this option set, comma separated (eg. `git,status` for a command start or `-i,--in-place` for excluded options)."
                                 + " Entries containing spaces are split on whitespace too, so `git status` and `git,status` are equivalent.")
         List<String> options) {
+    private static final Pattern OPTION_SEPARATOR = Pattern.compile("[,\\s]+");
 
     /**
      * Flattened view used by the bash rule matcher: every entry is split on commas and whitespace and blanks
@@ -40,7 +42,7 @@ public record CommandOptionsConfiguration(
         }
         return options.stream()
                 .filter(o -> o != null && !o.isBlank())
-                .flatMap(o -> Arrays.stream(o.strip().split("[,\\s]+")))
+                .flatMap(o -> Arrays.stream(OPTION_SEPARATOR.split(o.strip())))
                 .filter(o -> !o.isEmpty())
                 .toList();
     }

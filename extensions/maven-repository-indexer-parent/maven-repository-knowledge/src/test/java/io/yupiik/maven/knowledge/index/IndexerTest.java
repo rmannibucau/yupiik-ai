@@ -17,11 +17,14 @@ package io.yupiik.maven.knowledge.index;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.maven.knowledge.Gav;
 import io.yupiik.maven.knowledge.KnowledgeFactory;
 import io.yupiik.maven.knowledge.config.KnowledgeConfig;
+import io.yupiik.maven.knowledge.content.ContentAcquired;
 import io.yupiik.maven.knowledge.content.ContentAcquirer;
 import io.yupiik.maven.knowledge.content.LocalRepository;
 import io.yupiik.maven.knowledge.content.WebFetch;
@@ -33,7 +36,13 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CancellationException;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.FutureTask;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.io.TempDir;
 
 class IndexerTest {
@@ -47,6 +56,125 @@ class IndexerTest {
         final var writer = new KnowledgeWriter(tmp);
         return new Indexer(
                 new ContentAcquirer(repo, webfetch, config), writer, new KnowledgeFactory(writer), llm, config);
+    }
+
+    @Test
+    @Timeout(5)
+    void closeCancelsQueuedArtifactsButTerminationWaitsForActualRunningWork() throws Exception {
+        final var config = new KnowledgeConfig(
+                tmp, 1, 2, true, false, KnowledgeConfig.defaults(tmp).boundedFetch(), 0, null);
+        final var a = Gav.of("g", "a", "1");
+        final var b = Gav.of("g", "b", "1");
+        final var entered = new CountDownLatch(1);
+        final var interrupted = new CountDownLatch(1);
+        final var release = new CountDownLatch(1);
+        final var starts = new AtomicInteger();
+        final var callbacks = new AtomicInteger();
+        final var writer = new KnowledgeWriter(tmp);
+        final var acquirer = new ContentAcquirer(new LocalRepository(tmp), (url, timeout, bytes) -> "DOC", config) {
+            @Override
+            public List<String> entryPoints(final Gav gav) {
+                starts.incrementAndGet();
+                entered.countDown();
+                var released = false;
+                while (!released) {
+                    try {
+                        release.await();
+                        released = true;
+                    } catch (final InterruptedException ignored) {
+                        interrupted.countDown(); // deliberately uncooperative library work
+                    }
+                }
+                return List.of();
+            }
+        };
+        final var indexer = new Indexer(acquirer, writer, new KnowledgeFactory(writer), new StubLlm(), config);
+        final var outer = new FutureTask<>(() -> indexer.index(List.of(a, b), result -> callbacks.incrementAndGet()));
+        final var orchestrator = Thread.ofPlatform().start(outer);
+        try {
+            entered.await(); // all batch submissions precede task admission; B is queued behind A
+            indexer.close();
+            assertTrue(outer.cancel(true));
+            interrupted.await();
+            orchestrator.join(); // Future.get interruption is NOT internal termination
+            assertFalse(indexer.awaitTermination(0, TimeUnit.NANOSECONDS));
+            assertEquals(1, starts.get());
+            assertEquals(0, callbacks.get());
+            assertThrows(CancellationException.class, () -> indexer.index(List.of(b), null));
+            indexer.close(); // idempotent, and does not wait for A
+        } finally {
+            release.countDown();
+            indexer.close();
+            orchestrator.join();
+            assertTrue(indexer.awaitTermination(Long.MAX_VALUE, TimeUnit.NANOSECONDS));
+        }
+        assertEquals(1, starts.get(), "queued B must never acquire a worker after close");
+        assertEquals(0, callbacks.get(), "no late result from A after cancellation");
+        assertFalse(writer.alreadyIndexed(a));
+        assertFalse(writer.alreadyIndexed(b));
+    }
+
+    @Test
+    @Timeout(5)
+    void closeFromOwnedResultCallbackNeverWaitsForItself() throws Exception {
+        final var config = KnowledgeConfig.defaults(tmp);
+        final var indexer = newIndexer(config, new StubLlm());
+        final var callbacks = new AtomicInteger();
+        try {
+            assertThrows(
+                    CancellationException.class,
+                    () -> indexer.index(List.of(Gav.of("g", "a", "1")), result -> {
+                        callbacks.incrementAndGet();
+                        indexer.close();
+                    }));
+        } finally {
+            indexer.close();
+        }
+        assertTrue(indexer.awaitTermination(Long.MAX_VALUE, TimeUnit.NANOSECONDS));
+        assertEquals(1, callbacks.get());
+    }
+
+    @Test
+    @Timeout(5)
+    void cancellationInBeforeBatchPreventsAnyInternalSubmission() throws Exception {
+        final var indexer = newIndexer(KnowledgeConfig.defaults(tmp), new StubLlm());
+        final var callbacks = new AtomicInteger();
+        try {
+            assertThrows(
+                    CancellationException.class,
+                    () -> indexer.index(
+                            List.of(Gav.of("g", "a", "1")),
+                            result -> callbacks.incrementAndGet(),
+                            batch -> indexer.close()));
+        } finally {
+            indexer.close();
+        }
+        assertTrue(indexer.awaitTermination(0, TimeUnit.NANOSECONDS));
+        assertEquals(0, callbacks.get());
+    }
+
+    @Test
+    @Timeout(5)
+    void acquisitionFailureStillAllowsOwnedExecutorCleanup() throws Exception {
+        final var config = KnowledgeConfig.defaults(tmp);
+        final var failure = new IllegalArgumentException("acquisition failed");
+        final var writer = new KnowledgeWriter(tmp);
+        final var acquirer = new ContentAcquirer(new LocalRepository(tmp), (url, timeout, bytes) -> "DOC", config) {
+            @Override
+            public ContentAcquired acquire(final Gav gav) {
+                throw failure;
+            }
+        };
+        final var indexer = new Indexer(acquirer, writer, new KnowledgeFactory(writer), new StubLlm(), config);
+        try {
+            assertSame(
+                    failure,
+                    assertThrows(
+                            IllegalArgumentException.class, () -> indexer.index(List.of(Gav.of("g", "a", "1")), null)));
+        } finally {
+            indexer.close();
+        }
+        assertTrue(indexer.awaitTermination(0, TimeUnit.NANOSECONDS));
     }
 
     @Test

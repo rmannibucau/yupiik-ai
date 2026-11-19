@@ -32,6 +32,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Function;
 import java.util.function.LongSupplier;
+import java.util.regex.Pattern;
 
 /**
  * Facade over the configured MCP web search providers: lazily builds and initializes one
@@ -46,6 +47,7 @@ import java.util.function.LongSupplier;
  */
 @ApplicationScoped
 public class WebSearchManager {
+    private static final Pattern EXA_RESULT_SEPARATOR = Pattern.compile("\n\n---\n\n");
 
     private static final long DEFAULT_COOLDOWN_MILLIS = 60_000L;
 
@@ -303,7 +305,7 @@ public class WebSearchManager {
     // the content after a "Highlights:" or "Text:" line; blocks are separated by a "---" rule.
     private List<WebSearchResult> parseExa(final String text) {
         final var results = new ArrayList<WebSearchResult>();
-        for (final var block : text.split("\n\n---\n\n")) {
+        for (final var block : EXA_RESULT_SEPARATOR.split(text)) {
             String url = null;
             String title = null;
             String published = null;

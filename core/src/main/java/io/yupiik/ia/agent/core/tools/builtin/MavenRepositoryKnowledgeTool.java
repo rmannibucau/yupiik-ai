@@ -23,6 +23,7 @@ import io.yupiik.ia.agent.core.tools.ToolArgs;
 import io.yupiik.ia.agent.core.tools.ToolCategory;
 import io.yupiik.ia.agent.core.tools.ToolContext;
 import io.yupiik.ia.agent.core.tools.ToolResult;
+import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
 
@@ -47,7 +48,7 @@ public class MavenRepositoryKnowledgeTool implements EmbeddedTool {
     }
 
     @Override
-    public String description() {
+    public String description(final Path workdir) {
         return "Index or refresh generated knowledge (SKILL.md + -skills.md manifest) for Maven artifacts in the local repository. "
                 + "Use refresh with a list of groupId:artifactId[:version] coordinates to generate/re-generate their skills, "
                 + "optionally with force=true to bypass the immutable-skip rule for released artifacts, or force=true with no "
@@ -75,11 +76,6 @@ public class MavenRepositoryKnowledgeTool implements EmbeddedTool {
     }
 
     @Override
-    public ToolResult execute(final Map<String, Object> args) {
-        return execute(args, ToolContext.empty());
-    }
-
-    @Override
     public ToolResult execute(final Map<String, Object> args, final ToolContext context) {
         final var op = ToolArgs.arg(args, "operation");
         final Object rawGavs = args.get("gavs");
@@ -93,7 +89,7 @@ public class MavenRepositoryKnowledgeTool implements EmbeddedTool {
         try {
             // the triggering session's provider/model selection rides the context, so the index LLM
             // calls resolve it lazily at call time instead of the process default
-            return ToolResult.ok(service.index(gavs, force, context.settings()));
+            return ToolResult.ok(service.index(context.projectDir(), gavs, force, context.settings()));
         } catch (final RuntimeException e) {
             return ToolResult.error("maven repository knowledge index failed: " + e.getMessage());
         }

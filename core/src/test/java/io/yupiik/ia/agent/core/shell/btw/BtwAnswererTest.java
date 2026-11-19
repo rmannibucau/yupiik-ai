@@ -31,6 +31,8 @@ import io.yupiik.ia.agent.core.agent.SystemPromptBuilder;
 import io.yupiik.ia.agent.core.configuration.NativeProviderConfiguration;
 import io.yupiik.ia.agent.core.configuration.TestConfigs;
 import io.yupiik.ia.agent.core.context.UsageTracker;
+import io.yupiik.ia.agent.core.events.ToolUsePreEvent;
+import io.yupiik.ia.agent.core.events.hooks.EventContextBuilder;
 import io.yupiik.ia.agent.core.llm.ChatClient;
 import io.yupiik.ia.agent.core.llm.ChatCompletionRequest;
 import io.yupiik.ia.agent.core.llm.InBandToolCallExtractor;
@@ -44,11 +46,14 @@ import io.yupiik.ia.agent.core.session.InMemorySessionStore;
 import io.yupiik.ia.agent.core.session.TestSessionStores;
 import io.yupiik.ia.agent.core.tools.EmbeddedTool;
 import io.yupiik.ia.agent.core.tools.ToolCategory;
+import io.yupiik.ia.agent.core.tools.ToolContext;
 import io.yupiik.ia.agent.core.tools.ToolExecutionService;
 import io.yupiik.ia.agent.core.tools.ToolRegistry;
 import io.yupiik.ia.agent.core.tools.ToolResult;
 import io.yupiik.ia.agent.core.tools.builtin.AskUserTool;
 import io.yupiik.ia.agent.core.tools.builtin.BashTool;
+import io.yupiik.ia.agent.core.tools.builtin.ReadFileTool;
+import io.yupiik.ia.agent.core.tools.builtin.SkillTool;
 import io.yupiik.ia.agent.core.wiring.HttpClientProducer;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import io.yupiik.ia.agent.test.TestJsonMapper;
@@ -80,6 +85,9 @@ import org.junit.jupiter.api.io.TempDir;
 
 @ExtendWith(TestJsonMapper.class)
 class BtwAnswererTest {
+    private static final Pattern TOOL_NAME = Pattern.compile("\"name\":\"([a-z_]+)\"");
+    private static final Pattern ROLE_FIELD = Pattern.compile("\"role\"");
+
     @TempDir
     Path storageHome;
 
@@ -148,6 +156,10 @@ class BtwAnswererTest {
     }
 
     private BtwAnswerer answerer(final Map<String, String> extra) {
+        return answerer(extra, NOOP, false);
+    }
+
+    private BtwAnswerer answerer(final Map<String, String> extra, final Emitter emitter, final boolean hookContext) {
         final var configuration = TestConfigs.codingAgent(config(extra));
         final var providerManager = new ProviderManager(configuration, mapper);
         final var httpClient =
@@ -164,7 +176,9 @@ class BtwAnswererTest {
                 new ToolCallArgumentsRepairer(mapper),
                 gates);
         clients.add(client);
-        btwExecutor = Executors.newVirtualThreadPerTaskExecutor();
+        if (btwExecutor == null) {
+            btwExecutor = Executors.newVirtualThreadPerTaskExecutor();
+        }
         final var created = new BtwAnswerer(
                 client,
                 sessionStore,
@@ -176,8 +190,8 @@ class BtwAnswererTest {
                 mapper,
                 providerManager,
                 Clock.systemUTC(),
-                NOOP,
-                null,
+                emitter,
+                hookContext ? new EventContextBuilder() : null,
                 new ToolCallPairingRepair(sessionStore, Clock.systemUTC()),
                 httpClient,
                 gates);
@@ -208,7 +222,7 @@ class BtwAnswererTest {
             }
 
             @Override
-            public String description() {
+            public String description(final Path workdir) {
                 return "read a file";
             }
 
@@ -228,7 +242,7 @@ class BtwAnswererTest {
             }
 
             @Override
-            public ToolResult execute(final Map<String, Object> args) {
+            public ToolResult execute(final Map<String, Object> args, final ToolContext context) {
                 return ToolResult.ok("file content: " + args.get("path"));
             }
         };
@@ -242,7 +256,7 @@ class BtwAnswererTest {
             }
 
             @Override
-            public String description() {
+            public String description(final Path workdir) {
                 return "write a file";
             }
 
@@ -257,7 +271,7 @@ class BtwAnswererTest {
             }
 
             @Override
-            public ToolResult execute(final Map<String, Object> args) {
+            public ToolResult execute(final Map<String, Object> args, final ToolContext context) {
                 return ToolResult.error("must never run: write_file is not a /btw tool");
             }
         };
@@ -269,6 +283,24 @@ class BtwAnswererTest {
      * the following ones, mirroring a real model answering with tools.
      */
     private String response(final String body, final int request) {
+        if (body.contains("SESSION ROOT")) {
+            if (body.contains("\"role\":\"tool\"")) {
+                return textResponse("root done");
+            }
+            final var read = toolResponse("read", "{\"path\":\"root.txt\"}");
+            final var bash =
+                    toolResponse("bash", "{\"command\":\"cat root.txt\"}").replace("call_1", "call_2");
+            final var skill = toolResponse("skill", "{\"name\":\"shared\"}").replace("call_1", "call_3");
+            // One model round asks all three tools, exercising the same frozen request root.
+            final var start = "\"tool_calls\":[";
+            final var end = "]},\"finish_reason\"";
+            final var calls = List.of(read, bash, skill).stream()
+                    .map(value -> value.substring(value.indexOf(start) + start.length(), value.indexOf(end)))
+                    .toList();
+            return read.substring(0, read.indexOf(start) + start.length())
+                    + String.join(",", calls)
+                    + read.substring(read.indexOf(end));
+        }
         if (body.contains("ASK FEEDBACK")) {
             return request == 1
                     ? toolResponse(
@@ -327,7 +359,8 @@ class BtwAnswererTest {
             return Map.of("q", "two");
         });
         final var tooled = answerer(Map.of("yca.slashcommands.btw.tools", "true"));
-        final var answer = tooled.ask("ASK FEEDBACK", "s", usageTracker, () -> false, null, null, null, feedback)
+        final var answer = tooled.ask(
+                        "ASK FEEDBACK", "s", usageTracker, () -> false, null, null, null, feedback, storageHome)
                 .toCompletableFuture()
                 .get(5, TimeUnit.SECONDS);
         assertEquals("feedback done", answer.text());
@@ -343,7 +376,8 @@ class BtwAnswererTest {
         feedback.setGate(questions -> {
             throw new AssertionError("tool-less side question must never ask");
         });
-        final var answer = answerer.ask("ASK FEEDBACK", "s", usageTracker, () -> false, null, null, null, feedback)
+        final var answer = answerer.ask(
+                        "ASK FEEDBACK", "s", usageTracker, () -> false, null, null, null, feedback, storageHome)
                 .toCompletableFuture()
                 .get(5, TimeUnit.SECONDS);
         assertFalse(answer.text().isBlank());
@@ -437,7 +471,7 @@ class BtwAnswererTest {
                             null)));
             final var failure = assertThrows(
                     ExecutionException.class,
-                    () -> bounded.ask("what did I say?", "s1", usageTracker, () -> false, null)
+                    () -> bounded.ask("what did I say?", "s1", usageTracker, () -> false, null, storageHome)
                             .toCompletableFuture()
                             .get(5, TimeUnit.SECONDS));
             assertInstanceOf(ConcurrencySlotTimeoutException.class, failure.getCause());
@@ -447,7 +481,7 @@ class BtwAnswererTest {
         }
         assertEquals(
                 "hello there",
-                bounded.ask("what did I say?", "s1", usageTracker, () -> false, null)
+                bounded.ask("what did I say?", "s1", usageTracker, () -> false, null, storageHome)
                         .toCompletableFuture()
                         .get(5, TimeUnit.SECONDS)
                         .text());
@@ -460,7 +494,7 @@ class BtwAnswererTest {
     @Test
     void answersOutOfBandWithoutPersisting() throws Exception {
         sessionStore.replace("s1", List.of(Message.user("hi"), Message.assistant("hello", List.of())));
-        final var answer = answerer.ask("what did I say?", "s1", usageTracker, () -> false, null)
+        final var answer = answerer.ask("what did I say?", "s1", usageTracker, () -> false, null, storageHome)
                 .toCompletableFuture()
                 .get(5, TimeUnit.SECONDS);
         assertEquals("hello there", answer.text());
@@ -498,7 +532,7 @@ class BtwAnswererTest {
                         Message.user("hi"),
                         Message.assistant("hello", List.of()),
                         Message.tool("c1", "orphan result")));
-        final var answer = answerer.ask("what did I say?", "s1", usageTracker, () -> false, null)
+        final var answer = answerer.ask("what did I say?", "s1", usageTracker, () -> false, null, storageHome)
                 .toCompletableFuture()
                 .get(5, TimeUnit.SECONDS);
         assertEquals("hello there", answer.text());
@@ -515,14 +549,23 @@ class BtwAnswererTest {
         // the /btw request must reuse the session's system prompt and the full wire tool schema (never
         // executed) so the provider prompt-cache prefix stays byte-identical with the main agent loop.
         final var configuration = TestConfigs.codingAgent(config(Map.of()));
-        final var builder = new SystemPromptBuilder(configuration, null, null, null, null, null, null, null, null);
+        final var builder = new SystemPromptBuilder(
+                configuration, null, null, null, null, null, null, null, null, (configuration).resolveWorkingDir());
         final var expectedSystem = builder.build(null, null);
-        final var expectedNames = toolRegistry.toWireTools().stream()
+        final var expectedNames = toolRegistry.toWireTools(configuration.resolveWorkingDir()).stream()
                 .map(t -> t.function().name())
                 .sorted()
                 .toList();
         sessionStore.replace("s1", List.of(Message.user("hi")));
-        answerer.ask("what did I say?", "s1", usageTracker, () -> false, null, null, builder)
+        answerer.ask(
+                        "what did I say?",
+                        "s1",
+                        usageTracker,
+                        () -> false,
+                        null,
+                        null,
+                        builder,
+                        configuration.resolveWorkingDir())
                 .toCompletableFuture()
                 .get(5, TimeUnit.SECONDS);
         final var body = bodies.getLast();
@@ -535,7 +578,7 @@ class BtwAnswererTest {
         // tools are declared (cache-consistent), never empty
         assertFalse(body.contains("\"tools\":[]"), body);
         final var actualNames = new ArrayList<String>();
-        final var m = Pattern.compile("\"name\":\"([a-z_]+)\"").matcher(body);
+        final var m = TOOL_NAME.matcher(body);
         while (m.find()) {
             actualNames.add(m.group(1));
         }
@@ -550,13 +593,13 @@ class BtwAnswererTest {
         }
         sessionStore.replace("s1", messages);
         answerer(Map.of("yca.slashcommands.btw.maxHistoryMessages", "200"))
-                .ask("q", "s1", usageTracker, () -> false, null)
+                .ask("q", "s1", usageTracker, () -> false, null, storageHome)
                 .toCompletableFuture()
                 .get(5, TimeUnit.SECONDS);
         final var body = bodies.getLast();
         assertTrue(body.contains("\"m50\""), body);
         assertFalse(body.contains("\"m49\""), body);
-        assertEquals(202, body.split("\"role\"", -1).length - 1, body);
+        assertEquals(202, ROLE_FIELD.split(body, -1).length - 1, body);
     }
 
     @Test
@@ -564,11 +607,11 @@ class BtwAnswererTest {
         sessionStore.replace("s1", List.of());
         final var replaying = answerer(Map.of());
         replaying
-                .ask("first question", "s1", usageTracker, () -> false, null)
+                .ask("first question", "s1", usageTracker, () -> false, null, storageHome)
                 .toCompletableFuture()
                 .get(5, TimeUnit.SECONDS);
         replaying
-                .ask("second question", "s1", usageTracker, () -> false, null)
+                .ask("second question", "s1", usageTracker, () -> false, null, storageHome)
                 .toCompletableFuture()
                 .get(5, TimeUnit.SECONDS);
         final var body = bodies.getLast();
@@ -578,10 +621,10 @@ class BtwAnswererTest {
 
         bodies.clear();
         final var noRecall = answerer(Map.of("yca.slashcommands.btw.recall", "0"));
-        noRecall.ask("first question", "s1", usageTracker, () -> false, null)
+        noRecall.ask("first question", "s1", usageTracker, () -> false, null, storageHome)
                 .toCompletableFuture()
                 .get(5, TimeUnit.SECONDS);
-        noRecall.ask("second question", "s1", usageTracker, () -> false, null)
+        noRecall.ask("second question", "s1", usageTracker, () -> false, null, storageHome)
                 .toCompletableFuture()
                 .get(5, TimeUnit.SECONDS);
         assertFalse(bodies.getLast().contains("Earlier side questions"), bodies.getLast());
@@ -590,7 +633,7 @@ class BtwAnswererTest {
     @Test
     void modelOverrideApplies() throws Exception {
         answerer(Map.of("yca.slashcommands.btw.model", "btw-model"))
-                .ask("q", "s1", usageTracker, () -> false, null)
+                .ask("q", "s1", usageTracker, () -> false, null, storageHome)
                 .toCompletableFuture()
                 .get(5, TimeUnit.SECONDS);
         assertTrue(bodies.getLast().contains("\"model\":\"btw-model\""), bodies.getLast());
@@ -600,7 +643,7 @@ class BtwAnswererTest {
     void nativeToolCallsRoundTrip() throws Exception {
         sessionStore.replace("s1", List.of(Message.user("hi")));
         final var answer = answerer(Map.of("yca.slashcommands.btw.tools", "true"))
-                .ask("NATIVE READ", "s1", usageTracker, () -> false, null)
+                .ask("NATIVE READ", "s1", usageTracker, () -> false, null, storageHome)
                 .toCompletableFuture()
                 .get(5, TimeUnit.SECONDS);
         assertEquals("read round-trip done", answer.text());
@@ -615,10 +658,185 @@ class BtwAnswererTest {
     }
 
     @Test
+    void sharedAnswererUsesBuilderAndPersistedRootsForReadBashAndSkill() throws Exception {
+        final var first = rootFixture("first");
+        final var second = rootFixture("second");
+        rootRegistry(first);
+        final var events = new CopyOnWriteArrayList<ToolUsePreEvent>();
+        final var shared = answerer(rootConfig(first), collecting(events), true);
+        final var builder = rootBuilder(second);
+        // The live session builder wins over a valid but different persisted marker.
+        sessionStore.replace("builder", List.of(Message.projectDir(first.toString())));
+        sessionStore.replace("marker", List.of(Message.projectDir(first.toString())));
+        assertRootRound(shared, "builder", builder, second, "second", "first", events);
+        assertRootRound(shared, "marker", null, first, "first", "second", events);
+        assertRootRound(shared, "builder", builder, second, "second", "first", events);
+        assertEquals(first.toString(), sessionStore.projectDirOf("builder"));
+        assertEquals(first.toString(), sessionStore.projectDirOf("marker"));
+    }
+
+    @Test
+    void missingStaleAndInvalidMarkersFallBackToConfiguredWorkingDirectory() throws Exception {
+        final var fallback = rootFixture("fallback");
+        rootRegistry(fallback);
+        final var events = new CopyOnWriteArrayList<ToolUsePreEvent>();
+        // Also exercise direct construction without an EventContextBuilder.
+        final var shared = answerer(rootConfig(fallback), collecting(events), false);
+        sessionStore.replace(
+                "stale", List.of(Message.projectDir(storageHome.resolve("gone").toString())));
+        sessionStore.replace("invalid", List.of(Message.projectDir("invalid\u0000path")));
+        sessionStore.replace(
+                "file", List.of(Message.projectDir(fallback.resolve("root.txt").toString())));
+        sessionStore.replace("relative", List.of(Message.projectDir("relative")));
+        for (final var session : List.of("missing", "stale", "invalid", "file", "relative")) {
+            assertRootRound(shared, session, null, fallback, "fallback", "not-this-root", events);
+        }
+    }
+
+    @Test
+    void toolLessRequestProjectsSessionRootWithoutExecutingTools() throws Exception {
+        final var first = rootFixture("first");
+        final var second = rootFixture("second");
+        rootRegistry(first);
+        final var settings = new HashMap<>(rootConfig(first));
+        settings.put("yca.slashcommands.btw.tools", "false");
+        final var events = new CopyOnWriteArrayList<ToolUsePreEvent>();
+        final var shared = answerer(settings, collecting(events), true);
+        sessionStore.replace("s", List.of(Message.projectDir(second.toString())));
+        final var answer = shared.ask("what did I say?", "s", usageTracker, () -> false, null, second)
+                .toCompletableFuture()
+                .get(5, TimeUnit.SECONDS);
+        assertEquals("hello there", answer.text());
+        assertEquals(1, bodies.size());
+        assertTrue(bodies.getFirst().contains("Read for session root " + second), bodies.getFirst());
+        assertTrue(events.isEmpty());
+        assertFalse(bodies.getFirst().contains("\"role\":\"tool\""));
+        assertEquals(1, sessionStore.size("s"));
+    }
+
+    @Test
+    void sideRequestFreezesRootWhenBuilderAndMarkerChangeDuringTools() throws Exception {
+        final var first = rootFixture("frozen");
+        final var second = rootFixture("changed");
+        rootRegistry(first);
+        final var builder = rootBuilder(first);
+        final var events = new CopyOnWriteArrayList<ToolUsePreEvent>();
+        final var emitter = new Emitter() {
+            @Override
+            public <T> void emit(final T event) {
+                if (event instanceof final ToolUsePreEvent pre) {
+                    events.add(pre);
+
+                    sessionStore.replace("freeze", List.of(Message.projectDir(second.toString())));
+                }
+            }
+        };
+        final var shared = answerer(rootConfig(first), emitter, true);
+        assertRootRound(shared, "freeze", builder, first, "frozen", "changed", events);
+        assertRootRound(shared, "freeze", builder, second, "changed", "frozen", events);
+    }
+
+    private Path rootFixture(final String name) throws IOException {
+        final var root = storageHome.resolve(name).toAbsolutePath().normalize();
+        final var skill = root.resolve(".opencode/skills/shared/SKILL.md");
+        Files.createDirectories(skill.getParent());
+        Files.writeString(root.resolve("root.txt"), "file-for-" + name);
+        Files.writeString(skill, "skill-for-" + name);
+        return root;
+    }
+
+    private Map<String, String> rootConfig(final Path root) {
+        return Map.of(
+                "yca.slashcommands.btw.tools", "true",
+                "yca.slashcommands.btw.recall", "0",
+                "yca.workingDir", root.toString(),
+                "yca.skills.enabled", "true");
+    }
+
+    private SystemPromptBuilder rootBuilder(final Path root) {
+        final var configuration = TestConfigs.codingAgent(config(rootConfig(root)));
+        final var builder =
+                new SystemPromptBuilder(configuration, null, null, null, null, null, null, null, null, root);
+
+        return builder;
+    }
+
+    private void rootRegistry(final Path fallback) {
+        final var configuration = TestConfigs.codingAgent(config(rootConfig(fallback)));
+        final var tools = List.of(
+                new ReadFileTool(configuration) {
+                    @Override
+                    public String description(final Path root) {
+                        return "Read for session root " + root;
+                    }
+                },
+                new BashTool(NOOP, new ProcessService()),
+                new SkillTool(configuration));
+        toolRegistry = new ToolRegistry(null) {
+            @Override
+            public List<EmbeddedTool> tools() {
+                return tools;
+            }
+        };
+    }
+
+    private Emitter collecting(final List<ToolUsePreEvent> events) {
+        return new Emitter() {
+            @Override
+            public <T> void emit(final T event) {
+                if (event instanceof final ToolUsePreEvent pre) {
+                    events.add(pre);
+                }
+            }
+        };
+    }
+
+    @SuppressWarnings("unchecked")
+    private void assertRootRound(
+            final BtwAnswerer shared,
+            final String session,
+            final SystemPromptBuilder builder,
+            final Path root,
+            final String expected,
+            final String unwanted,
+            final List<ToolUsePreEvent> events)
+            throws Exception {
+        bodies.clear();
+        events.clear();
+        assertEquals(
+                "root done",
+                shared.ask("SESSION ROOT", session, usageTracker, () -> false, null, null, builder, root)
+                        .toCompletableFuture()
+                        .get(5, TimeUnit.SECONDS)
+                        .text());
+        assertEquals(2, bodies.size(), bodies.toString());
+        assertTrue(bodies.getFirst().contains("Read for session root " + root), bodies.getFirst());
+        final var request = (Map<String, Object>) mapper.fromString(Object.class, bodies.getLast());
+        final var messages = (List<Map<String, Object>>) request.get("messages");
+        final var outputs = messages.stream()
+                .filter(message -> "tool".equals(message.get("role")))
+                .map(message -> String.valueOf(message.get("content")))
+                .toList();
+        assertEquals(3, outputs.size(), outputs.toString());
+        assertTrue(outputs.get(0).contains("file-for-" + expected), outputs.toString());
+        assertTrue(outputs.get(1).contains("file-for-" + expected), outputs.toString());
+        assertTrue(outputs.get(2).contains("skill-for-" + expected), outputs.toString());
+        assertFalse(outputs.toString().contains("file-for-" + unwanted), outputs.toString());
+        assertFalse(outputs.toString().contains("skill-for-" + unwanted), outputs.toString());
+        assertEquals(3, events.size());
+        for (final var event : events) {
+            assertEquals(root.toString(), event.eventContext().cwd());
+            // Public permission grants expose the root used to scope authorization to this request.
+            event.permissions().addSessionGrantAnchor("cat");
+            assertTrue(event.permissions().sessionGrants().contains(root + "|bash:cat"));
+        }
+    }
+
+    @Test
     void toolCallMarkupIsParsedAndExecuted() throws Exception {
         sessionStore.replace("s1", List.of(Message.user("hi")));
         final var answer = answerer(Map.of("yca.slashcommands.btw.tools", "true"))
-                .ask("TOOLCALL MARKUP", "s1", usageTracker, () -> false, null)
+                .ask("TOOLCALL MARKUP", "s1", usageTracker, () -> false, null, storageHome)
                 .toCompletableFuture()
                 .get(5, TimeUnit.SECONDS);
         assertEquals("the parsed answer", answer.text());
@@ -632,7 +850,7 @@ class BtwAnswererTest {
     void bashReadCommandRunsButDestructiveIsRefused() throws Exception {
         sessionStore.replace("s1", List.of(Message.user("hi")));
         final var answer = answerer(Map.of("yca.slashcommands.btw.tools", "true"))
-                .ask("BASH CAT", "s1", usageTracker, () -> false, null)
+                .ask("BASH CAT", "s1", usageTracker, () -> false, null, storageHome)
                 .toCompletableFuture()
                 .get(5, TimeUnit.SECONDS);
         assertEquals("cat done", answer.text());
@@ -643,7 +861,7 @@ class BtwAnswererTest {
 
         // a fresh answerer so the previous exchange is not replayed into this side question
         final var denied = answerer(Map.of("yca.slashcommands.btw.tools", "true"))
-                .ask("BASH RM", "s1", usageTracker, () -> false, null)
+                .ask("BASH RM", "s1", usageTracker, () -> false, null, storageHome)
                 .toCompletableFuture()
                 .get(5, TimeUnit.SECONDS);
         assertEquals("rm done", denied.text());
@@ -656,7 +874,7 @@ class BtwAnswererTest {
     @Test
     void nonReadToolIsRefusedWithoutRunning() throws Exception {
         final var answer = answerer(Map.of("yca.slashcommands.btw.tools", "true"))
-                .ask("WRITE TOOL", "s1", usageTracker, () -> false, null)
+                .ask("WRITE TOOL", "s1", usageTracker, () -> false, null, storageHome)
                 .toCompletableFuture()
                 .get(5, TimeUnit.SECONDS);
         assertEquals("write done", answer.text());
@@ -670,7 +888,7 @@ class BtwAnswererTest {
     void toolCallOnlyAnswerFallsBackToRawNoteAndIsNotReplayed() throws Exception {
         sessionStore.replace("s1", List.of());
         final var answerer = answerer(Map.of("yca.slashcommands.btw.tools", "true"));
-        final var answer = answerer.ask("TOOLCALL ONLY", "s1", usageTracker, () -> false, null)
+        final var answer = answerer.ask("TOOLCALL ONLY", "s1", usageTracker, () -> false, null, storageHome)
                 .toCompletableFuture()
                 .get(5, TimeUnit.SECONDS);
         assertTrue(answer.text().startsWith("> "), answer.text());
@@ -680,7 +898,7 @@ class BtwAnswererTest {
         // the round cap was reached: six model round-trips, all tool-only
         assertEquals(6, bodies.size(), bodies.toString());
         // a broken exchange is never replayed into the next side question
-        answerer.ask("TOOLCALL MARKUP", "s1", usageTracker, () -> false, null)
+        answerer.ask("TOOLCALL MARKUP", "s1", usageTracker, () -> false, null, storageHome)
                 .toCompletableFuture()
                 .get(5, TimeUnit.SECONDS);
         final var body = bodies.getLast();
@@ -691,7 +909,7 @@ class BtwAnswererTest {
     @Test
     void blankAnswerRetriesOnceThenReturnsRetryableNote() throws Exception {
         final var first = answerer(Map.of())
-                .ask("TRUNCATED FIRST", "s1", usageTracker, () -> false, null)
+                .ask("TRUNCATED FIRST", "s1", usageTracker, () -> false, null, storageHome)
                 .toCompletableFuture()
                 .get(5, TimeUnit.SECONDS);
         assertEquals("hello there", first.text());
@@ -702,7 +920,7 @@ class BtwAnswererTest {
         // a fresh answerer so the previous exchange is not replayed into this side question
         bodies.clear();
         final var alwaysBlank = answerer(Map.of())
-                .ask("EMPTY PLEASE", "s1", usageTracker, () -> false, null)
+                .ask("EMPTY PLEASE", "s1", usageTracker, () -> false, null, storageHome)
                 .toCompletableFuture()
                 .get(5, TimeUnit.SECONDS);
         // a still-blank answer becomes a retryable note, never an exception
@@ -715,7 +933,7 @@ class BtwAnswererTest {
     void toolAttemptMarkupIsNeverExecutedAndSurfacesAsRetryable() throws Exception {
         sessionStore.replace("s1", List.of(Message.user("hi")));
         final var answer = answerer(Map.of())
-                .ask("TOOLCALL MARKUP", "s1", usageTracker, () -> false, null)
+                .ask("TOOLCALL MARKUP", "s1", usageTracker, () -> false, null, storageHome)
                 .toCompletableFuture()
                 .get(5, TimeUnit.SECONDS);
         // the default mode never executes the stray in-band call; a model that reached for a tool (DSML

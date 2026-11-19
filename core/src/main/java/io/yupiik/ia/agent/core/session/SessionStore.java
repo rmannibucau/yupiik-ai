@@ -26,6 +26,19 @@ import java.util.List;
  */
 public interface SessionStore {
 
+    /** Out-of-band preset, never included by load/tail/count/summary or history replacement. */
+    default SessionMetadata metadata(final String id) {
+        return null;
+    }
+
+    /**
+     * Atomically replaces the preset only if the session still exists. Does not create a session.
+     * Returns false for a deleted session or a store without preset support.
+     */
+    default boolean metadata(final String id, final SessionMetadata metadata) {
+        return false;
+    }
+
     /**
      * Creates a new session and returns its ID.
      *

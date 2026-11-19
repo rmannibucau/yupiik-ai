@@ -22,6 +22,9 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.fusion.json.JsonMapper;
+import io.yupiik.ia.agent.core.configuration.CommandOptionsConfiguration;
+import io.yupiik.ia.agent.core.configuration.CommandPermissionConfiguration;
+import io.yupiik.ia.agent.core.configuration.CommandStartMatcherConfiguration;
 import io.yupiik.ia.agent.core.configuration.PermissionMode;
 import io.yupiik.ia.agent.core.configuration.TestConfigs;
 import io.yupiik.ia.agent.core.permissions.ApprovalGate;
@@ -45,6 +48,9 @@ import org.junit.jupiter.api.io.TempDir;
 @ExtendWith(TestJsonMapper.class)
 class SessionLifecycleTest {
     @TempDir
+    private static Path testWorkdir;
+
+    @TempDir
     Path dir;
 
     private JsonMapper mapper;
@@ -66,13 +72,15 @@ class SessionLifecycleTest {
     private SessionRuntime newRuntime() {
         return new SessionRuntime(
                 null,
-                new PermissionService(TestConfigs.codingAgent(Map.of())),
+                new PermissionService(
+                        TestConfigs.codingAgent(Map.of()), (TestConfigs.codingAgent(Map.of())).resolveWorkingDir()),
                 new UserFeedbackService(),
                 null,
                 null,
                 null,
                 null,
-                null);
+                null,
+                testWorkdir);
     }
 
     @Test
@@ -113,10 +121,9 @@ class SessionLifecycleTest {
 
         final var runtime = newRuntime();
         runtime.permissions()
-                .addDynamicRule(new io.yupiik.ia.agent.core.configuration.CommandPermissionConfiguration(
-                        new io.yupiik.ia.agent.core.configuration.CommandStartMatcherConfiguration(
-                                new io.yupiik.ia.agent.core.configuration.CommandOptionsConfiguration(List.of("mvn")),
-                                List.of()),
+                .addDynamicRule(new CommandPermissionConfiguration(
+                        new CommandStartMatcherConfiguration(
+                                new CommandOptionsConfiguration(List.of("mvn")), List.of()),
                         PermissionMode.YOLO,
                         null));
         lifecycle.installGates(approval, feedback, runtime);

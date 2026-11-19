@@ -33,6 +33,7 @@ import io.yupiik.ia.agent.core.tools.ToolResult;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import java.math.BigDecimal;
 import java.math.BigInteger;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
@@ -90,7 +91,7 @@ public class ListSubagentOptionsTool implements EmbeddedTool {
     }
 
     @Override
-    public String description() {
+    public String description(final Path workdir) {
         return "Search configured agent profiles and model routes for spawn_subagent. "
                 + "By default list non-blacklisted models on the active session provider; an explicit provider filter "
                 + "selects another provider's catalog without authorizing execution. Entries report default, authorized, "
@@ -112,14 +113,11 @@ public class ListSubagentOptionsTool implements EmbeddedTool {
                 "query",
                         Schemas.str(
                                 "Optional case-insensitive substring to match names, descriptions, model ids, or providers."),
-                "provider", Schemas.str("Provider catalog to inspect (default: active session provider); not execution approval."),
+                "provider",
+                        Schemas.str(
+                                "Provider catalog to inspect (default: active session provider); not execution approval."),
                 "offset", Schemas.intProp("Zero-based result offset for pagination (default: 0)."),
                 "limit", Schemas.intProp("Maximum results to return (default: 20, hard maximum: 50).")));
-    }
-
-    @Override
-    public ToolResult execute(final Map<String, Object> args) {
-        return ToolResult.error("list_subagent_options requires an active session context.");
     }
 
     @Override
@@ -277,9 +275,7 @@ public class ListSubagentOptionsTool implements EmbeddedTool {
     }
 
     private void authorization(
-            final Map<String, Object> entry,
-            final SubagentRoutingPolicy routing,
-            final EffectiveAgentModel effective) {
+            final Map<String, Object> entry, final SubagentRoutingPolicy routing, final EffectiveAgentModel effective) {
         final var authorized = routing.available(effective);
         entry.put("default", routing.isDefault(effective));
         entry.put("authorized", authorized);

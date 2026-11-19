@@ -19,18 +19,30 @@ import static java.util.stream.Collectors.toList;
 
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.fusion.framework.build.api.lifecycle.Destroy;
-import io.yupiik.fusion.httpclient.core.ExtendedHttpClient;
 import io.yupiik.fusion.json.JsonMapper;
+import io.yupiik.ia.agent.core.configuration.AgentMode;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.McpServerConfiguration;
 import io.yupiik.ia.agent.core.tools.EmbeddedTool;
+import io.yupiik.ia.agent.core.tools.ToolCategory;
+import io.yupiik.ia.agent.core.tools.ToolContext;
+import io.yupiik.ia.agent.core.tools.ToolResult;
+import io.yupiik.ia.agent.core.wiring.HttpClientProducer.SessionCapableClient;
 import io.yupiik.maven.knowledge.process.ProcessService;
 import java.io.IOException;
 import java.io.UncheckedIOException;
+import java.net.URI;
+import java.net.http.HttpRequest;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
@@ -53,7 +65,7 @@ public class McpManager {
     private final CodingAgentConfiguration configuration;
     private final JsonMapper mapper;
     private final List<EmbeddedTool> localTools;
-    private final ExtendedHttpClient httpClient;
+    private final SessionCapableClient httpClient;
     private final ProcessService processes;
     private final ExecutorService executor;
     private final boolean async;
@@ -71,7 +83,7 @@ public class McpManager {
             final CodingAgentConfiguration configuration,
             final JsonMapper mapper,
             final List<EmbeddedTool> localTools,
-            final ExtendedHttpClient httpClient,
+            final SessionCapableClient httpClient,
             final ProcessService processes) {
         this(configuration, mapper, localTools, httpClient, processes, null);
     }
@@ -80,7 +92,7 @@ public class McpManager {
             final CodingAgentConfiguration configuration,
             final JsonMapper mapper,
             final List<EmbeddedTool> localTools,
-            final ExtendedHttpClient httpClient,
+            final SessionCapableClient httpClient,
             final ProcessService processes,
             final ExecutorService executor) {
         this.configuration = configuration;
@@ -114,6 +126,184 @@ public class McpManager {
      * flag so a manual reset still works after an automatic start.
      */
     private volatile boolean started;
+
+    /** Opens client-supplied servers without changing application configuration or tools. */
+    public SessionTools openSession(final List<? extends SessionServer> servers, final Path cwd)
+            throws IOException, InterruptedException {
+        final var owned = new ArrayList<McpClient>();
+        final var tools = new ArrayList<EmbeddedTool>();
+        final var names = new HashSet<String>();
+        // Validate the entire request before starting any process or contacting any destination.
+        for (final var server : servers) {
+            if (server == null || server.name() == null || server.name().isBlank() || !names.add(server.name())) {
+                throw new IllegalArgumentException("Invalid or duplicate MCP server name");
+            }
+            switch (server) {
+                case StdioServer stdio -> {
+                    if (stdio.command() == null
+                            || stdio.command().isEmpty()
+                            || stdio.command().getFirst() == null
+                            || stdio.command().getFirst().isBlank()
+                            || stdio.command().stream().anyMatch(it -> it == null || it.indexOf('\0') >= 0)) {
+                        throw new IllegalArgumentException("Invalid MCP command");
+                    }
+                }
+                case RemoteServer remote -> validateRemote(remote);
+            }
+        }
+        try {
+            for (final var server : servers) {
+                final McpClient client =
+                        switch (server) {
+                            case StdioServer stdio ->
+                                new StdioMcpClient(
+                                        stdio.name(), stdio.command(), stdio.env(), cwd.toString(), mapper, processes);
+                            case RemoteServer remote -> remoteClient(remote);
+                        };
+                owned.add(client);
+                client.initialize();
+                for (final var descriptor : client.listTools()) {
+                    final var qualified = "client_"
+                            + UUID.nameUUIDFromBytes((server.name().length() + ":" + server.name() + descriptor.name())
+                                            .getBytes(StandardCharsets.UTF_8))
+                                    .toString()
+                                    .replace("-", "");
+                    tools.add(new EmbeddedTool() {
+                        @Override
+                        public String name() {
+                            return qualified;
+                        }
+
+                        @Override
+                        public String description(final Path workdir) {
+                            return descriptor.description() == null ? descriptor.name() : descriptor.description();
+                        }
+
+                        @Override
+                        public ToolCategory category() {
+                            return ToolCategory.MCP;
+                        }
+
+                        @Override
+                        public Map<String, Object> schema() {
+                            return descriptor.inputSchema() == null
+                                    ? Map.of("type", "object")
+                                    : descriptor.inputSchema();
+                        }
+
+                        @Override
+                        public ToolResult execute(final Map<String, Object> args, final ToolContext context) {
+                            if (context.permissions() == null
+                                    || context.permissions().mode() == AgentMode.PLAN) {
+                                return ToolResult.error("Client MCP tools are unavailable in PLAN mode");
+                            }
+                            if (context.cancelled().getAsBoolean()
+                                    || context.callCancelled().getAsBoolean()) {
+                                return ToolResult.error("Client MCP call cancelled");
+                            }
+                            try {
+                                return ToolResult.ok(client.callTool(descriptor.name(), args));
+                            } catch (final InterruptedException e) {
+                                Thread.currentThread().interrupt();
+                                return ToolResult.error("Client MCP call interrupted");
+                            } catch (final IOException | RuntimeException e) {
+                                return ToolResult.error("Client MCP tool " + qualified + " failed: " + e.getMessage());
+                            }
+                        }
+                    });
+                }
+            }
+            return new SessionTools(List.copyOf(tools), List.copyOf(owned));
+        } catch (final IOException | InterruptedException | RuntimeException e) {
+            owned.forEach(McpClient::close);
+            throw e;
+        }
+    }
+
+    public sealed interface SessionServer permits StdioServer, RemoteServer {
+        String name();
+    }
+
+    public record StdioServer(String name, List<String> command, List<String> env) implements SessionServer {}
+
+    public enum RemoteTransport {
+        HTTP,
+        SSE
+    }
+
+    public record RemoteServer(String name, RemoteTransport transport, String url, Map<String, String> headers)
+            implements SessionServer {
+        public RemoteServer {
+            headers = headers == null ? Map.of() : Map.copyOf(headers);
+        }
+
+        @Override
+        public String toString() {
+            return "RemoteServer[name=" + name + ", transport=" + transport + "]";
+        }
+    }
+
+    private static void validateRemote(final RemoteServer server) {
+        if (server.transport() == null || server.url() == null) {
+            throw new IllegalArgumentException("Invalid MCP transport");
+        }
+        final URI uri;
+        try {
+            uri = URI.create(server.url());
+        } catch (final IllegalArgumentException e) {
+            throw new IllegalArgumentException("Invalid MCP URL");
+        }
+        if ((!"http".equalsIgnoreCase(uri.getScheme()) && !"https".equalsIgnoreCase(uri.getScheme()))
+                || uri.getHost() == null
+                || uri.getRawUserInfo() != null
+                || uri.getRawFragment() != null
+                || uri.getPort() > 65535) {
+            throw new IllegalArgumentException("Invalid MCP URL");
+        }
+        final var names = new HashSet<String>();
+        for (final var entry : server.headers().entrySet()) {
+            if (entry.getKey() == null
+                    || entry.getValue() == null
+                    || !names.add(entry.getKey().toLowerCase(Locale.ROOT))) {
+                throw new IllegalArgumentException("Invalid or duplicate MCP header");
+            }
+            try {
+                HttpRequest.newBuilder(uri).header(entry.getKey(), entry.getValue());
+            } catch (final IllegalArgumentException e) {
+                throw new IllegalArgumentException("Invalid MCP header");
+            }
+            if (Set.of(
+                            "content-length",
+                            "host",
+                            "connection",
+                            "expect",
+                            "upgrade",
+                            "mcp-session-id",
+                            "mcp-protocol-version")
+                    .contains(entry.getKey().toLowerCase(Locale.ROOT))) {
+                throw new IllegalArgumentException("Reserved MCP header");
+            }
+        }
+    }
+
+    private McpClient remoteClient(final RemoteServer server) {
+        final var headers = server.headers().entrySet().stream()
+                .map(entry -> entry.getKey() + "=" + entry.getValue())
+                .toList();
+        final var timeout = configuration.mcp().callTimeoutSeconds();
+        final var sessionHttp = httpClient.openSession(server.headers().keySet());
+        return switch (server.transport()) {
+            case HTTP -> new HttpMcpClient(server.name(), server.url(), null, headers, timeout, mapper, sessionHttp);
+            case SSE -> new SseMcpClient(server.name(), server.url(), headers, timeout, mapper, sessionHttp);
+        };
+    }
+
+    public record SessionTools(List<EmbeddedTool> tools, List<McpClient> clients) implements AutoCloseable {
+        @Override
+        public void close() {
+            clients.forEach(McpClient::close);
+        }
+    }
 
     public void start() {
         lifecycleLock.lock();

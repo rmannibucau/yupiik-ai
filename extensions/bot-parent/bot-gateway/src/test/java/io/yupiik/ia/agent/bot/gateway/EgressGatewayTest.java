@@ -186,6 +186,11 @@ class EgressGatewayTest {
                     "CONNECT api.github.com:80 HTTP/1.1\r\n\r\n",
                     "CONNECT evil.example:443 HTTP/1.1\r\n\r\n",
                     "CONNECT api.github.com.evil.example:443 HTTP/1.1\r\n\r\n",
+                    "CONNECT  api.github.com:443 HTTP/1.1\r\n\r\n",
+                    "CONNECT\tapi.github.com:443 HTTP/1.1\r\n\r\n",
+                    "CONNECT api.github.com:443 HTTP/1.1 \r\n\r\n",
+                    "CONNECT api.github.com:443 HTTP/1.1\r\n\tHost: api.github.com\r\n\r\n",
+                    "CONNECT api.github.com:443 HTTP/1.1\r\nHost: api.github.com\r\nX-Unknown: denied\r\n\r\n",
                     "CONNECT api.github.com:443 HTTP/1.1\r\nContent-Length: 5\r\n\r\nhello",
                     "CONNECT api.github.com:443 HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n")) {
                 try (final var socket = new Socket("127.0.0.1", gateway.port())) {

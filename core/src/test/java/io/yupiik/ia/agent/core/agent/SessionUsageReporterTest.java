@@ -25,6 +25,7 @@ import io.yupiik.ia.agent.core.llm.ChatSettings;
 import io.yupiik.ia.agent.core.llm.Usage;
 import io.yupiik.ia.agent.core.usage.CodexUsageSnapshot;
 import io.yupiik.ia.agent.core.usage.QuotaSnapshotStore;
+import java.nio.file.Path;
 import java.time.Clock;
 import java.util.ArrayList;
 import java.util.List;
@@ -35,8 +36,12 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 class SessionUsageReporterTest {
+    @TempDir
+    private static Path eventWorkdir;
+
     @Test
     void usageEventsPreserveFullInputAndRawBillingForCachedAndOutputOnlyCalls() {
         for (final var usage : List.of(
@@ -62,7 +67,8 @@ class SessionUsageReporterTest {
                     "s-input",
                     () -> ChatSettings.EMPTY,
                     null,
-                    null);
+                    null,
+                    eventWorkdir);
             reporter.emitUsage(List.of(), 0, "model-x");
             reporter.pushUsageContext(123, "model-x");
             reporter.pushUsageQuota("model-x");
@@ -80,6 +86,7 @@ class SessionUsageReporterTest {
                                 usage.contextInputTokens()),
                         event.usage());
                 assertEquals("s-input", event.sessionId());
+                assertSame(eventWorkdir, event.workdir());
             }
 
             tracker.recordAuxiliary(usage);
@@ -113,13 +120,16 @@ class SessionUsageReporterTest {
                 "s1",
                 () -> ChatSettings.EMPTY,
                 null,
-                null);
+                null,
+                eventWorkdir);
         reporter.pushUsageContext(1234, "model-x");
         reporter.refreshUsage("model-x");
         final var reads = store.refreshingReads;
         final var before = events.getLast();
         store.completion.run();
         final var after = events.getLast();
+        assertSame(eventWorkdir, before.workdir());
+        assertSame(eventWorkdir, after.workdir(), "background quota completion keeps the session root");
         assertEquals(before.estimatedContextTokens(), after.estimatedContextTokens());
         assertEquals(before.contextPercent(), after.contextPercent());
         assertEquals(before.usage(), after.usage());
@@ -207,7 +217,8 @@ class SessionUsageReporterTest {
                 "s1",
                 () -> ChatSettings.EMPTY,
                 null,
-                null);
+                null,
+                eventWorkdir);
         reporter.attachQuota(ChatSettings.EMPTY);
         assertEquals(1, events.size(), "background completion during attach must still publish");
         events.clear();
@@ -242,7 +253,8 @@ class SessionUsageReporterTest {
                 "s1",
                 () -> ChatSettings.EMPTY,
                 null,
-                null);
+                null,
+                eventWorkdir);
 
         reporter.pushUsageContext(12_345, "model-x");
 

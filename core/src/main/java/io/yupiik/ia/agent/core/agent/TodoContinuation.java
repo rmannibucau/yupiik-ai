@@ -22,8 +22,10 @@ import io.yupiik.ia.agent.core.permissions.PermissionService;
 import io.yupiik.ia.agent.core.session.SessionEntry;
 import io.yupiik.ia.agent.core.session.SessionStore;
 import io.yupiik.ia.agent.core.todo.TodoStore;
+import java.nio.file.Path;
 import java.time.Clock;
 import java.util.List;
+import java.util.Objects;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
 
@@ -60,6 +62,7 @@ public final class TodoContinuation {
                     + " them open, or explicitly tell the user what exactly blocks you (missing information, a"
                     + " failing command, a decision to make) and stop.";
 
+    private final Path workdir;
     private final CodingAgentConfiguration configuration;
     private final Supplier<PermissionService> permissionService;
     private final Supplier<TodoStore> todoStore;
@@ -77,7 +80,9 @@ public final class TodoContinuation {
             final Clock clock,
             final Supplier<String> currentSessionId,
             final Supplier<String> subagentId,
-            final Supplier<String> subagentName) {
+            final Supplier<String> subagentName,
+            final Path workdir) {
+        this.workdir = Objects.requireNonNull(workdir, "workdir");
         this.configuration = configuration;
         this.permissionService = permissionService;
         this.todoStore = todoStore;
@@ -125,7 +130,8 @@ public final class TodoContinuation {
                 finishReason,
                 currentSessionId.get(),
                 subagentId.get(),
-                subagentName.get());
+                subagentName.get(),
+                workdir);
     }
 
     /**
@@ -202,6 +208,6 @@ public final class TodoContinuation {
 
     private AgentEvent.Notice notice(final AgentEvent.Notice.Level level, final String message) {
         return new AgentEvent.Notice(
-                level, message, null, currentSessionId.get(), subagentId.get(), subagentName.get());
+                level, message, null, currentSessionId.get(), subagentId.get(), subagentName.get(), workdir);
     }
 }

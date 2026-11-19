@@ -29,8 +29,10 @@ import io.yupiik.ia.agent.core.llm.Message;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import java.io.IOException;
 import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.logging.Level;
@@ -108,11 +110,9 @@ public class MemoryCompactor {
      *
      * @return a short status message, or {@code null} when nothing ran
      */
-    public String maybeCompact() {
-        return maybeCompact(ChatSettings.EMPTY);
-    }
-
-    public String maybeCompact(final ChatSettings settings) {
+    /** Checks and compacts only the selected session project; null preserves the configured default. */
+    public String maybeCompact(final ChatSettings settings, final Path root) {
+        Objects.requireNonNull(root, "workdir");
         if (configuration == null
                 || !configuration.memory().compactEnabled()
                 || !configuration.memory().enabled()) {
@@ -123,12 +123,12 @@ public class MemoryCompactor {
         if (now - last < MIN_INTERVAL_MS || !lastRun.compareAndSet(last, now)) {
             return null;
         }
-        final var file = memoryStore.projectFile();
+        final var file = MemoryStore.projectFile(root);
         try {
             if (!Files.isRegularFile(file) || Files.size(file) < THRESHOLD_BYTES) {
                 return null; // below the threshold: nothing to gain
             }
-            return compactNow(false, ChatSettings.EMPTY);
+            return compactNow(false, ChatSettings.EMPTY, root);
         } catch (final IOException e) {
             LOGGER.log(Level.FINE, "memory compaction threshold check failed", e);
             return null;
@@ -140,21 +140,22 @@ public class MemoryCompactor {
      * debounce and threshold, honoring only the enabled flag and the single-flight
      * guard (protected constructor use is only for the manual path).
      */
-    public String compactNow() {
-        return compactNow(true, ChatSettings.EMPTY);
+    /** Manual compaction of the selected project, including its backup and state file. */
+    public String compactNow(final Path root) {
+        return compactNow(true, ChatSettings.EMPTY, root);
     }
 
-    private String compactNow(final boolean manual, final ChatSettings settings) {
+    private String compactNow(final boolean manual, final ChatSettings settings, final Path root) {
+        Objects.requireNonNull(root, "workdir");
         if (!running.compareAndSet(false, true)) {
             return "memory compaction already running";
         }
         try {
-            final var file = memoryStore.projectFile();
-            final var content = memoryStore.readProject();
+            final var content = memoryStore.readProject(root);
             if (content == null || content.isBlank()) {
                 return manual ? "no project memory to compact" : null;
             }
-            final var rewritten = rewrite(content, settings);
+            final var rewritten = rewrite(content, settings, root);
             if (rewritten == null || rewritten.isBlank()) {
                 return manual ? "memory compaction produced no output; left untouched" : null;
             }
@@ -201,8 +202,8 @@ public class MemoryCompactor {
                 // not enough reduction: a poor rewrite would only churn the file
                 return manual ? "memory compaction kept the file (reduction below 20%)" : null;
             }
-            memoryStore.replace(false, bullets);
-            writeState(beforeBytes, afterBytes);
+            memoryStore.replace(false, bullets, root);
+            writeState(beforeBytes, afterBytes, root);
             return "memory compacted: "
                     + beforeBytes
                     + " -> "
@@ -215,7 +216,7 @@ public class MemoryCompactor {
         }
     }
 
-    private String rewrite(final String content, final ChatSettings settings) {
+    private String rewrite(final String content, final ChatSettings settings, final Path root) {
         // provider-level override (blank = this provider's own model, "inherit" = the global
         // chain) then the global resolvedMemory chain, kept routable so the rewrite is not
         // routed to a session's provider that does not host the model
@@ -272,15 +273,15 @@ public class MemoryCompactor {
             }
             LOGGER.log(Level.FINE, "memory compaction LLM call failed", e);
             LOGGER.info("memory compaction failed; run /memory compact to retry");
-            emitNotice("memory compaction failed: " + e.getMessage() + " - run /memory compact to retry", e);
+            emitNotice("memory compaction failed: " + e.getMessage() + " - run /memory compact to retry", e, root);
             return null;
         }
     }
 
-    private void emitNotice(final String message, final Throwable cause) {
+    private void emitNotice(final String message, final Throwable cause, final Path root) {
         if (emitter != null) {
-            emitter.emit(
-                    new AgentEvent.Notice(AgentEvent.Notice.Level.WARN, message, null, sessionId, null, null, cause));
+            emitter.emit(new AgentEvent.Notice(
+                    AgentEvent.Notice.Level.WARN, message, null, sessionId, null, null, cause, root));
         }
     }
 
@@ -295,9 +296,9 @@ public class MemoryCompactor {
         return false;
     }
 
-    private void writeState(final long beforeBytes, final long afterBytes) {
+    private void writeState(final long beforeBytes, final long afterBytes, final Path root) {
         try {
-            final var file = memoryStore.projectFile().resolveSibling("compaction.txt");
+            final var file = (MemoryStore.projectFile(root)).resolveSibling("compaction.txt");
             Files.writeString(
                     file,
                     "timestamp=" + System.currentTimeMillis()
@@ -310,8 +311,10 @@ public class MemoryCompactor {
     }
 
     /** Reads the last compaction state, or {@code null} when none is recorded. */
-    public CompactionState state() {
-        final var file = memoryStore.projectFile().resolveSibling("compaction.txt");
+    /** Reads compaction state beside the selected project's memory file. */
+    public CompactionState state(final Path root) {
+        Objects.requireNonNull(root, "workdir");
+        final var file = (MemoryStore.projectFile(root)).resolveSibling("compaction.txt");
         try {
             if (!Files.isRegularFile(file)) {
                 return null;

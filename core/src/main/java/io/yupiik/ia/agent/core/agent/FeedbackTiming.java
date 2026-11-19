@@ -67,7 +67,7 @@ public final class FeedbackTiming {
             final var at = clock.millis();
             blocks.add(Map.of("kind", kind, "at", at, "offset", "text".equals(kind) ? textOffset : thinkingOffset));
             emit.accept(new AgentEvent.FeedbackStarted(
-                    kind, at, event.sessionId(), event.subagentId(), event.subagentName()));
+                    kind, at, event.sessionId(), event.subagentId(), event.subagentName(), event.workdir()));
         }
         if ("text".equals(kind)) {
             textOffset += delta.length();

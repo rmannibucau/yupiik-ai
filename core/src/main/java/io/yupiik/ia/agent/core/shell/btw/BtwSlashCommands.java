@@ -23,8 +23,10 @@ import io.yupiik.ia.agent.core.shell.ShellOutcome;
 import io.yupiik.ia.agent.core.shell.slash.SlashCommand;
 import io.yupiik.ia.agent.core.shell.slash.SlashCommandSet;
 import java.util.List;
+import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * The /btw slash command, shared by every shell. The TUI intercepts it before this
@@ -60,18 +62,46 @@ public class BtwSlashCommands implements SlashCommandSet {
         }
         final var question = arg.strip();
         final var runtime = env.session().runtime();
-        final var gate = runtime == null ? null : runtime.permissions().gate();
-        return answerer.ask(
+        if (runtime == null) {
+            return CompletableFuture.completedFuture(ShellOutcome.error("btw requires an active session"));
+        }
+        final var id = env.session().sessionId();
+        final var cancelled = new AtomicBoolean();
+        final var result = answerer.ask(
                         question,
-                        env.session().sessionId(),
-                        runtime == null ? null : runtime.usage(),
-                        () -> false,
-                        gate,
-                        runtime == null ? null : runtime.chatSettings(),
-                        runtime == null ? null : runtime.systemPromptBuilder(),
-                        runtime == null ? null : runtime.feedback())
+                        id,
+                        runtime.usage(),
+                        () -> {
+                            if (cancelled.get()
+                                    || Thread.currentThread().isInterrupted()
+                                    || env.session().runtime() != runtime
+                                    || !Objects.equals(id, env.session().sessionId())) {
+                                return true;
+                            }
+                            try {
+                                runtime.loop()
+                                        .effectiveToolRegistry(); // A closed owner must not leave a side request alive.
+                                return false;
+                            } catch (final IllegalStateException closed) {
+                                return true;
+                            }
+                        },
+                        runtime.permissions().gate(),
+                        runtime.chatSettings(),
+                        runtime.systemPromptBuilder(),
+                        runtime.feedback(),
+                        runtime.workdir(),
+                        runtime.loop().effectiveToolRegistry(),
+                        runtime.loop().availableToolNames())
                 .thenApply(answer -> ShellOutcome.transcript(rendered(question, answer.text())))
-                .exceptionally(e -> ShellOutcome.error("btw failed: " + message(e)));
+                .exceptionally(e -> ShellOutcome.error("btw failed: " + message(e)))
+                .toCompletableFuture();
+        result.whenComplete((outcome, failure) -> {
+            if (result.isCancelled()) {
+                cancelled.set(true); // Reach the actual answerer's cancellation probe, not just its stage view.
+            }
+        });
+        return result;
     }
 
     private String rendered(final String question, final String answer) {

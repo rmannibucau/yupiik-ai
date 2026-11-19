@@ -28,6 +28,25 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 class ThemeDetectorTest {
+    @Test
+    void gtkSettingsKeepAllRegexLineBreaksAndDoNotSplitOnOrdinaryWhitespace() {
+        for (final var separator : List.of("\n", "\r", "\r\n", "\u000b", "\f", "\u0085", "\u2028", "\u2029")) {
+            assertEquals(
+                    Optional.of("dark"),
+                    ThemeDetector.gtkFromSettings("[Settings]" + separator + separator
+                            + "\tgtk-application-prefer-dark-theme = true  " + separator + separator),
+                    separator);
+            assertEquals(
+                    Optional.of("light"),
+                    ThemeDetector.gtkFromSettings("[Settings]" + separator + "gtk-application-prefer-dark-theme=false"),
+                    separator);
+        }
+        assertEquals(Optional.empty(), ThemeDetector.gtkFromSettings(""));
+        assertEquals(
+                Optional.empty(),
+                ThemeDetector.gtkFromSettings("[Settings]\u00a0gtk-application-prefer-dark-theme=true"));
+        assertEquals(Optional.empty(), ThemeDetector.gtkFromSettings("x".repeat(100_000)));
+    }
 
     @Test
     void macDark() {

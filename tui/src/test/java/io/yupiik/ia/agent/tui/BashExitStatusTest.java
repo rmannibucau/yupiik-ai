@@ -21,10 +21,15 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.ia.agent.core.agent.AgentEvent;
 import io.yupiik.ia.agent.core.shell.ConversationTranscript;
+import java.nio.file.Path;
 import java.util.List;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 class BashExitStatusTest {
+    @TempDir
+    private static Path eventWorkdir;
+
     @Test
     void classifiesOnlyTheFinalBashFooter() {
         for (final var output : List.of("Exit code: 1", "failed\nExit code: 42", "failed\nExit code: -1\n")) {
@@ -61,9 +66,9 @@ class BashExitStatusTest {
     void capturedCompletionClassifiesCardsWithoutFooterInStream() {
         final var transcript = new ConversationTranscript();
         transcript.startUserTurn("run command");
-        transcript.onEvent(new AgentEvent.ToolStarted("bash", "{\"command\":\"exit 1\"}", "s1"));
-        transcript.onEvent(new AgentEvent.ToolStream("bash", "stdout", "s1"));
-        final var finished = new AgentEvent.ToolFinished("bash", "stdout\nExit code: 1", true, "s1");
+        transcript.onEvent(new AgentEvent.ToolStarted("bash", "{\"command\":\"exit 1\"}", "s1", eventWorkdir));
+        transcript.onEvent(new AgentEvent.ToolStream("bash", "stdout", "s1", eventWorkdir));
+        final var finished = new AgentEvent.ToolFinished("bash", "stdout\nExit code: 1", true, "s1", eventWorkdir);
         transcript.onEvent(finished);
         final var capture = new ToolOutputStore.Entry("bash", "exit 1", finished.output(), !finished.success(), 0);
         final var card = ConversationTranscript.regions(transcript.markdown("|", "busy")).stream()

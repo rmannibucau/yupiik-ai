@@ -28,6 +28,7 @@ import io.yupiik.ia.agent.core.session.AgentSessionService;
 import io.yupiik.ia.agent.core.session.SessionStore;
 import io.yupiik.ia.agent.core.shell.ShellEnv;
 import io.yupiik.ia.agent.core.shell.ShellOutcome;
+import io.yupiik.ia.agent.core.tools.ToolContext;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -38,6 +39,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
+import java.util.regex.Pattern;
 
 /**
  * Session lifecycle commands shared by every shell: new/resume/quit plus the
@@ -45,6 +47,8 @@ import java.util.concurrent.CompletionStage;
  */
 @ApplicationScoped
 public class SessionCommands implements SlashCommandSet {
+    private static final Pattern WHITESPACE = Pattern.compile("\\s+");
+
     @Override
     public String title() {
         return "Session commands";
@@ -215,7 +219,7 @@ public class SessionCommands implements SlashCommandSet {
                 .pick("resume session", labels, RESUME_PAGE_SIZE)
                 .thenApply(selected -> selected.isEmpty()
                         ? ShellOutcome.status("resume cancelled")
-                        : doResume(selected.get().split("\\s+")[0], env));
+                        : doResume(WHITESPACE.split(selected.get())[0], env));
     }
 
     private String labelOf(final SessionStore.SessionInfo session) {
@@ -278,7 +282,7 @@ public class SessionCommands implements SlashCommandSet {
             markdown = renderTranscript(agentSessionService.context(
                     env.session().sessionId(), env.session().runtime()));
         }
-        return emit(markdown, path);
+        return emit(markdown, path, env.session().runtime().workdir());
     }
 
     /**
@@ -477,13 +481,15 @@ public class SessionCommands implements SlashCommandSet {
     }
 
     /** Stdout when no path is given, a file otherwise - same contract for every mode. */
-    private static ShellOutcome emit(final String markdown, final String path) {
+    private static ShellOutcome emit(final String markdown, final String path, final Path workdir) {
         if (path == null || path.isBlank()) {
             return ShellOutcome.transcript(markdown);
         }
         try {
-            final var target = Path.of(path).toAbsolutePath();
-            Files.createDirectories(target.getParent() == null ? Path.of(".") : target.getParent());
+            final var target = ToolContext.empty(workdir).resolvePath(path);
+            if (target.getParent() != null) {
+                Files.createDirectories(target.getParent());
+            }
             Files.writeString(target, markdown);
             return ShellOutcome.status("context written to " + target);
         } catch (final IOException e) {

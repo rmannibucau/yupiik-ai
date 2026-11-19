@@ -51,6 +51,7 @@ import io.yupiik.ia.agent.core.tools.ToolExecutionService;
 import io.yupiik.ia.agent.core.tools.ToolRegistry;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import java.io.IOException;
+import java.nio.file.Path;
 import java.time.Clock;
 import java.util.ArrayList;
 import java.util.Deque;
@@ -58,12 +59,14 @@ import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.ConcurrentLinkedDeque;
 import java.util.concurrent.ExecutorService;
 import java.util.function.BooleanSupplier;
+import java.util.stream.Collectors;
 
 /**
  * Answers /btw side questions out of band: a bounded read-only tool loop over the inherited
@@ -199,8 +202,9 @@ public class BtwAnswerer {
             final String sessionId,
             final UsageTracker usage,
             final BooleanSupplier cancelled,
-            final ApprovalGate sessionGate) {
-        return ask(question, sessionId, usage, cancelled, sessionGate, null, null);
+            final ApprovalGate sessionGate,
+            final Path root) {
+        return ask(question, sessionId, usage, cancelled, sessionGate, null, null, root);
     }
 
     /** @param sessionSettings the requesting tab's selection; null means the process default provider/model */
@@ -210,8 +214,9 @@ public class BtwAnswerer {
             final UsageTracker usage,
             final BooleanSupplier cancelled,
             final ApprovalGate sessionGate,
-            final ChatSettings sessionSettings) {
-        return ask(question, sessionId, usage, cancelled, sessionGate, sessionSettings, null);
+            final ChatSettings sessionSettings,
+            final Path root) {
+        return ask(question, sessionId, usage, cancelled, sessionGate, sessionSettings, null, root);
     }
 
     /**
@@ -228,8 +233,9 @@ public class BtwAnswerer {
             final BooleanSupplier cancelled,
             final ApprovalGate sessionGate,
             final ChatSettings sessionSettings,
-            final SystemPromptBuilder systemPrompt) {
-        return ask(question, sessionId, usage, cancelled, sessionGate, sessionSettings, systemPrompt, null);
+            final SystemPromptBuilder systemPrompt,
+            final Path root) {
+        return ask(question, sessionId, usage, cancelled, sessionGate, sessionSettings, systemPrompt, null, root);
     }
 
     /** Answers with a feedback service scoped to the owning side question. */
@@ -241,12 +247,63 @@ public class BtwAnswerer {
             final ApprovalGate sessionGate,
             final ChatSettings sessionSettings,
             final SystemPromptBuilder systemPrompt,
-            final UserFeedbackService feedback) {
+            final UserFeedbackService feedback,
+            final Path root) {
+        return ask(
+                question,
+                sessionId,
+                usage,
+                cancelled,
+                sessionGate,
+                sessionSettings,
+                systemPrompt,
+                feedback,
+                root,
+                toolRegistry,
+                wireBtwTools(root, toolRegistry, null).stream()
+                        .map(tool -> tool.function().name())
+                        .collect(Collectors.toUnmodifiableSet()));
+    }
+
+    /**
+     * Answers using the owning loop's borrowed registry and captured tool projection.
+     * Session callers pass {@code loop.effectiveToolRegistry()} and {@code loop.availableToolNames()}.
+     * A null registry exposes no tools, never another session's or the application's registry.
+     * The tool-name ceiling is required, so a missing parent projection cannot silently widen access.
+     * The caller's cancellation probe must include session disposal as well as side-question cancellation.
+     */
+    public CompletionStage<BtwAnswer> ask(
+            final String question,
+            final String sessionId,
+            final UsageTracker usage,
+            final BooleanSupplier cancelled,
+            final ApprovalGate sessionGate,
+            final ChatSettings sessionSettings,
+            final SystemPromptBuilder systemPrompt,
+            final UserFeedbackService feedback,
+            final Path root,
+            final ToolRegistry effectiveToolRegistry,
+            final Set<String> allowedTools) {
+        Objects.requireNonNull(root, "workdir");
+        if (!root.isAbsolute() || !root.equals(root.normalize())) {
+            throw new IllegalArgumentException("workdir must be absolute and normalized: " + root);
+        }
+        final var ceiling = Set.copyOf(Objects.requireNonNull(allowedTools, "allowedTools"));
         final var future = new CompletableFuture<BtwAnswer>();
         executor.execute(() -> {
             try {
                 final var answer = doAsk(
-                        question, sessionId, usage, cancelled, sessionGate, sessionSettings, systemPrompt, feedback);
+                        question,
+                        sessionId,
+                        usage,
+                        cancelled,
+                        sessionGate,
+                        sessionSettings,
+                        systemPrompt,
+                        feedback,
+                        root,
+                        effectiveToolRegistry,
+                        ceiling);
                 future.complete(answer);
             } catch (final IOException e) {
                 future.completeExceptionally(e);
@@ -267,9 +324,21 @@ public class BtwAnswerer {
             final BooleanSupplier cancelled,
             final ApprovalGate sessionGate,
             final ChatSettings sessionSettings,
-            final SystemPromptBuilder systemPrompt)
+            final SystemPromptBuilder systemPrompt,
+            final Path root)
             throws IOException, InterruptedException {
-        return doAsk(question, sessionId, usage, cancelled, sessionGate, sessionSettings, systemPrompt, null);
+        return doAsk(
+                question,
+                sessionId,
+                usage,
+                cancelled,
+                sessionGate,
+                sessionSettings,
+                systemPrompt,
+                null,
+                root,
+                toolRegistry,
+                null);
     }
 
     private BtwAnswer doAsk(
@@ -280,9 +349,14 @@ public class BtwAnswerer {
             final ApprovalGate sessionGate,
             final ChatSettings sessionSettings,
             final SystemPromptBuilder systemPrompt,
-            final UserFeedbackService feedback)
+            final UserFeedbackService feedback,
+            final Path root,
+            final ToolRegistry effectiveToolRegistry,
+            final Set<String> allowedTools)
             throws IOException, InterruptedException {
         final var conf = configuration();
+        // Snapshot once: neither later marker changes nor tool/model arguments may change this side request's root.
+        Objects.requireNonNull(root, "workdir");
         final var bounded = tail(sessionStore.load(sessionId), conf.maxHistoryMessages());
         // The persisted session has the agent loop's pairing repair applied per resume, but a /btw slice
         // can start mid-tool-round (orphan tool result at head, or an unpaired assistant tool_calls block
@@ -331,7 +405,7 @@ public class BtwAnswerer {
                                                     null,
                                                     null,
                                                     false,
-                                                    wireBtwTools(),
+                                                    wireBtwTools(root, effectiveToolRegistry, allowedTools),
                                                     null,
                                                     conf.maxTokens() > 0 ? conf.maxTokens() : null,
                                                     null,
@@ -390,11 +464,17 @@ public class BtwAnswerer {
         // Tooled mode (yca.slashcommands.btw.tools): bounded read-only tool loop over the inherited history.
         // /btw never inherits the session permission mode: plan-mode rules only, and the caller's
         // approval gate (the tabs share it, so an approval pops above the btw modal) decides the rest.
-        final var permissions = new PermissionService(configuration, emitter);
+        final var permissions = new PermissionService(configuration, emitter, root);
         permissions.setMode(AgentMode.PLAN);
         permissions.setPermissionMode(PermissionMode.ASK);
         permissions.setGate(sessionGate);
-        final var tools = toolRegistry == null ? List.<Tool>of() : toolRegistry.toWireTools(BtwAnswerer::allowedTool);
+        final var tools = effectiveToolRegistry == null
+                ? List.<Tool>of()
+                : effectiveToolRegistry.toWireTools(
+                        root,
+                        tool -> allowedTool(tool) && (allowedTools == null || allowedTools.contains(tool.name())));
+        final var offeredTools =
+                tools.stream().map(tool -> tool.function().name()).collect(Collectors.toUnmodifiableSet());
         var retried = false;
         var pairRetried = false;
         String raw = "";
@@ -469,7 +549,17 @@ public class BtwAnswerer {
                 if (call != null && call.function() != null && call.function().name() != null) {
                     attemptedTools.add(call.function().name());
                 }
-                final var outcome = runTool(target, call, sessionId, usage, cancelled, permissions, feedback);
+                final var outcome = runTool(
+                        target,
+                        call,
+                        sessionId,
+                        usage,
+                        cancelled,
+                        permissions,
+                        feedback,
+                        root,
+                        effectiveToolRegistry,
+                        offeredTools);
                 messages.add(Message.tool(call.id(), outcome.output(), !outcome.success()));
             }
         }
@@ -485,15 +575,18 @@ public class BtwAnswerer {
             final UsageTracker usage,
             final BooleanSupplier cancelled,
             final PermissionService permissions,
-            final UserFeedbackService feedback) {
+            final UserFeedbackService feedback,
+            final Path root,
+            final ToolRegistry effectiveToolRegistry,
+            final Set<String> offeredTools) {
         final var function = call.function();
         final var name = function == null || function.name() == null ? "" : function.name();
         final var argsJson = function == null || function.arguments() == null ? "{}" : function.arguments();
-        final var tool = toolRegistry.tool(name);
+        final var tool = effectiveToolRegistry == null ? null : effectiveToolRegistry.tool(name);
         if (tool == null) {
             return new ToolOutcome(call.id(), "unknown tool", false);
         }
-        if (!allowedTool(tool)) {
+        if (!offeredTools.contains(name) || !allowedTool(tool)) {
             return new ToolOutcome(call.id(), "Permission denied by user: tool not available in /btw", false);
         }
         if (cancelled.getAsBoolean()) {
@@ -518,10 +611,9 @@ public class BtwAnswerer {
         // observer wiring); the ToolUsePreEvent is still emitted so configured yca.hooks.ToolUsePreEvent callbacks
         // run for allowed calls. The built-in observer re-checking the same permissionService is a harmless fast path.
         final var toolUseResult = new HookResult();
-        final var workdir = args.get("workdir") instanceof final String w && !w.isBlank() ? w : null;
         final var eventContext = eventContextBuilder == null
-                ? new EventContext(sessionId, null, null, null, null, null, null, null)
-                : eventContextBuilder.build(permissions, target.settings(), sessionId, null, null, workdir);
+                ? new EventContext(sessionId, null, null, root.toString(), null, null, null, null)
+                : eventContextBuilder.build(permissions, target.settings(), sessionId, null, null, root);
         emitter.emit(new ToolUsePreEvent(
                 eventContext, name, args, call.id(), toolUseResult, permissions, tool.category(), tool.readonly()));
         if (toolUseResult.forbidden()) {
@@ -543,7 +635,11 @@ public class BtwAnswerer {
                 cancelled,
                 target.settings(),
                 null,
-                null);
+                root,
+                -1,
+                offeredTools,
+                null,
+                effectiveToolRegistry);
         final var result = toolExecutionService.execute(tool, args, context);
         final var output = result.output() == null || result.output().isBlank() ? "(no output)" : result.output();
         return new ToolOutcome(call.id(), capIngestionOutput(output), result.success());
@@ -553,6 +649,7 @@ public class BtwAnswerer {
 
     private static boolean allowedTool(final EmbeddedTool tool) {
         return tool.category() == ToolCategory.READ
+                || (tool.category() == ToolCategory.MCP && tool.readonly())
                 || tool.category() == ToolCategory.BASH
                 || "ask_user".equals(tool.name());
     }
@@ -650,8 +747,12 @@ public class BtwAnswerer {
     }
 
     /** The tools the main loop declares for the session: the full wire schema, never filtered to a btw-only set. */
-    private List<Tool> wireBtwTools() {
-        return toolRegistry == null ? List.of() : toolRegistry.toWireTools();
+    private List<Tool> wireBtwTools(
+            final Path root, final ToolRegistry effectiveToolRegistry, final Set<String> allowedTools) {
+        return effectiveToolRegistry == null
+                ? List.of()
+                : effectiveToolRegistry.toWireTools(
+                        root, tool -> allowedTools == null || allowedTools.contains(tool.name()));
     }
 
     /** Renders the tool-attempt fallback: the leftover intro plus an explicit, honest note (Claude-Code style). */

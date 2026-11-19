@@ -19,6 +19,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.fusion.json.JsonMapper;
@@ -30,6 +31,7 @@ import io.yupiik.ia.agent.core.llm.ChatSettings;
 import io.yupiik.ia.agent.core.llm.Usage;
 import io.yupiik.ia.agent.core.permissions.ApprovalGate;
 import io.yupiik.ia.agent.core.question.UserFeedbackService;
+import io.yupiik.ia.agent.core.session.InMemorySessionStore;
 import io.yupiik.ia.agent.core.session.SessionStore;
 import io.yupiik.ia.agent.core.shell.SessionLifecycle;
 import io.yupiik.ia.agent.core.shell.SessionRuntimeFactory;
@@ -38,11 +40,14 @@ import io.yupiik.ia.agent.core.shell.ShellRegistry;
 import io.yupiik.ia.agent.core.shell.TurnRunner;
 import io.yupiik.ia.agent.core.shell.btw.BtwAnswerer;
 import io.yupiik.ia.agent.core.shell.slash.SlashRegistry;
+import io.yupiik.ia.agent.core.tools.ToolRegistry;
 import io.yupiik.ia.agent.core.wiring.PrecisionDurationMarkerProvider;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Clock;
 import java.util.Map;
 import java.util.Queue;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.ConcurrentHashMap;
@@ -70,6 +75,7 @@ class WebSessionManagerBtwTest {
     private WebSessionManager manager;
     private FakeSseBroker broker;
     private FakeBtwAnswerer answerer;
+    private SessionStore sessionStore;
 
     @BeforeEach
     void setup(final JsonMapper mapper) {
@@ -82,8 +88,9 @@ class WebSessionManagerBtwTest {
         final var configuration = CodingAgentConfigurations.builder()
                 .baseUrl("http://localhost:0")
                 .storageHome(storageHome.toString())
+                .custom(Map.of("yca.workingDir", storageHome.toString()))
                 .build();
-        final var sessionStore = new SessionStore() {};
+        sessionStore = new InMemorySessionStore(Clock.systemUTC());
         final var runtimeFactory = new SessionRuntimeFactory(
                 null,
                 null,
@@ -133,6 +140,7 @@ class WebSessionManagerBtwTest {
                     answerer.pending.values().forEach(future -> future.cancel(false));
                     answerer.pending.clear();
                     answerer.cancelled.clear();
+                    answerer.requests.clear();
                 }
             } finally {
                 if (broker != null) {
@@ -169,6 +177,48 @@ class WebSessionManagerBtwTest {
         assertEquals("what is xyz?", state.question());
         assertEquals("**the answer**", state.answer());
         assertFalse(state.running());
+    }
+
+    @Test
+    void btwKeepsEachSessionsRuntimeRootSettingsAndCancellationAcrossABA() throws Exception {
+        final var first = Files.createDirectories(storageHome.resolve("first"));
+        final var second = Files.createDirectories(storageHome.resolve("second"));
+        sessionStore.markProject("a", first.toString());
+        sessionStore.markProject("b", second.toString());
+        final var a = manager.runtime("a");
+        final var b = manager.runtime("b");
+        final var aSettings = new ChatSettings("a", "model-a", null, null);
+        final var bSettings = new ChatSettings("b", "model-b", null, null);
+        a.updateChatSettings(aSettings);
+        b.updateChatSettings(bSettings);
+        sessionStore.replaceProject("a", second.toString());
+
+        manager.slash("a", "/btw first-a").join();
+        manager.slash("b", "/btw first-b").join();
+        manager.slash("a", "/btw second-a").join();
+
+        assertEquals(first, answerer.requests.get("first-a").workdir());
+        assertEquals(second, answerer.requests.get("first-b").workdir());
+        assertEquals(first, answerer.requests.get("second-a").workdir());
+        assertEquals(aSettings, answerer.requests.get("first-a").settings());
+        assertEquals(bSettings, answerer.requests.get("first-b").settings());
+        assertEquals(aSettings, answerer.requests.get("second-a").settings());
+        assertSame(a.usage(), answerer.requests.get("second-a").usage());
+        assertSame(a.systemPromptBuilder(), answerer.requests.get("second-a").prompt());
+        assertSame(b.usage(), answerer.requests.get("first-b").usage());
+        assertSame(
+                a.loop().effectiveToolRegistry(),
+                answerer.requests.get("second-a").registry());
+        assertSame(
+                b.loop().effectiveToolRegistry(),
+                answerer.requests.get("first-b").registry());
+        assertEquals(
+                a.loop().availableToolNames(), answerer.requests.get("second-a").ceiling());
+        assertEquals(
+                b.loop().availableToolNames(), answerer.requests.get("first-b").ceiling());
+        assertTrue(answerer.cancelledSupplier("first-a").getAsBoolean());
+        assertFalse(answerer.cancelledSupplier("first-b").getAsBoolean());
+        assertFalse(answerer.cancelledSupplier("second-a").getAsBoolean());
     }
 
     @Test
@@ -389,12 +439,21 @@ class WebSessionManagerBtwTest {
         }
     }
 
-    /** Controllable {@code BtwAnswerer}: overrides the 6-arg ask to return per-question futures. */
+    /** Controllable {@code BtwAnswerer}: returns per-question futures from the rooted request. */
     private static final class FakeBtwAnswerer extends BtwAnswerer {
         private final Map<String, CompletableFuture<BtwAnswerer.BtwAnswer>> pending = new ConcurrentHashMap<>();
         // the real cancellation supplier the manager passed in, keyed by question - so a canceled test
         // reflects the actual override/clear the production code performs on the BtwState it owns.
         private final Map<String, BooleanSupplier> cancelled = new ConcurrentHashMap<>();
+        private final Map<String, Request> requests = new ConcurrentHashMap<>();
+
+        private record Request(
+                Path workdir,
+                ChatSettings settings,
+                UsageTracker usage,
+                SystemPromptBuilder prompt,
+                ToolRegistry registry,
+                Set<String> ceiling) {}
 
         private FakeBtwAnswerer() {
             super(null, null, null, null, null, null, null, null, null, null, null, null, null, null, null);
@@ -407,7 +466,8 @@ class WebSessionManagerBtwTest {
                 final UsageTracker usage,
                 final BooleanSupplier cancelled,
                 final ApprovalGate sessionGate,
-                final ChatSettings sessionSettings) {
+                final ChatSettings sessionSettings,
+                final Path workdir) {
             this.pending.put(question, new CompletableFuture<>());
             this.cancelled.put(question, cancelled);
             return this.pending.get(question);
@@ -422,8 +482,15 @@ class WebSessionManagerBtwTest {
                 final ApprovalGate sessionGate,
                 final ChatSettings sessionSettings,
                 final SystemPromptBuilder systemPromptBuilder,
-                final UserFeedbackService feedback) {
-            return ask(question, sessionId, usage, cancelled, sessionGate, sessionSettings);
+                final UserFeedbackService feedback,
+                final Path workdir,
+                final ToolRegistry registry,
+                final Set<String> ceiling) {
+            assertNotNull(ceiling);
+            requests.put(
+                    question,
+                    new Request(workdir, sessionSettings, usage, systemPromptBuilder, registry, Set.copyOf(ceiling)));
+            return ask(question, sessionId, usage, cancelled, sessionGate, sessionSettings, workdir);
         }
 
         private BooleanSupplier cancelledSupplier(final String question) {

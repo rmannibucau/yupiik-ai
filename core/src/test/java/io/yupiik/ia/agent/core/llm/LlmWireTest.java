@@ -41,10 +41,13 @@ import java.util.logging.Handler;
 import java.util.logging.Level;
 import java.util.logging.LogRecord;
 import java.util.logging.Logger;
+import java.util.regex.Pattern;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
 class LlmWireTest {
+    private static final Pattern DANGLING_CAUSE_SEPARATOR = Pattern.compile(".*NullPointerException:\\s.*");
+
     @Test
     void usageConversionPreservesFullInputWithoutChangingRawCounters() {
         final var usage = LlmWire.toUsage(new Usage(5L, 2L, 7L, 100L, 20L, null, null, 125L));
@@ -433,7 +436,7 @@ class LlmWireTest {
                 MidStreamFailureException.class, () -> LlmWire.pump(failing, event -> {}, () -> false));
         assertTrue(ex.getMessage().contains("NullPointerException"), ex.getMessage());
         assertFalse(
-                ex.getMessage().matches(".*NullPointerException:\\s.*"),
+                DANGLING_CAUSE_SEPARATOR.matcher(ex.getMessage()).matches(),
                 "no dangling ': ' after the cause class: " + ex.getMessage());
     }
 

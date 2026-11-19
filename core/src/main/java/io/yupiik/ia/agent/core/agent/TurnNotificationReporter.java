@@ -22,7 +22,9 @@ import io.yupiik.ia.agent.core.notifications.NotificationService;
 import io.yupiik.ia.agent.core.session.SessionStore;
 import io.yupiik.ia.agent.core.wiring.PrecisionDurationMarkerProvider;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
+import java.nio.file.Path;
 import java.util.List;
+import java.util.Objects;
 import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
@@ -37,6 +39,7 @@ import java.util.regex.Pattern;
 public final class TurnNotificationReporter {
     private static final Pattern WHITESPACE = Pattern.compile("\\s+");
 
+    private final Path workdir;
     private final TurnState turnState;
     private final PrecisionDurationMarkerProvider precisionDurationMarker;
     private final NotificationService notificationService;
@@ -60,7 +63,9 @@ public final class TurnNotificationReporter {
             final Supplier<String> subagentName,
             final BooleanSupplier lastTurnEndedWithContent,
             final Consumer<Boolean> lastTurnEndedWithContentSetter,
-            final Consumer<AgentEvent> emit) {
+            final Consumer<AgentEvent> emit,
+            final Path workdir) {
+        this.workdir = Objects.requireNonNull(workdir, "workdir");
         this.turnState = turnState;
         this.precisionDurationMarker = precisionDurationMarker;
         this.notificationService = notificationService;
@@ -224,11 +229,12 @@ public final class TurnNotificationReporter {
                         turnState.outputEstimated),
                 currentSessionId.get(),
                 subagentId.get(),
-                subagentName.get());
+                subagentName.get(),
+                workdir);
     }
 
     private AgentEvent.TurnDone turnDone(final String content) {
-        return new AgentEvent.TurnDone(content, currentSessionId.get(), subagentId.get(), subagentName.get());
+        return new AgentEvent.TurnDone(content, currentSessionId.get(), subagentId.get(), subagentName.get(), workdir);
     }
 
     private static String str(final Object content) {

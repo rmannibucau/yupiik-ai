@@ -40,6 +40,7 @@ import io.yupiik.ia.agent.core.llm.ChatCompletionRequest;
 import io.yupiik.ia.agent.core.llm.Message;
 import io.yupiik.ia.agent.core.llm.Tool;
 import io.yupiik.ia.agent.core.tools.EmbeddedTool;
+import io.yupiik.ia.agent.core.tools.ToolContext;
 import io.yupiik.ia.agent.core.wiring.HttpClientProducer;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import io.yupiik.ia.agent.github.configuration.AgentContextConfiguration;
@@ -121,7 +122,7 @@ class ContextToolWireTest {
                                 .httpClient(config, new NativeProviderConfiguration(null, null));
                         final var client = new ChatClient(
                                 config, json, new ProviderManager(config, json), Clock.systemUTC(), http)) {
-                    final var response = client.chat(request(provider, model, tools));
+                    final var response = client.chat(request(provider, model, tools, home));
                     assertEquals(List.of(route(api)), paths, "explicit API must not probe or fall back");
                     assertEquals(1, requests.size());
                     final var wire = requests.getFirst();
@@ -178,7 +179,7 @@ class ContextToolWireTest {
                                 .filter(tool -> tool.name().equals(fixture.tool()))
                                 .findFirst()
                                 .orElseThrow();
-                        final var result = runtime.execute(arguments);
+                        final var result = runtime.execute(arguments, ToolContext.empty(home));
                         // Capability is intentionally disabled: valid arguments pass runtime validation,
                         // while invalid model output must be rejected before any transport/fallback.
                         assertEquals(
@@ -328,7 +329,7 @@ class ContextToolWireTest {
     }
 
     private static ChatCompletionRequest request(
-            final String provider, final String model, final List<EmbeddedTool> tools) {
+            final String provider, final String model, final List<EmbeddedTool> tools, final Path root) {
         return new ChatCompletionRequest(
                 "$" + provider + "/" + model,
                 List.of(Message.user("Read the pinned context using only these tools.")),
@@ -336,7 +337,7 @@ class ContextToolWireTest {
                 null,
                 false,
                 tools.stream()
-                        .map(tool -> Tool.function(tool.name(), tool.description(), tool.schema()))
+                        .map(tool -> Tool.function(tool.name(), tool.description(root), tool.schema()))
                         .toList(),
                 null,
                 512,

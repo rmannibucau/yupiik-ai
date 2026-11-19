@@ -22,6 +22,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.fusion.framework.api.event.Emitter;
 import io.yupiik.ia.agent.core.configuration.TestConfigs;
+import io.yupiik.ia.agent.core.runtime.Cancellations;
+import io.yupiik.ia.agent.core.tools.ToolContext;
 import io.yupiik.maven.knowledge.process.ProcessService;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -38,6 +40,8 @@ import org.junit.jupiter.api.io.TempDir;
  * fast and never sleeps on the real 30s.
  */
 class BashToolProcessTest {
+    @TempDir
+    private static Path testWorkdir;
 
     @Test
     void defaultTimeoutIsDocumentedInTheSchema() {
@@ -81,20 +85,8 @@ class BashToolProcessTest {
         Files.createDirectories(projectDir);
         final var sentinel = tmp.resolve("pwd.txt");
         final var bash = new BashTool(NOOP, new ProcessService());
-        final var ctx = new io.yupiik.ia.agent.core.tools.ToolContext(
-                null,
-                null,
-                null,
-                null,
-                null,
-                null,
-                null,
-                null,
-                null,
-                io.yupiik.ia.agent.core.runtime.Cancellations.NEVER,
-                null,
-                null,
-                projectDir);
+        final var ctx = new ToolContext(
+                null, null, null, null, null, null, null, null, null, Cancellations.NEVER, null, null, projectDir);
 
         final var result = bash.execute(Map.of("command", "pwd > " + sentinel), ctx);
         assertTrue(result.success(), "the command must run: " + result.output());
@@ -113,20 +105,8 @@ class BashToolProcessTest {
         Files.createDirectories(override);
         final var sentinel = tmp.resolve("pwd.txt");
         final var bash = new BashTool(NOOP, new ProcessService());
-        final var ctx = new io.yupiik.ia.agent.core.tools.ToolContext(
-                null,
-                null,
-                null,
-                null,
-                null,
-                null,
-                null,
-                null,
-                null,
-                io.yupiik.ia.agent.core.runtime.Cancellations.NEVER,
-                null,
-                null,
-                projectDir);
+        final var ctx = new ToolContext(
+                null, null, null, null, null, null, null, null, null, Cancellations.NEVER, null, null, projectDir);
 
         final var result = bash.execute(Map.of("command", "pwd > " + sentinel, "workdir", override.toString()), ctx);
         assertTrue(result.success(), "the command must run: " + result.output());
@@ -137,10 +117,56 @@ class BashToolProcessTest {
     }
 
     @Test
+    void relativeWorkdirIsResolvedPerSessionNotAgainstConfiguredRoot(@TempDir final Path tmp) throws Exception {
+        Assumptions.assumeTrue(!System.getProperty("os.name", "").toLowerCase().contains("win"));
+        final var configured =
+                Files.createDirectories(tmp.resolve("configured/nested")).getParent();
+        final var first = Files.createDirectories(tmp.resolve("first/nested")).getParent();
+        final var second = Files.createDirectories(tmp.resolve("second/nested")).getParent();
+        final var bash = new BashTool(
+                NOOP,
+                new ProcessService(),
+                TestConfigs.codingAgent(Map.of("yca.workingDir", configured.toString())),
+                null);
+        for (final var root : new Path[] {first, second, first}) {
+            final var result = bash.execute(
+                    Map.of("command", "pwd", "workdir", "./nested/../nested"), contextWithProjectDir(root.toString()));
+            assertTrue(result.success(), result.output());
+            assertTrue(result.output().contains(root.resolve("nested").toString()), result.output());
+            assertFalse(result.output().contains(configured.toString()), result.output());
+        }
+        final var explicit = bash.execute(Map.of("command", "pwd", "workdir", "nested"), ToolContext.empty(configured));
+        assertTrue(explicit.success(), explicit.output());
+        assertTrue(explicit.output().contains(configured.resolve("nested").toString()), explicit.output());
+    }
+
+    @Test
+    void missingRelativeExplicitWorkdirDoesNotFallBack(@TempDir final Path tmp) throws Exception {
+        Assumptions.assumeTrue(!System.getProperty("os.name", "").toLowerCase().contains("win"));
+        final var configured =
+                Files.createDirectories(tmp.resolve("configured/nested")).getParent();
+        final var project = Files.createDirectories(tmp.resolve("project"));
+        final var bash = new BashTool(
+                NOOP,
+                new ProcessService(),
+                TestConfigs.codingAgent(Map.of("yca.workingDir", configured.toString())),
+                null);
+        final var result =
+                bash.execute(Map.of("command", "pwd", "workdir", "nested"), contextWithProjectDir(project.toString()));
+        assertFalse(result.success(), result.output());
+        assertEquals("workdir '" + project.resolve("nested") + "' does not exist", result.output());
+        final var stale = bash.execute(
+                Map.of("command", "pwd", "workdir", "nested"),
+                contextWithProjectDir(tmp.resolve("gone").toString()));
+        assertFalse(stale.success(), stale.output());
+        assertEquals("workdir '" + tmp.resolve("gone/nested") + "' does not exist", stale.output());
+    }
+
+    @Test
     void missingExplicitWorkdirReturnsAnActionableError() {
         Assumptions.assumeTrue(!System.getProperty("os.name", "").toLowerCase().contains("win"));
         final var bash = new BashTool(NOOP, new ProcessService());
-        final var missing = java.nio.file.Path.of("/definitely/not/here/" + System.nanoTime());
+        final var missing = Path.of("/definitely/not/here/" + System.nanoTime());
         final var result = bash.execute(Map.of("command", "pwd", "workdir", missing.toString()), context());
         assertFalse(result.success(), "a missing explicit workdir must be rejected: " + result.output());
         assertTrue(
@@ -149,44 +175,27 @@ class BashToolProcessTest {
     }
 
     @Test
-    void missingSessionDirFallsBackToTheConfiguredWorkdirWithANotice(@TempDir final Path tmp) throws Exception {
+    void missingSessionDirectoryDoesNotFallBackToConfiguredRoot(@TempDir final Path tmp) throws Exception {
         Assumptions.assumeTrue(!System.getProperty("os.name", "").toLowerCase().contains("win"));
-        final var configDir = tmp.resolve("config");
-        Files.createDirectories(configDir);
-        final var sentinel = tmp.resolve("pwd.txt");
+        final var configDir = Files.createDirectories(tmp.resolve("config"));
         final var bash = new BashTool(
                 NOOP, new ProcessService(), TestConfigs.codingAgent(Map.of("yca.workingDir", configDir.toString())));
-        final var missingProject = tmp.resolve("project");
-        // project dir recorded but gone: only the configured dir remains as a live candidate
-        final var ctx = contextWithProjectDir(missingProject.toString());
-
-        final var result = bash.execute(Map.of("command", "pwd > " + sentinel), ctx);
-        assertTrue(result.success(), "the command must fall back and run: " + result.output());
-        assertEquals(
-                configDir.toAbsolutePath().normalize().toString(),
-                Files.readString(sentinel).strip(),
-                "the configured working dir must be used when the session project dir is stale");
-        assertTrue(
-                result.output().contains("not found") && result.output().contains("using"),
-                "the deviation must be surfaced in the output: " + result.output());
+        final var missingProject = tmp.resolve("gone");
+        final var result = bash.execute(Map.of("command", "pwd"), contextWithProjectDir(missingProject.toString()));
+        assertFalse(result.success(), result.output());
+        assertTrue(result.output().contains(missingProject.toString()), result.output());
     }
 
     @Test
-    void missingSessionDirWithNoConfigFallsBackToTheJvmCwdWithANotice(@TempDir final Path tmp) throws Exception {
+    void missingSessionDirectoryDoesNotFallBackToProcessRoot(@TempDir final Path tmp) throws Exception {
         Assumptions.assumeTrue(!System.getProperty("os.name", "").toLowerCase().contains("win"));
-        final var bash = new BashTool(NOOP, new ProcessService()); // no configured fallback
+        final var configDir = Files.createDirectories(tmp.resolve("config"));
+        final var bash = new BashTool(
+                NOOP, new ProcessService(), TestConfigs.codingAgent(Map.of("yca.workingDir", configDir.toString())));
         final var missingProject = tmp.resolve("gone");
-        final var sentinel = tmp.resolve("pwd.txt");
-        final var ctx = contextWithProjectDir(missingProject.toString());
-
-        final var result = bash.execute(Map.of("command", "pwd > " + sentinel), ctx);
-        assertTrue(result.success(), "the command must run in the JVM cwd: " + result.output());
-        assertTrue(
-                Files.readString(sentinel).strip().startsWith("/"),
-                "the JVM working directory must be an absolute path: " + result.output());
-        assertTrue(
-                result.output().contains("JVM working directory"),
-                "the JVM-cwd fallback must be reported: " + result.output());
+        final var result = bash.execute(Map.of("command", "pwd"), contextWithProjectDir(missingProject.toString()));
+        assertFalse(result.success(), result.output());
+        assertTrue(result.output().contains(missingProject.toString()), result.output());
     }
 
     @Test
@@ -232,26 +241,14 @@ class BashToolProcessTest {
                 "the missing-pin deviation must be reported: " + result.output());
     }
 
-    private static io.yupiik.ia.agent.core.tools.ToolContext contextWithProjectDir(final String projectDir) {
-        final var dir = java.nio.file.Path.of(projectDir).toAbsolutePath().normalize();
-        return new io.yupiik.ia.agent.core.tools.ToolContext(
-                null,
-                null,
-                null,
-                null,
-                null,
-                null,
-                null,
-                null,
-                null,
-                io.yupiik.ia.agent.core.runtime.Cancellations.NEVER,
-                null,
-                null,
-                dir);
+    private static ToolContext contextWithProjectDir(final String projectDir) {
+        final var dir = Path.of(projectDir).toAbsolutePath().normalize();
+        return new ToolContext(
+                null, null, null, null, null, null, null, null, null, Cancellations.NEVER, null, null, dir);
     }
 
-    private static io.yupiik.ia.agent.core.tools.ToolContext context() {
-        return io.yupiik.ia.agent.core.tools.ToolContext.empty();
+    private static ToolContext context() {
+        return ToolContext.empty(testWorkdir);
     }
 
     private static Long awaitPid(final Path pidFile) throws Exception {

@@ -24,7 +24,9 @@ import io.yupiik.ia.agent.core.mcp.WebSearchManager;
 import io.yupiik.ia.agent.core.tools.EmbeddedTool;
 import io.yupiik.ia.agent.core.tools.Schemas;
 import io.yupiik.ia.agent.core.tools.ToolCategory;
+import io.yupiik.ia.agent.core.tools.ToolContext;
 import io.yupiik.ia.agent.core.tools.ToolResult;
+import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
 import java.util.StringJoiner;
@@ -53,7 +55,7 @@ public class WebSearchTool implements EmbeddedTool {
     }
 
     @Override
-    public String description() {
+    public String description(final Path workdir) {
         return "Search the web and return a list of results with title, url, snippet and optional publish date. "
                 + "Uses the configured MCP web search providers (exa, parallel, firecrawl, tinyfish) "
                 + "with automatic fallback between them.";
@@ -71,7 +73,7 @@ public class WebSearchTool implements EmbeddedTool {
 
     /** Whether at least one provider is enabled; the tool is hidden from the model when false. */
     @Override
-    public boolean usable() {
+    public boolean usable(final Path workdir) {
         return manager != null && manager.hasEnabledProviders();
     }
 
@@ -85,12 +87,12 @@ public class WebSearchTool implements EmbeddedTool {
     }
 
     @Override
-    public ToolResult execute(final Map<String, Object> args) {
+    public ToolResult execute(final Map<String, Object> args, final ToolContext context) {
         final var query = arg(args, "query");
         if (query == null || query.isBlank()) {
             return ToolResult.error("query is required");
         }
-        if (!usable()) {
+        if (!usable(context.projectDir())) {
             return ToolResult.error("websearch is disabled: no provider is enabled (yca.tools.websearch.providers)");
         }
         final var numResults = (int) Math.max(

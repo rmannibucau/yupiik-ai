@@ -482,7 +482,7 @@ class WebSearchManagerTest {
                                     "jsonrpc",
                                     "2.0",
                                     "id",
-                                    1,
+                                    ((Map<?, ?>) mapper.fromString(Object.class, body)).get("id"),
                                     "result",
                                     Map.of("content", List.of(Map.of("type", "text", "text", payload))))),
                             null);

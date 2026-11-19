@@ -31,11 +31,15 @@ import io.yupiik.ia.agent.core.llm.ChatCompletionRequest;
 import io.yupiik.ia.agent.core.llm.ChatResult;
 import io.yupiik.ia.agent.core.llm.ChatSettings;
 import io.yupiik.ia.agent.core.llm.Message;
+import io.yupiik.ia.agent.core.llm.ToolCall;
+import io.yupiik.ia.agent.core.llm.ToolCall.FunctionCall;
 import io.yupiik.ia.agent.core.llm.Usage;
+import io.yupiik.ia.agent.core.memory.MemoryCompactor;
 import io.yupiik.ia.agent.core.memory.MemoryProductionPolicy;
 import io.yupiik.ia.agent.core.memory.MemoryStore;
 import io.yupiik.ia.agent.test.TestJsonMapper;
 import java.io.IOException;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Clock;
 import java.time.LocalDate;
@@ -89,6 +93,126 @@ class MemoryExtractorTest {
     }
 
     @Test
+    void closeExtractionIsolatesRootsForStructuredAndBothPlainFallbacks() {
+        final var config = config(home);
+        final var store = new MemoryStore(config);
+        final var alpha = home.resolve("alpha");
+        final var beta = home.resolve("beta");
+        for (final var mode : List.of("structured", "unsupported", "wire-failure")) {
+            for (final var root : List.of(alpha, beta, home)) {
+                final var label = mode + " " + root.getFileName();
+                final var chat = new ChatClient() {
+                    @Override
+                    public StructuredResult chatStructured(
+                            final ChatCompletionRequest request,
+                            final String schemaName,
+                            final Map<String, Object> schema)
+                            throws IOException {
+                        if ("wire-failure".equals(mode)) {
+                            throw new IOException("structured response failed");
+                        }
+                        return new StructuredResult(
+                                new ChatResult(
+                                        Message.assistant(
+                                                "{\"facts\":[{\"text\":\"" + label
+                                                        + " project decision\",\"scope\":\"project\"}," + "{\"text\":\""
+                                                        + label + " global preference\",\"scope\":\"global\"}]}",
+                                                null),
+                                        new Usage(0, 0, 0)),
+                                "structured".equals(mode));
+                    }
+
+                    @Override
+                    public ChatResult chat(final ChatCompletionRequest request) {
+                        return new ChatResult(
+                                Message.assistant(label + " fallback decision", null), new Usage(0, 0, 0));
+                    }
+                };
+                final var extractor = new MemoryExtractor(
+                        chat,
+                        config,
+                        null,
+                        store,
+                        mapper,
+                        EXECUTOR,
+                        null,
+                        Clock.systemUTC(),
+                        null,
+                        label,
+                        null,
+                        null,
+                        null,
+                        root);
+                assertTrue(extractor.forceExtractNow(List.of(Message.user("a durable project decision"))));
+                final var text = store.readProject(root);
+                assertTrue(text.contains(label), text);
+                assertFalse(store.readProject(root.equals(alpha) ? beta : alpha).contains(label));
+                if (!root.equals(home)) {
+                    assertFalse(store.readProject(config.resolveWorkingDir()).contains(label));
+                }
+                if ("structured".equals(mode)) {
+                    assertTrue(store.readGlobal().contains(label + " global preference"));
+                    assertFalse(text.contains("global preference"));
+                }
+            }
+        }
+    }
+
+    @Test
+    void asyncExtractionPropagatesRootToCompactionAndCloseKeepsThatRoot() throws Exception {
+        final var config = config(home);
+        final var store = new MemoryStore(config);
+        final var root = home.resolve("session-project");
+        final var file = MemoryStore.projectFile(root);
+        final var original = MemoryStore.HEADER + "- old durable project observation\n".repeat(2400);
+        Files.createDirectories(file.getParent());
+        Files.writeString(file, original);
+        final var extractionCalls = new AtomicInteger();
+        final var chat = new ChatClient() {
+            @Override
+            public StructuredResult chatStructured(
+                    final ChatCompletionRequest request, final String schemaName, final Map<String, Object> schema) {
+                final var facts = extractionCalls.getAndIncrement() == 0
+                        ? "{\"facts\":[]}"
+                        : "{\"facts\":[{\"text\":\"close-time deployment rule\",\"scope\":\"project\"}]}";
+                return new StructuredResult(new ChatResult(Message.assistant(facts, null), new Usage(0, 0, 0)), true);
+            }
+
+            @Override
+            public ChatResult chat(final ChatCompletionRequest request) {
+                return new ChatResult(Message.assistant("- session architecture", null), new Usage(0, 0, 0));
+            }
+        };
+        final var compactor = new MemoryCompactor(chat, config, store, null, null);
+        final var extractor = new MemoryExtractor(
+                chat,
+                config,
+                null,
+                store,
+                mapper,
+                EXECUTOR,
+                null,
+                Clock.systemUTC(),
+                null,
+                "root-test",
+                compactor,
+                null,
+                null,
+                root);
+
+        extractor.asyncExtractNow(List.of(Message.user("a durable project decision")));
+        EXECUTOR.submit(() -> {}).get();
+        assertTrue(Files.exists(file.resolveSibling("MEMORY.md.bak")));
+        assertNotNull(compactor.state(root));
+        assertTrue(store.readProject(config.resolveWorkingDir()).isBlank());
+        assertTrue(store.readProject(root).contains("session architecture"));
+        assertTrue(extractor.forceExtractNow(List.of(
+                Message.user("a durable project decision"), Message.user("another durable decision at close"))));
+        assertTrue(store.readProject(root).contains("close-time deployment rule"));
+        assertTrue(store.readProject(config.resolveWorkingDir()).isBlank());
+    }
+
+    @Test
     void structuredFailureFallsBackToSnippetAndWarnsWithContext() throws Exception {
         final var config = config(home);
         final var store = new MemoryStore(config);
@@ -133,7 +257,8 @@ class MemoryExtractorTest {
                 "s-test",
                 null,
                 null, // memory production policy (default: enabled)
-                null);
+                null,
+                (config).resolveWorkingDir());
         extractor.asyncExtractNow(List.of(Message.user("user said: the project now uses tabs")), ChatSettings.EMPTY);
         assertTrue(done.await(5, TimeUnit.SECONDS), "the extractor must emit a notice");
         // extraction is buffered on the background executor (never touches the live on-disk store):
@@ -154,7 +279,7 @@ class MemoryExtractorTest {
                 notice.message().contains("saving a plain snippet instead"),
                 "the notice must mention the fallback: " + notice.message());
         // the fallback snippet path must still save memory (after the flush boundary)
-        final var project = store.readProject();
+        final var project = store.readProject(config.resolveWorkingDir());
         assertTrue(project.contains("a durable fact"), "the fallback snippet must be saved: " + project);
     }
 
@@ -204,7 +329,8 @@ class MemoryExtractorTest {
                 "s-test",
                 null,
                 null, // memory production policy (default: enabled)
-                null);
+                null,
+                (config).resolveWorkingDir());
         // two consecutive passes over a growing transcript (the watermark advances after each pass, so a
         // fresh delta is required - mirroring deltaExtractsOnlyNewMessages), both ending in the
         // structured=false plain-snippet fallback
@@ -264,7 +390,8 @@ class MemoryExtractorTest {
                 "s-test",
                 null,
                 null, // memory production policy (default: enabled)
-                null);
+                null,
+                (config).resolveWorkingDir());
         // two consecutive passes over a growing transcript, both salvaged via the plain snippet
         final var messages = new ArrayList<Message>();
         messages.add(Message.user("user said: project uses tabs now"));
@@ -276,7 +403,7 @@ class MemoryExtractorTest {
                 .filter(e -> e instanceof AgentEvent.Notice notice && notice.level() == AgentEvent.Notice.Level.WARN)
                 .count();
         assertEquals(1, warns, "a persistent wire-failure salvage must warn exactly once across the streak: " + events);
-        final var project = store.readProject();
+        final var project = store.readProject(config.resolveWorkingDir());
         assertTrue(
                 project.contains("a durable fact about the project"),
                 "the fallback snippet must still be saved on every pass: " + project);
@@ -326,7 +453,8 @@ class MemoryExtractorTest {
                 "s-test",
                 null,
                 null, // memory production policy (default: enabled)
-                null);
+                null,
+                (config).resolveWorkingDir());
         extractor.asyncExtractNow(List.of(Message.user("user said: we use tabs now")), ChatSettings.EMPTY);
         assertTrue(done.await(5, TimeUnit.SECONDS), "the extractor must emit a notice");
         awaitFlushedFact(store, "the team standard is tabs");
@@ -346,7 +474,7 @@ class MemoryExtractorTest {
         assertTrue(
                 notice.cause().getMessage().contains("unparseable response"),
                 "the cause must be the thrown IOException: " + notice.cause());
-        final var project = store.readProject();
+        final var project = store.readProject(config.resolveWorkingDir());
         assertTrue(project.contains("the team standard is tabs"), "the fallback snippet must be saved: " + project);
     }
 
@@ -387,7 +515,8 @@ class MemoryExtractorTest {
                 "s-delta",
                 null,
                 null, // memory production policy (default: enabled)
-                null);
+                null,
+                (config).resolveWorkingDir());
         final var messages = new ArrayList<Message>();
         messages.add(Message.user("first message: use tabs"));
         extractor.forceExtractNow(messages, ChatSettings.EMPTY);
@@ -445,9 +574,10 @@ class MemoryExtractorTest {
                 "s-meta",
                 null,
                 null, // memory production policy (default: enabled)
-                null);
+                null,
+                (config).resolveWorkingDir());
         extractor.forceExtractNow(List.of(Message.user("the team decided: always use tabs")), ChatSettings.EMPTY);
-        final var project = store.readProject();
+        final var project = store.readProject(config.resolveWorkingDir());
         // stored as a metadata envelope: <p>|<date>|@<path>|<topic>|<text>
         assertTrue(
                 project.contains("3|" + LocalDate.now() + "|@src/App.java|code style|always use tabs"),
@@ -490,7 +620,8 @@ class MemoryExtractorTest {
                 "s-min",
                 null,
                 null, // memory production policy (default: enabled)
-                null);
+                null,
+                (config).resolveWorkingDir());
         // re-enable the default 1000-char gate for this test: config() sets it to 0 so the
         // async extraction tests fire, but this test wants the gate active
         final var map = new HashMap<String, String>();
@@ -518,7 +649,8 @@ class MemoryExtractorTest {
                 "s-min",
                 null,
                 null, // memory production policy (default: enabled)
-                null);
+                null,
+                (TestConfigs.codingAgent(map)).resolveWorkingDir());
         // tiny delta below the default 1000-char gate: no call (end-of-turn path only)
         gated.asyncExtractNow(List.of(Message.user("hi")), ChatSettings.EMPTY);
         EXECUTOR.submit(() -> {}).get(5, TimeUnit.SECONDS);
@@ -564,7 +696,8 @@ class MemoryExtractorTest {
                 "s-disabled",
                 null,
                 policy,
-                null);
+                null,
+                (config).resolveWorkingDir());
         // neither the end-of-turn hook nor the session-close forced pass may mine anything
         extractor.asyncExtractNow(List.of(Message.user("a durable fact appears here")), ChatSettings.EMPTY, true);
         EXECUTOR.submit(() -> {}).get(5, TimeUnit.SECONDS);
@@ -573,7 +706,8 @@ class MemoryExtractorTest {
                 extractor.forceExtractNow(List.of(Message.user("a durable fact appears here"))),
                 "forced pass is a no-op when disabled");
         assertEquals(0, calls.get(), "the forced pass must not call the LLM either");
-        assertTrue(store.readProject().isBlank(), "nothing may reach the store while disabled");
+        assertTrue(
+                store.readProject(config.resolveWorkingDir()).isBlank(), "nothing may reach the store while disabled");
     }
 
     @Test
@@ -623,7 +757,8 @@ class MemoryExtractorTest {
                 "s-forced",
                 null,
                 null, // memory production policy (default: enabled)
-                null);
+                null,
+                (gatedConfig).resolveWorkingDir());
         // a below-threshold delta must still be extracted when forced (session close)
         final var messages = new ArrayList<Message>();
         messages.add(Message.user("short"));
@@ -642,17 +777,22 @@ class MemoryExtractorTest {
                     "s-short-async",
                     null,
                     null,
-                    null);
+                    null,
+                    (gatedConfig).resolveWorkingDir());
             gated.asyncExtractNow(messages);
             executor.submit(() -> {}).get(5, TimeUnit.SECONDS);
-            assertTrue(store.readProject().isBlank(), "the background pass must honor the threshold");
+            assertTrue(
+                    store.readProject(config.resolveWorkingDir()).isBlank(),
+                    "the background pass must honor the threshold");
             assertTrue(gated.forceExtractNow(messages), "the skipped delta must remain eligible at close");
-            assertTrue(store.readProject().contains("short preference"));
+            assertTrue(store.readProject(config.resolveWorkingDir()).contains("short preference"));
             assertFalse(gated.forceExtractNow(messages));
         }
         final var ran = extractor.forceExtractNow(messages, ChatSettings.EMPTY);
         assertTrue(ran, "the forced pass must run on a non-empty delta");
-        assertTrue(store.readProject().contains("short preference"), "the forced pass must save the fact");
+        assertTrue(
+                store.readProject(config.resolveWorkingDir()).contains("short preference"),
+                "the forced pass must save the fact");
         // a second forced pass on the same messages must be a no-op (watermark)
         final var ran2 = extractor.forceExtractNow(messages, ChatSettings.EMPTY);
         assertFalse(ran2, "the forced pass must be a no-op when nothing new was added");
@@ -691,7 +831,8 @@ class MemoryExtractorTest {
                 "s-async",
                 null,
                 null, // memory production policy (default: enabled)
-                null);
+                null,
+                (config).resolveWorkingDir());
         // the end-of-turn hook is not debounced: the first call must run right away
         extractor.asyncExtractNow(List.of(Message.user("one")), ChatSettings.EMPTY);
         EXECUTOR.submit(() -> {}).get(5, TimeUnit.SECONDS);
@@ -734,7 +875,8 @@ class MemoryExtractorTest {
                     "snapshot",
                     null,
                     null,
-                    null);
+                    null,
+                    (config).resolveWorkingDir());
             final var messages = new ArrayList<>(List.of(Message.user("prefer tabs")));
             try {
                 extractor.asyncExtractNow(messages);
@@ -787,7 +929,8 @@ class MemoryExtractorTest {
                     "overlap",
                     null,
                     null,
-                    null);
+                    null,
+                    (config).resolveWorkingDir());
             final var messages = List.of(Message.user("prefer tabs"));
             extractor.asyncExtractNow(messages);
             try {
@@ -835,7 +978,8 @@ class MemoryExtractorTest {
                     "stale",
                     null,
                     null,
-                    null);
+                    null,
+                    (config).resolveWorkingDir());
             final var first = Message.user("prefer tabs");
             try {
                 extractor.asyncExtractNow(List.of(first));
@@ -876,7 +1020,8 @@ class MemoryExtractorTest {
                 "retry",
                 null,
                 null,
-                null);
+                null,
+                (config).resolveWorkingDir());
         final var messages = List.of(Message.user("prefer tabs"));
         assertFalse(extractor.forceExtractNow(messages));
         assertTrue(extractor.forceExtractNow(messages));
@@ -910,7 +1055,8 @@ class MemoryExtractorTest {
                 "replacement",
                 null,
                 null,
-                null);
+                null,
+                (config).resolveWorkingDir());
         assertTrue(extractor.forceExtractNow(List.of(Message.user("prefer tabs"))));
         assertTrue(extractor.forceExtractNow(List.of(Message.user("prefer spaces"))));
         assertEquals(2, calls.get());
@@ -952,7 +1098,8 @@ class MemoryExtractorTest {
                 "s-gating",
                 null,
                 null, // memory production policy (default: enabled)
-                null);
+                null,
+                (config).resolveWorkingDir());
         final var one = List.of(Message.user("one"));
         final var two = List.of(Message.user("one"), Message.user("two"));
         // not eligible: nothing runs, watermark must stay put
@@ -979,11 +1126,8 @@ class MemoryExtractorTest {
                 Message.tool("tc-1", "huge JSON tool output"),
                 Message.assistant(
                         "I'll use tabs",
-                        List.of(new io.yupiik.ia.agent.core.llm.ToolCall(
-                                "tc-2",
-                                "function",
-                                new io.yupiik.ia.agent.core.llm.ToolCall.FunctionCall("read", "{\"path\":\"/tmp/x\"}"),
-                                null))),
+                        List.of(new ToolCall(
+                                "tc-2", "function", new FunctionCall("read", "{\"path\":\"/tmp/x\"}"), null))),
                 Message.assistant("the function reads a config file", null),
                 Message.user("<compacted-context> the previous conversation was summarized </compacted-context>"),
                 new Message("user", "volatile tail", null, null, null, Map.of("volatileTail", true)));
@@ -1048,7 +1192,7 @@ class MemoryExtractorTest {
     private void awaitFlushedFact(final MemoryStore store, final String factText) throws Exception {
         final var deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
         while (System.nanoTime() < deadline) {
-            if (store.readGlobal().contains(factText) || store.readProject().contains(factText)) {
+            if (store.readGlobal().contains(factText) || store.readProject(home).contains(factText)) {
                 return;
             }
             Thread.sleep(20);

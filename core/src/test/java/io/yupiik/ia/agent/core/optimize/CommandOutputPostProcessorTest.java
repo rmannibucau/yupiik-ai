@@ -30,6 +30,16 @@ class CommandOutputPostProcessorTest {
     private final CommandOutputPostProcessor service = new CommandOutputPostProcessor();
 
     @Test
+    void commandTokensKeepAsciiWhitespaceAndEmptyInputSemantics() {
+        assertEquals("run", service.secondToken("\tgh\t--verbose\nrun\r list \t"));
+        assertEquals("list", service.thirdToken("\tgh\t--verbose\nrun\r list \t"));
+        assertEquals("", service.secondToken("\t\n"));
+        assertEquals("", service.thirdToken("\t\n"));
+        assertEquals("", service.secondToken("gh\u2003run"));
+        assertEquals("", service.thirdToken("gh\u2003run"));
+    }
+
+    @Test
     void normalizesCommands() {
         assertEquals("mvn", service.normalizeCommand("mvn"));
         assertEquals("mvnw", service.normalizeCommand("./mvnw"));

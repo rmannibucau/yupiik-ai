@@ -33,6 +33,7 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Path;
 import java.time.Duration;
 import java.util.Locale;
 import java.util.Map;
@@ -61,7 +62,7 @@ public class WebFetchTool implements EmbeddedTool {
     }
 
     @Override
-    public String description() {
+    public String description(final Path workdir) {
         return "Fetch an HTTP(S) URL and return its content as plain text, markdown or raw html (default markdown). Use for documentation, API descriptions or any public web resource.";
     }
 
@@ -83,11 +84,6 @@ public class WebFetchTool implements EmbeddedTool {
                         "format", Schemas.str("Output format: text, markdown or html. Default markdown."),
                         "timeout_seconds", Schemas.intProp("Request timeout in seconds, default 30.")),
                 "url");
-    }
-
-    @Override
-    public ToolResult execute(final Map<String, Object> args) {
-        return execute(args, ToolContext.empty());
     }
 
     @Override

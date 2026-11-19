@@ -19,8 +19,8 @@ import static io.yupiik.ia.agent.core.tools.Schemas.str;
 import static io.yupiik.ia.agent.core.tools.ToolArgs.arg;
 
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
-import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.tools.EmbeddedTool;
+import io.yupiik.ia.agent.core.tools.FileMutation;
 import io.yupiik.ia.agent.core.tools.Schemas;
 import io.yupiik.ia.agent.core.tools.ToolCategory;
 import io.yupiik.ia.agent.core.tools.ToolContainment;
@@ -28,29 +28,21 @@ import io.yupiik.ia.agent.core.tools.ToolContext;
 import io.yupiik.ia.agent.core.tools.ToolResult;
 import java.io.IOException;
 import java.io.UncheckedIOException;
+import java.nio.file.FileAlreadyExistsException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 import java.util.Map;
 
 @ApplicationScoped
 public class WriteFileTool implements EmbeddedTool {
-    private final CodingAgentConfiguration configuration;
-
-    public WriteFileTool(final CodingAgentConfiguration configuration) {
-        this.configuration = configuration;
-    }
-
-    protected WriteFileTool() {
-        this.configuration = null;
-    }
-
     @Override
     public String name() {
         return "write_file";
     }
 
     @Override
-    public String description() {
+    public String description(final Path workdir) {
         return "Write content to a file, creating it (and parent directories) if needed. Overwrites the whole file. "
                 + "Requires a non-empty \"path\" argument.";
     }
@@ -71,17 +63,12 @@ public class WriteFileTool implements EmbeddedTool {
     }
 
     @Override
-    public ToolResult execute(final Map<String, Object> args) {
-        return execute(args, ToolContext.empty());
-    }
-
-    @Override
     public ToolResult execute(final Map<String, Object> args, final ToolContext context) {
         final var raw = arg(args, "path");
         if (raw == null || raw.isEmpty()) {
             return ToolResult.error("path is required");
         }
-        final var path = context.resolvePath(raw, configuration == null ? null : configuration.resolveProjectDir());
+        final var path = context.resolvePath(raw);
         final var content = arg(args, "content");
         if (content == null) {
             return ToolResult.error("content is required");
@@ -94,10 +81,24 @@ public class WriteFileTool implements EmbeddedTool {
             if (path.getParent() != null) {
                 Files.createDirectories(path.getParent());
             }
-            Files.writeString(path, content);
+            var created = false;
+            try {
+                Files.writeString(path, content, StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE);
+                created = true;
+            } catch (final FileAlreadyExistsException existing) {
+                // Overwrite permission is not permission for an additional old-content read.
+                Files.writeString(path, content);
+            }
+            final var capture = new FileMutationCapture();
+            capture.completed(
+                    path,
+                    created ? FileMutation.Kind.CREATE : FileMutation.Kind.UPDATE,
+                    null,
+                    created ? capture.text(content) : null);
             final var lines = content.isEmpty() ? 0 : content.split("\n", -1).length;
             final var notice = reRoutedNotice(context, raw, path);
-            return ToolResult.ok(notice + "Wrote " + lines + " lines to " + path);
+            return new ToolResult(
+                    ToolResult.Status.OK, notice + "Wrote " + lines + " lines to " + path, capture.mutations());
         } catch (final IOException | UncheckedIOException e) {
             return ToolResult.error("Cannot write " + path + ": " + e.getMessage());
         }
@@ -108,7 +109,7 @@ public class WriteFileTool implements EmbeddedTool {
      * outside it: an absolute path survives any containment check because it is an explicit caller choice.
      */
     private static String escapeGuard(final ToolContext context, final String raw, final Path path) {
-        if (context.projectDir() == null || Path.of(raw).isAbsolute()) {
+        if (Path.of(raw).isAbsolute()) {
             return null;
         }
         final var base = context.projectDir().toAbsolutePath().normalize();
@@ -124,13 +125,8 @@ public class WriteFileTool implements EmbeddedTool {
      * process launch directory) is visible instead of silent. Unset or default roots produce no notice.
      */
     private String reRoutedNotice(final ToolContext context, final String raw, final Path path) {
-        if (!context.reRoutedToSessionRoot(raw) || configuration == null) {
-            return "";
-        }
-        final var configured =
-                configuration.resolveProjectDir().toAbsolutePath().normalize();
-        return context.projectDir().toAbsolutePath().normalize().equals(configured)
-                ? ""
-                : "target (session root " + context.projectDir() + "): " + path + "\n";
+        return context.reRoutedToSessionRoot(raw)
+                ? "target (session root " + context.projectDir() + "): " + path + "\n"
+                : "";
     }
 }

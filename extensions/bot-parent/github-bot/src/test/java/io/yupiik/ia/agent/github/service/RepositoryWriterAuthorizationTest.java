@@ -42,6 +42,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.regex.Pattern;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -50,6 +51,9 @@ import org.junit.jupiter.params.provider.ValueSource;
 
 /** Real HTTP and durable queue regression coverage; no live GitHub calls or executor processes. */
 class RepositoryWriterAuthorizationTest {
+    private static final Pattern ISSUE_COMMENTS = Pattern.compile("/repos/owner/(repo|other)/issues/12/comments");
+    private static final Pattern FEED =
+            Pattern.compile("/repos/owner/(repo|other)/(issues|issues/comments|pulls/comments)");
     private static final List<String> REPOSITORIES = List.of("owner/repo", "owner/other");
     private static final List<Integer> ACTORS = List.of(42, 43, 44, 45);
 
@@ -369,7 +373,7 @@ class RepositoryWriterAuthorizationTest {
                             Object.class,
                             new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8)));
                     response = Map.of("data", graphql(request));
-                } else if (path.matches("/repos/owner/(repo|other)/issues/12/comments")) {
+                } else if (ISSUE_COMMENTS.matcher(path).matches()) {
                     if ("POST".equals(exchange.getRequestMethod())) {
                         final var post = TaskStore.map(json.fromString(
                                 Object.class,
@@ -382,7 +386,7 @@ class RepositoryWriterAuthorizationTest {
                     } else {
                         response = List.of();
                     }
-                } else if (path.matches("/repos/owner/(repo|other)/(issues|issues/comments|pulls/comments)")) {
+                } else if (FEED.matcher(path).matches()) {
                     response = feed(path);
                 } else {
                     unexpected.add(exchange.getRequestMethod() + " " + path);

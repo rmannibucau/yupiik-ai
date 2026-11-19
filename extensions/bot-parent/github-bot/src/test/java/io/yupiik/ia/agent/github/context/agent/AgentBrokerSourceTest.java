@@ -43,6 +43,7 @@ import java.util.Properties;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -51,6 +52,10 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
 class AgentBrokerSourceTest {
+    private static final Pattern REJECTED_GIT_OPERATION =
+            Pattern.compile("Broker source operation failed: stage=git_[a-z_]+ code=REJECTED"
+                    + " processors=[0-9]+ commonPoolParallelism=[0-9]+\\n");
+
     @TempDir
     static Path seedTemporary;
 
@@ -408,11 +413,7 @@ class AgentBrokerSourceTest {
             }
             final var result = cli(workspace, head, "expand", "docs");
             assertNotEquals(0, result.exit());
-            assertTrue(
-                    result.error()
-                            .matches("Broker source operation failed: stage=git_[a-z_]+ code=REJECTED"
-                                    + " processors=[0-9]+ commonPoolParallelism=[0-9]+\\n"),
-                    result.error());
+            assertTrue(REJECTED_GIT_OPERATION.matcher(result.error()).matches(), result.error());
             if (kind.equals("symlink")) {
                 assertTrue(Files.isSymbolicLink(protectedPath));
             } else {

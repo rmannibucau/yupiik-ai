@@ -26,10 +26,15 @@ import io.yupiik.ia.agent.core.context.ContextMeasurement.Snapshot;
 import io.yupiik.ia.agent.core.llm.Message;
 import io.yupiik.ia.agent.core.llm.Usage;
 import io.yupiik.ia.agent.core.shell.ThinkTagSplitter;
+import java.nio.file.Path;
 import java.util.List;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 class TuiTranscriptModelTest {
+    @TempDir
+    private static Path eventWorkdir;
+
     private final TuiTranscriptModel model = new TuiTranscriptModel(new ThinkTagSplitter());
 
     @Test
@@ -59,7 +64,7 @@ class TuiTranscriptModelTest {
         assertTrue(model.transcript().toString().contains("**You**\n\nqueued"));
         assertTrue(model.busy());
 
-        model.onEvent(new AgentEvent.TextDelta("more output", "s1"));
+        model.onEvent(new AgentEvent.TextDelta("more output", "s1", eventWorkdir));
         assertEquals(42, model.anchorRow());
     }
 
@@ -76,8 +81,8 @@ class TuiTranscriptModelTest {
     @Test
     void textDeltaAccumulatesPendingAndShowsItWhileBusy() {
         model.startUserTurn("hi");
-        model.onEvent(new AgentEvent.TextDelta("hel", "s1"));
-        model.onEvent(new AgentEvent.TextDelta("lo", "s1"));
+        model.onEvent(new AgentEvent.TextDelta("hel", "s1", eventWorkdir));
+        model.onEvent(new AgentEvent.TextDelta("lo", "s1", eventWorkdir));
         assertEquals("hello", model.pending().toString());
         assertTrue(model.markdown("|", "welcome").contains("**Assistant**\n\nhello"));
     }
@@ -85,8 +90,8 @@ class TuiTranscriptModelTest {
     @Test
     void turnDoneFlushesPendingAndClosesTurn() {
         model.startUserTurn("hi");
-        model.onEvent(new AgentEvent.TextDelta("partial", "s1"));
-        model.onEvent(new AgentEvent.TurnDone("final answer", "s1"));
+        model.onEvent(new AgentEvent.TextDelta("partial", "s1", eventWorkdir));
+        model.onEvent(new AgentEvent.TurnDone("final answer", "s1", eventWorkdir));
         assertTrue(model.transcript().toString().contains("**Assistant**\n\nfinal answer"));
         assertEquals("", model.pending().toString());
         assertFalse(model.busy());
@@ -97,7 +102,7 @@ class TuiTranscriptModelTest {
     void thinkingDeltaRePinsScrollToLiveTail() {
         model.maxViewOffset(80);
         model.anchorRow(42);
-        model.onEvent(new AgentEvent.ThinkingDelta("pondering", "s1"));
+        model.onEvent(new AgentEvent.ThinkingDelta("pondering", "s1", eventWorkdir));
         assertEquals(80, model.anchorRow());
     }
 
@@ -106,7 +111,7 @@ class TuiTranscriptModelTest {
         model.maxViewOffset(120);
         model.anchorRow(42);
         model.userScrolled(true);
-        model.onEvent(new AgentEvent.TextDelta("more", "s1"));
+        model.onEvent(new AgentEvent.TextDelta("more", "s1", eventWorkdir));
         assertEquals(42, model.anchorRow());
     }
 
@@ -114,7 +119,7 @@ class TuiTranscriptModelTest {
     void promptIntegratedRePinsScrollToLiveTail() {
         model.maxViewOffset(90);
         model.anchorRow(42);
-        model.onEvent(new AgentEvent.PromptIntegrated("boost", "s1"));
+        model.onEvent(new AgentEvent.PromptIntegrated("boost", "s1", eventWorkdir));
         assertEquals(90, model.anchorRow());
     }
 
@@ -123,7 +128,7 @@ class TuiTranscriptModelTest {
         model.maxViewOffset(90);
         model.anchorRow(42);
         model.userScrolled(true);
-        model.onEvent(new AgentEvent.PromptIntegrated("boost", "s1"));
+        model.onEvent(new AgentEvent.PromptIntegrated("boost", "s1", eventWorkdir));
         assertEquals(42, model.anchorRow());
     }
 
@@ -289,17 +294,17 @@ class TuiTranscriptModelTest {
 
     @Test
     void textResetDiscardsPendingAndThinkingBuffers() {
-        model.onEvent(new AgentEvent.TextDelta("partial", "s1"));
-        model.onEvent(new AgentEvent.ThinkingDelta("pondering", "s1"));
-        model.onEvent(new AgentEvent.TextReset("s1"));
+        model.onEvent(new AgentEvent.TextDelta("partial", "s1", eventWorkdir));
+        model.onEvent(new AgentEvent.ThinkingDelta("pondering", "s1", eventWorkdir));
+        model.onEvent(new AgentEvent.TextReset("s1", eventWorkdir));
         assertEquals("", model.pending().toString());
         assertFalse(model.markdown("|", "welcome").contains("partial"));
     }
 
     @Test
     void flushThinkingWrapsThoughtBetweenMarkersOnce() {
-        model.onEvent(new AgentEvent.ThinkingDelta("let me ", "s1"));
-        model.onEvent(new AgentEvent.ThinkingDelta("think", "s1"));
+        model.onEvent(new AgentEvent.ThinkingDelta("let me ", "s1", eventWorkdir));
+        model.onEvent(new AgentEvent.ThinkingDelta("think", "s1", eventWorkdir));
         model.flushThinking();
         final var transcript = model.transcript().toString();
         assertTrue(transcript.contains(TuiTranscriptModel.THOUGHT_BEGIN + "\n**Thinking**\n\nlet me think\n"
@@ -310,18 +315,18 @@ class TuiTranscriptModelTest {
 
     @Test
     void flushThinkingWithBlankContentWritesNothing() {
-        model.onEvent(new AgentEvent.ThinkingDelta("   ", "s1"));
+        model.onEvent(new AgentEvent.ThinkingDelta("   ", "s1", eventWorkdir));
         model.flushThinking();
         assertEquals("", model.transcript().toString());
     }
 
     @Test
     void toolStartedKeepsParallelToolsSeparate() {
-        model.onEvent(new AgentEvent.ToolStarted("bash", "{\"command\":\"ls -la\"}", "s1"));
+        model.onEvent(new AgentEvent.ToolStarted("bash", "{\"command\":\"ls -la\"}", "s1", eventWorkdir));
         assertEquals("bash", model.runningTool());
         assertEquals("ls -la", model.runningToolCommand());
-        model.onEvent(new AgentEvent.ToolStream("bash", "file.txt", "s1"));
-        model.onEvent(new AgentEvent.ToolStarted("read", "{}", "s1"));
+        model.onEvent(new AgentEvent.ToolStream("bash", "file.txt", "s1", eventWorkdir));
+        model.onEvent(new AgentEvent.ToolStarted("read", "{}", "s1", eventWorkdir));
         // the newest pending tool drives the running label; the older parallel tool
         // keeps its own stream (no aliasing of a single running-tool slot)
         assertEquals("read", model.runningTool());
@@ -334,8 +339,8 @@ class TuiTranscriptModelTest {
 
     @Test
     void markdownShowsRunningToolAndStreamedOutput() {
-        model.onEvent(new AgentEvent.ToolStarted("bash", "{\"command\":\"ls\"}", "s1"));
-        model.onEvent(new AgentEvent.ToolStream("bash", "out.txt", "s1"));
+        model.onEvent(new AgentEvent.ToolStarted("bash", "{\"command\":\"ls\"}", "s1", eventWorkdir));
+        model.onEvent(new AgentEvent.ToolStream("bash", "out.txt", "s1", eventWorkdir));
         final var md = model.markdown("*", "welcome");
         assertTrue(md.contains("`* running ls`"));
         assertTrue(md.contains("```text\nout.txt\n```"));
@@ -343,18 +348,18 @@ class TuiTranscriptModelTest {
 
     @Test
     void toolStreamIgnoresOtherToolsAndCapsSize() {
-        model.onEvent(new AgentEvent.ToolStarted("bash", "{}", "s1"));
-        model.onEvent(new AgentEvent.ToolStream("other", "nope", "s1"));
+        model.onEvent(new AgentEvent.ToolStarted("bash", "{}", "s1", eventWorkdir));
+        model.onEvent(new AgentEvent.ToolStream("other", "nope", "s1", eventWorkdir));
         assertEquals("", model.transcript().toString());
-        model.onEvent(new AgentEvent.ToolStream("bash", "x".repeat(2000), "s1"));
+        model.onEvent(new AgentEvent.ToolStream("bash", "x".repeat(2000), "s1", eventWorkdir));
         assertTrue(model.markdown("|", "welcome").length() < 2200, "stream must stay capped");
     }
 
     @Test
     void toolFinishedFlushesStreamAsToolRegion() {
-        model.onEvent(new AgentEvent.ToolStarted("bash", "{\"command\":\"ls\"}", "s1"));
-        model.onEvent(new AgentEvent.ToolStream("bash", "a.txt", "s1"));
-        model.onEvent(new AgentEvent.ToolFinished("bash", "", true, "s1"));
+        model.onEvent(new AgentEvent.ToolStarted("bash", "{\"command\":\"ls\"}", "s1", eventWorkdir));
+        model.onEvent(new AgentEvent.ToolStream("bash", "a.txt", "s1", eventWorkdir));
+        model.onEvent(new AgentEvent.ToolFinished("bash", "", true, "s1", eventWorkdir));
         final var transcript = model.transcript().toString();
         assertTrue(transcript.contains(TuiTranscriptModel.TOOL_BEGIN));
         assertTrue(transcript.contains("*streaming `bash`: ls*"));
@@ -365,15 +370,15 @@ class TuiTranscriptModelTest {
 
     @Test
     void failedToolIsReported() {
-        model.onEvent(new AgentEvent.ToolStarted("bash", "{}", "s1"));
-        model.onEvent(new AgentEvent.ToolFinished("bash", "boom\n details", false, "s1"));
+        model.onEvent(new AgentEvent.ToolStarted("bash", "{}", "s1", eventWorkdir));
+        model.onEvent(new AgentEvent.ToolFinished("bash", "boom\n details", false, "s1", eventWorkdir));
         assertTrue(model.transcript().toString().contains("> tool `bash` failed: boom"));
     }
 
     @Test
     void nonStreamedToolSuccessFallsBackToFinishedOutput() {
-        model.onEvent(new AgentEvent.ToolStarted("read", "{}", "s1"));
-        model.onEvent(new AgentEvent.ToolFinished("read", "line1\nline2", true, "s1"));
+        model.onEvent(new AgentEvent.ToolStarted("read", "{}", "s1", eventWorkdir));
+        model.onEvent(new AgentEvent.ToolFinished("read", "line1\nline2", true, "s1", eventWorkdir));
         final var transcript = model.transcript().toString();
         assertTrue(transcript.contains(TuiTranscriptModel.TOOL_BEGIN));
         assertTrue(transcript.contains("*streaming `read`*"));
@@ -384,8 +389,8 @@ class TuiTranscriptModelTest {
 
     @Test
     void nonStreamedToolSuccessWithEmptyOutputWritesNothing() {
-        model.onEvent(new AgentEvent.ToolStarted("read", "{}", "s1"));
-        model.onEvent(new AgentEvent.ToolFinished("read", "", true, "s1"));
+        model.onEvent(new AgentEvent.ToolStarted("read", "{}", "s1", eventWorkdir));
+        model.onEvent(new AgentEvent.ToolFinished("read", "", true, "s1", eventWorkdir));
         assertFalse(model.transcript().toString().contains(TuiTranscriptModel.TOOL_BEGIN));
     }
 
@@ -404,7 +409,8 @@ class TuiTranscriptModelTest {
                 null,
                 null,
                 AgentEvent.UsageUpdated.Quota.NONE,
-                measurement));
+                measurement,
+                eventWorkdir));
         assertEquals(measurement, model.contextMeasurement());
         assertEquals(4000, model.promptTokens());
         assertEquals(1200, model.completionTokens());
@@ -417,13 +423,13 @@ class TuiTranscriptModelTest {
 
     @Test
     void usageUpdatedWithoutUsageKeepsZeroCacheRead() {
-        model.onEvent(new AgentEvent.UsageUpdated(null, 42000, 55.44, "s1"));
+        model.onEvent(new AgentEvent.UsageUpdated(null, 42000, 55.44, "s1", eventWorkdir));
         assertEquals(0, model.cacheReadTokens(), "no usage: cache-read must be 0");
     }
 
     @Test
     void usageUpdatedWithoutAnchorKeepsZeroLastReal() {
-        model.onEvent(new AgentEvent.UsageUpdated(null, 42000, 55.44, "s1"));
+        model.onEvent(new AgentEvent.UsageUpdated(null, 42000, 55.44, "s1", eventWorkdir));
         assertEquals(42000, model.estimatedContext());
         assertEquals(0, model.lastRealPromptTokens(), "no anchor: lastReal must be 0");
         assertEquals(-1, model.calibrationRatio(), 0.0001, "no anchor: ratio must be -1");
@@ -433,14 +439,14 @@ class TuiTranscriptModelTest {
     void compactedUpdatesStatusAndTranscript() {
         // a compaction/dedup event is side feedback only: it must not clobber the leading
         // status (spinner/ready/error) - the appliance is recorded for the sidebar instead
-        model.onEvent(new AgentEvent.Compacted("auto", "SUMMARY", "s1"));
+        model.onEvent(new AgentEvent.Compacted("auto", "SUMMARY", "s1", eventWorkdir));
         assertEquals("", model.status());
         assertEquals(1, model.appliances().size());
         assertEquals(List.of("auto"), model.appliances().getFirst().kinds());
         assertEquals("SUMMARY", model.appliances().getFirst().mode());
         assertTrue(model.transcript().toString().contains("> context auto applied (summary)"));
         // the next appliance replaces the previous in the sidebar slot (newest first, capped)
-        model.onEvent(new AgentEvent.Compacted("dedup", "CLEARED", "s1"));
+        model.onEvent(new AgentEvent.Compacted("dedup", "CLEARED", "s1", eventWorkdir));
         assertEquals(2, model.appliances().size());
         assertEquals(List.of("dedup"), model.appliances().getFirst().kinds());
         assertEquals("CLEARED", model.appliances().getFirst().mode());
@@ -452,7 +458,7 @@ class TuiTranscriptModelTest {
     void mergedCompactedRendersASingleJointLine() {
         // several reductions of the same checkpoint are merged into one event carrying all the
         // kinds: the transcript must show a single line instead of one line per strategy
-        model.onEvent(new AgentEvent.Compacted(List.of("dedup", "prune"), "CLEARED", "s1"));
+        model.onEvent(new AgentEvent.Compacted(List.of("dedup", "prune"), "CLEARED", "s1", eventWorkdir));
         assertEquals(1, model.appliances().size());
         assertEquals(List.of("dedup", "prune"), model.appliances().getFirst().kinds());
         assertTrue(
@@ -465,7 +471,8 @@ class TuiTranscriptModelTest {
         // the event carries the raw estimated before/after pair: the durable transcript appends
         // the formatted segment and the sidebar appliance records the pair for the " -83%" suffix
         final var tokens = new AgentEvent.Compacted.CompactionTokens(513_000, 87_000);
-        model.onEvent(new AgentEvent.Compacted(List.of("dedup", "compact-spill"), "SHRUNK", "s1", null, null, tokens));
+        model.onEvent(new AgentEvent.Compacted(
+                List.of("dedup", "compact-spill"), "SHRUNK", "s1", null, null, tokens, eventWorkdir));
         assertEquals(1, model.appliances().size());
         assertEquals(
                 tokens,
@@ -480,20 +487,20 @@ class TuiTranscriptModelTest {
 
     @Test
     void noticeRendersDistinctTranscriptAndStatus() {
-        model.onEvent(AgentEvent.Notice.error("boom", "s1"));
+        model.onEvent(AgentEvent.Notice.error("boom", "s1", eventWorkdir));
         assertTrue(model.transcript().toString().contains("> ⚠ error: boom"));
         assertEquals("error: boom", model.status());
-        model.onEvent(AgentEvent.Notice.info("all good", "s1"));
+        model.onEvent(AgentEvent.Notice.info("all good", "s1", eventWorkdir));
         assertTrue(model.transcript().toString().contains("> ⓘ: all good"));
     }
 
     @Test
     void statusAndErrorEventsMapDirectly() {
         model.startUserTurn("hi");
-        model.onEvent(new AgentEvent.TextDelta("draft", "s1"));
-        model.onEvent(new AgentEvent.Status("working", "s1"));
+        model.onEvent(new AgentEvent.TextDelta("draft", "s1", eventWorkdir));
+        model.onEvent(new AgentEvent.Status("working", "s1", eventWorkdir));
         assertEquals("working", model.status());
-        model.onEvent(new AgentEvent.Error("kaput", "s1"));
+        model.onEvent(new AgentEvent.Error("kaput", "s1", eventWorkdir));
         assertTrue(model.transcript().toString().contains("> error: kaput"));
         assertFalse(model.busy());
         assertEquals("error: kaput", model.status());
@@ -577,7 +584,7 @@ class TuiTranscriptModelTest {
     @Test
     void clearConversationResetsConversationButKeepsInstance() {
         model.startUserTurn("hi");
-        model.onEvent(new AgentEvent.Status("busy", "s1"));
+        model.onEvent(new AgentEvent.Status("busy", "s1", eventWorkdir));
         model.clearConversation();
         assertEquals("", model.transcript().toString());
         assertEquals("", model.thinking().toString());
@@ -588,9 +595,9 @@ class TuiTranscriptModelTest {
     @Test
     void resetClearsEverything() {
         model.startUserTurn("hi");
-        model.onEvent(new AgentEvent.TextDelta("x", "s1"));
-        model.onEvent(new AgentEvent.ToolStarted("bash", "{}", "s1"));
-        model.onEvent(new AgentEvent.Status("busy", "s1"));
+        model.onEvent(new AgentEvent.TextDelta("x", "s1", eventWorkdir));
+        model.onEvent(new AgentEvent.ToolStarted("bash", "{}", "s1", eventWorkdir));
+        model.onEvent(new AgentEvent.Status("busy", "s1", eventWorkdir));
         model.reset();
         assertFalse(model.busy());
         assertEquals("", model.status());

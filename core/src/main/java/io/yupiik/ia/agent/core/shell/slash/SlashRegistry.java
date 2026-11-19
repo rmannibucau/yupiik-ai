@@ -29,6 +29,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
+import java.util.regex.Pattern;
 
 /**
  * The single slash command registry: collects every {@link SlashCommandSet}
@@ -38,6 +39,7 @@ import java.util.concurrent.CompletionStage;
  */
 @ApplicationScoped
 public class SlashRegistry {
+    private static final Pattern WHITESPACE = Pattern.compile("\\s+");
     private final Map<String, SlashCommand> commands;
 
     public SlashRegistry(final List<SlashCommandSet> sets) {
@@ -84,7 +86,7 @@ public class SlashRegistry {
      */
     public CompletionStage<ShellOutcome> dispatch(final String text, final ShellEnv env) {
         final var value = text.substring(1);
-        final var parts = value.split("\\s+", 2);
+        final var parts = WHITESPACE.split(value, 2);
         final var name = parts[0].toLowerCase(Locale.ROOT);
         final var arg = parts.length > 1 ? parts[1].strip() : "";
         final var command = commands.get(name);

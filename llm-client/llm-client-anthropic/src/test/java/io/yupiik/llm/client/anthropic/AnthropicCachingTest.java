@@ -34,6 +34,10 @@ import org.junit.jupiter.api.extension.ExtendWith;
 
 @ExtendWith(TestJsonMapper.class)
 class AnthropicCachingTest {
+    private static int cacheControls(final String body) {
+        return (body.length() - body.replace("cache_control", "").length()) / "cache_control".length();
+    }
+
     private static final Map<String, Object> EPHEMERAL = Map.of("type", "ephemeral");
 
     @Test
@@ -119,7 +123,7 @@ class AnthropicCachingTest {
                     Map.of("volatileTail", true)));
         }
         final var wire = wire(mapper, Map.of(), request(history, Map.of("anthropicSplitBlocks", true)));
-        assertEquals(4, mapper.toString(wire).split("cache_control", -1).length - 1);
+        assertEquals(4, cacheControls(mapper.toString(wire)));
         assertEquals(EPHEMERAL, wire.get("cache_control"));
     }
 
@@ -134,7 +138,7 @@ class AnthropicCachingTest {
         final var wire = wire(mapper, Map.of(), request(history, Map.of()));
         assertFalse(wire.containsKey("cache_control"));
         assertEquals("stable", wire.get("system"));
-        assertEquals(4, mapper.toString(wire).split("cache_control", -1).length - 1);
+        assertEquals(4, cacheControls(mapper.toString(wire)));
         assertEquals(blocks, ((Map<?, ?>) ((List<?>) wire.get("messages")).getFirst()).get("content"));
     }
 
@@ -162,7 +166,7 @@ class AnthropicCachingTest {
         assertFalse(wire.containsKey("cache_control"));
         assertEquals(
                 2,
-                mapper.toString(wire).split("cache_control", -1).length - 1,
+                cacheControls(mapper.toString(wire)),
                 "legacy splitting must not insert short-lived controls before the explicit 1h block");
     }
 
@@ -178,7 +182,7 @@ class AnthropicCachingTest {
         final var wire = wire(mapper, Map.of(), request(history, Map.of("cache_control", EPHEMERAL)));
         assertEquals(EPHEMERAL, wire.get("cache_control"));
         assertEquals("stable", wire.get("system"));
-        assertEquals(4, mapper.toString(wire).split("cache_control", -1).length - 1);
+        assertEquals(4, cacheControls(mapper.toString(wire)));
     }
 
     @Test

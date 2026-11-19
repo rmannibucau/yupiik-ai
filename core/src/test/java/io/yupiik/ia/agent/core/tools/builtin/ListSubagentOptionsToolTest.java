@@ -27,14 +27,19 @@ import io.yupiik.ia.agent.core.tools.ToolContext;
 import io.yupiik.ia.agent.core.tools.ToolResult;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import io.yupiik.ia.agent.test.TestJsonMapper;
+import java.nio.file.Path;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.api.io.TempDir;
 
 @ExtendWith(TestJsonMapper.class)
 class ListSubagentOptionsToolTest {
+    @TempDir
+    private static Path testWorkdir;
+
     private JsonMapper mapper;
 
     private CodingAgentConfiguration config(final Map<String, String> overrides) {
@@ -80,7 +85,7 @@ class ListSubagentOptionsToolTest {
                         () -> false,
                         ChatSettings.EMPTY.withProviderId("default").withModel("parent-model"),
                         null,
-                        null));
+                        testWorkdir));
     }
 
     @Test

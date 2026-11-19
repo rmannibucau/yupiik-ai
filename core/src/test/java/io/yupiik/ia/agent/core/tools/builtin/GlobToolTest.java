@@ -18,10 +18,12 @@ package io.yupiik.ia.agent.core.tools.builtin;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import io.yupiik.ia.agent.core.tools.ToolContext;
 import java.io.IOException;
 import java.nio.file.FileSystems;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.PosixFilePermissions;
 import java.util.Map;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.Test;
@@ -40,7 +42,7 @@ class GlobToolTest {
         write(root.resolve("vendor/Lib.java"), "class Lib {}\n");
         write(root.resolve(".yca/generated/graph/index.bin"), "x");
 
-        final var out = tool.execute(Map.of("pattern", "**/*.java", "path", root.toString()))
+        final var out = tool.execute(Map.of("pattern", "**/*.java", "path", root.toString()), ToolContext.empty(root))
                 .output();
 
         assertTrue(out.contains("Main.java"), out);
@@ -53,7 +55,7 @@ class GlobToolTest {
         for (var i = 0; i < 600; i++) {
             write(root.resolve("F" + i + ".txt"), "x");
         }
-        final var out = tool.execute(Map.of("pattern", "**/*.txt", "path", root.toString()))
+        final var out = tool.execute(Map.of("pattern", "**/*.txt", "path", root.toString()), ToolContext.empty(root))
                 .output();
         assertTrue(out.contains("100 match(es)"), out);
         assertTrue(out.contains("results capped at 100"), out);
@@ -68,13 +70,13 @@ class GlobToolTest {
         final var denied = root.resolve("denied");
         Files.createDirectories(denied);
         write(denied.resolve("Hidden.java"), "class Hidden {}\n");
-        Files.setPosixFilePermissions(denied, java.nio.file.attribute.PosixFilePermissions.fromString("---------"));
+        Files.setPosixFilePermissions(denied, PosixFilePermissions.fromString("---------"));
         final var locked = root.resolve("locked.java");
         write(locked, "class Locked {}\n");
-        Files.setPosixFilePermissions(locked, java.nio.file.attribute.PosixFilePermissions.fromString("---------"));
+        Files.setPosixFilePermissions(locked, PosixFilePermissions.fromString("---------"));
         write(root.resolve("ok/Main.java"), "class Main {}\n");
 
-        final var out = tool.execute(Map.of("pattern", "**/*.java", "path", root.toString()))
+        final var out = tool.execute(Map.of("pattern", "**/*.java", "path", root.toString()), ToolContext.empty(root))
                 .output();
 
         assertTrue(out.contains("Main.java"), "the walk must continue past an unreadable dir:\n" + out);
@@ -86,9 +88,7 @@ class GlobToolTest {
         write(projectDir.resolve("src/Main.java"), "class Main {}\n");
         write(projectDir.resolve("other/Ignored.java"), "ignored\n");
         // relative "src" must be rooted on the session projectDir, not the JVM working directory
-        final var out = tool.execute(
-                        Map.of("pattern", "**/*.java", "path", "src"),
-                        io.yupiik.ia.agent.core.tools.ToolContext.empty(projectDir))
+        final var out = tool.execute(Map.of("pattern", "**/*.java", "path", "src"), ToolContext.empty(projectDir))
                 .output();
         assertTrue(out.contains("Main.java"), out);
         assertFalse(out.contains("Ignored.java"), out);

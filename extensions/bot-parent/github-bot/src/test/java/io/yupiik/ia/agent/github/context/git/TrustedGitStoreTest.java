@@ -38,11 +38,13 @@ import java.util.Set;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.regex.Pattern;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 class TrustedGitStoreTest {
+    private static final Pattern TREE_FIELD_SEPARATOR = Pattern.compile("[\t ]");
     private static final String URL = "https://github.com/yupiik/fixture.git";
     private static final long BUDGET = 8 * 1024 * 1024;
 
@@ -464,7 +466,7 @@ class TrustedGitStoreTest {
                         git(fixture.directory(), "rev-parse", sha + "^{tree}").strip());
                 git(fixture.directory(), "ls-tree", "-rt", sha)
                         .lines()
-                        .forEach(line -> expected.add(line.split("[\t ]")[2]));
+                        .forEach(line -> expected.add(TREE_FIELD_SEPARATOR.split(line)[2]));
             }
             expected.add(
                     git(fixture.directory(), "rev-parse", "refs/tags/outside").strip());

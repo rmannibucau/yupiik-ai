@@ -132,7 +132,11 @@ public class SlashCommandCompleter implements Completer {
 
             @Override
             public List<String> paths(final String token) {
-                return CompletionEngine.pathCandidates(token);
+                final var current = session;
+                return current == null
+                        ? List.of()
+                        : CompletionEngine.pathCandidates(
+                                token, current.runtime().workdir());
             }
         });
     }

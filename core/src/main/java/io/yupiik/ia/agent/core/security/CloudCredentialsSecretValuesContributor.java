@@ -45,6 +45,7 @@ import java.util.regex.Pattern;
  */
 @ApplicationScoped
 public class CloudCredentialsSecretValuesContributor implements SecretValuesContributor {
+    private static final Pattern LINE_BREAK = Pattern.compile("\\R");
 
     private static final Logger LOGGER = Logger.getLogger(CloudCredentialsSecretValuesContributor.class.getName());
 
@@ -174,7 +175,7 @@ public class CloudCredentialsSecretValuesContributor implements SecretValuesCont
     }
 
     private void harvestIni(final String content, final Collection<String> out) {
-        for (final var raw : content.split("\\R")) {
+        for (final var raw : LINE_BREAK.split(content)) {
             final var line = raw.trim();
             if (line.isEmpty() || line.startsWith("#") || line.startsWith(";") || line.startsWith("[")) {
                 continue;

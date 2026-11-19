@@ -44,6 +44,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
 import java.util.concurrent.Flow;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.regex.Pattern;
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.SSLParameters;
 import javax.net.ssl.SSLSession;
@@ -52,6 +53,8 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
 class KubernetesProviderServicesTest {
+    private static final Pattern RESPONSES_PATH = Pattern.compile("/inference/[0-9a-f-]{36}/responses");
+    private static final Pattern COMPLETIONS_PATH = Pattern.compile("/inference/[0-9a-f-]{36}/chat/completions");
     private static final String ID = "yca-plan";
     private static final String NAME = ID + "-provider";
     private static final String CORE = "/api/v1/namespaces/plans/";
@@ -70,7 +73,8 @@ class KubernetesProviderServicesTest {
                     cluster.json, cluster.client, "plans", config("http://10.0.0.9:8080/v1/responses"));
             final var connection = services.start(ID, PRIVATE, "shared-provider", 3);
             assertEquals(connection, services.recover(ID));
-            assertTrue(connection.endpoint().getRawPath().matches("/inference/[0-9a-f-]{36}/responses"));
+            assertTrue(
+                    RESPONSES_PATH.matcher(connection.endpoint().getRawPath()).matches());
             final var settings = map(cluster.json.fromString(
                     Object.class, decode(map(cluster.resources.get(SECRET).get("data")), "settings.json")));
             assertEquals("http://10.0.0.9:8080/v1/responses", settings.get("inferenceTarget"));
@@ -91,7 +95,7 @@ class KubernetesProviderServicesTest {
             assertEquals("provider.internal", connection.serverName());
             assertEquals("a".repeat(43), connection.capability());
             assertEquals("https", connection.endpoint().getScheme());
-            assertTrue(connection.endpoint().getPath().matches("/inference/[0-9a-f-]{36}/chat/completions"));
+            assertTrue(COMPLETIONS_PATH.matcher(connection.endpoint().getPath()).matches());
             assertFalse(connection.toString().contains(connection.capability()));
             assertEquals(5, cluster.resources.size());
             final var secret = cluster.resources.get(SECRET);

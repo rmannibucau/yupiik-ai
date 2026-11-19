@@ -65,6 +65,8 @@ import org.w3c.dom.Node;
  */
 @ApplicationScoped
 public class MavenSecretService {
+    // Capture the source (env|sys) and name, tolerating a '.' or ':' separator.
+    private static final Pattern PLACEHOLDER = Pattern.compile("\\$\\{(env|sys)[.:]([^}]+)}");
 
     private static final Logger LOGGER = Logger.getLogger(MavenSecretService.class.getName());
 
@@ -384,9 +386,7 @@ public class MavenSecretService {
         if (value == null || value.isBlank()) {
             return value;
         }
-        // capture the source (env|sys) and the name, tolerating a '.' or ':' separator
-        final var placeholder = Pattern.compile("\\$\\{(env|sys)[.:]([^}]+)}");
-        final var matcher = placeholder.matcher(value);
+        final var matcher = PLACEHOLDER.matcher(value);
         final var sb = new StringBuilder();
         while (matcher.find()) {
             final var source = matcher.group(1);

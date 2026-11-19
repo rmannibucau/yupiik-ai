@@ -41,6 +41,7 @@ import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.StringJoiner;
 
 /**
@@ -58,6 +59,7 @@ public class YcaKnowledgeLlm implements KnowledgeLlm {
     private final JsonMapper mapper;
     private final CodingAgentConfiguration configuration;
     private final ProcessService processes;
+    private final Path projectRoot;
     /** The triggering session's provider/model selection, set by the caller around one index run and
      * resolved lazily at each LLM call (never captured at construction). Null = process default. */
     private volatile ChatSettings runSettings;
@@ -67,10 +69,28 @@ public class YcaKnowledgeLlm implements KnowledgeLlm {
             final JsonMapper mapper,
             final CodingAgentConfiguration configuration,
             final ProcessService processes) {
+        this(chatClient, mapper, configuration, processes, null, null);
+    }
+
+    private YcaKnowledgeLlm(
+            final ChatClient chatClient,
+            final JsonMapper mapper,
+            final CodingAgentConfiguration configuration,
+            final ProcessService processes,
+            final Path projectRoot,
+            final ChatSettings settings) {
         this.chatClient = chatClient;
         this.mapper = mapper;
         this.configuration = configuration;
         this.processes = processes;
+        this.projectRoot = projectRoot;
+        this.runSettings = settings;
+    }
+
+    /** Captures a project's root and settings for one operation, including indexer worker threads. */
+    public KnowledgeLlm forProject(final Path root, final ChatSettings settings) {
+        final var effectiveRoot = Objects.requireNonNull(root, "workdir");
+        return new YcaKnowledgeLlm(chatClient, mapper, configuration, processes, effectiveRoot, settings);
     }
 
     /** Binds one index run to the requesting session's provider/model; pass null to fall back to process default. */
@@ -93,11 +113,8 @@ public class YcaKnowledgeLlm implements KnowledgeLlm {
 
     @Override
     public List<Gav> resolveProjectDeps() {
-        if (configuration == null || configuration.resolveProjectDir() == null) {
-            return List.of();
-        }
-        return MvnProjectDeps.resolve(
-                configuration.resolveProjectDir(), MVN_TIMEOUT_MS, dependencyCacheDir(), processes);
+        final var root = Objects.requireNonNull(projectRoot, "workdir");
+        return MvnProjectDeps.resolve(root, MVN_TIMEOUT_MS, dependencyCacheDir(), processes);
     }
 
     /** Where the {@code mvn dependency:list} result is cached (the local repository, by default {@code ~/.m2}). */

@@ -53,6 +53,9 @@ import org.junit.jupiter.api.io.TempDir;
 
 class SpawnSubagentToolTest {
     @TempDir
+    private static Path testWorkdir;
+
+    @TempDir
     Path storageHome;
 
     private CodingAgentConfiguration config(final Map<String, String> overrides) {
@@ -195,7 +198,7 @@ class SpawnSubagentToolTest {
                 Cancellations.NEVER,
                 ChatSettings.EMPTY.withProviderId("default").withModel("model"),
                 null,
-                null);
+                testWorkdir);
     }
 
     /** A context with the default per-session sub-agent budget of the given config. */
@@ -213,7 +216,7 @@ class SpawnSubagentToolTest {
                 Cancellations.NEVER,
                 ChatSettings.EMPTY.withProviderId("default").withModel("model"),
                 null,
-                null,
+                testWorkdir,
                 budget);
     }
 
@@ -268,7 +271,7 @@ class SpawnSubagentToolTest {
     @Test
     void descriptionCoachesAgainstPollingAndPromisesNotification() {
         final var cfg = config(Map.of());
-        final var description = new SpawnSubagentTool(registry(cfg), null, null, null, cfg).description();
+        final var description = new SpawnSubagentTool(registry(cfg), null, null, null, cfg).description(testWorkdir);
         assertTrue(description.contains("you will be notified automatically"), description);
         assertTrue(description.contains("NOT sleep"), description);
         assertTrue(description.contains("poll"), description);
@@ -334,7 +337,7 @@ class SpawnSubagentToolTest {
                 parentCancelled::get,
                 ChatSettings.EMPTY.withProviderId("default").withModel("model"),
                 null,
-                null);
+                testWorkdir);
 
         final var result = tool.execute(Map.of("task", "do work"), ctx);
         assertTrue(result.success(), result.output());

@@ -22,6 +22,7 @@ import java.nio.file.Path;
 import java.nio.file.PathMatcher;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
 import java.util.logging.Logger;
 import java.util.stream.Stream;
 
@@ -46,6 +47,7 @@ public final class FileIgnore {
 
     /** Builds rules from {@code globs} first then the root {@code .gitignore} (later rules win). */
     public static FileIgnore of(final Path root, final List<String> globs) {
+        Objects.requireNonNull(root, "workdir");
         final var patterns = new ArrayList<String>();
         if (globs != null) {
             patterns.addAll(globs);
@@ -79,19 +81,19 @@ public final class FileIgnore {
                 }
             }
         }
-        return new FileIgnore(root == null ? Path.of(".") : root, List.copyOf(rules));
+        return new FileIgnore(root, List.copyOf(rules));
     }
 
     /** Nearest ancestor of {@code from} (or itself) holding a {@code .git} entry; fallback is {@code from}. */
     public static Path gitRoot(final Path from) {
-        var current = from == null ? Path.of(".") : from.toAbsolutePath().normalize();
+        var current = Objects.requireNonNull(from, "workdir");
         while (current != null) {
             if (Files.exists(current.resolve(".git"))) {
                 return current;
             }
             current = current.getParent();
         }
-        return from == null ? Path.of(".") : from.toAbsolutePath().normalize();
+        return from;
     }
 
     public List<Rule> rules() {
@@ -152,9 +154,6 @@ public final class FileIgnore {
     }
 
     private static void appendGitignore(final Path root, final List<String> patterns) {
-        if (root == null) {
-            return;
-        }
         final var gitignore = root.resolve(".gitignore");
         if (!Files.isRegularFile(gitignore)) {
             return;

@@ -73,19 +73,20 @@ public class AgentTurnExecutor {
 
     private boolean acceptInitialPrompt(final String userMessage, final String sessionId) {
         final var result = new HookResult();
-        final var context = new EventContextBuilder(host.configuration)
+        final var context = new EventContextBuilder()
                 .build(
                         host.permissionService,
                         host.chatSettings(),
                         sessionId,
                         host.subagentId,
                         host.subagentName,
-                        null);
+                        host.sessionWorkdir);
         host.emitter.emit(new UserPromptSubmitEvent(context, userMessage, "user", result));
         if (result.forbidden()) {
             host.emit(AgentEvent.Notice.warn(
                     "Prompt rejected" + (result.reason() == null ? "" : ": " + result.reason()),
-                    host.currentSessionId));
+                    host.currentSessionId,
+                    host.sessionWorkdir));
             return false;
         }
         return true;
@@ -228,14 +229,18 @@ public class AgentTurnExecutor {
     private CompactionCoordinator.CompactionProgress compactionProgress(final int toolsTokens) {
         return new CompactionCoordinator.CompactionProgress(
                 toolsTokens,
-                effective -> host.usageReporter.pushUsageContext(effective, host.requestModel(host.resolvedModel())));
+                effective -> host.usageReporter.pushUsageContext(effective, host.requestModel(host.resolvedModel())),
+                host.subagentId,
+                host.subagentName,
+                host.sessionWorkdir);
     }
 
     private void applyToolDirective(
             final String sessionId,
             final List<Message> messages,
             final ContextView.Directive directive,
-            final int toolsTokens) {
+            final int toolsTokens,
+            final BooleanSupplier cancelled) {
         final var beforeDirectiveContext = host.usageTracker.estimateContext(messages, toolsTokens);
         final var result = "prune".equals(directive.action())
                 ? host.contextManager.prune(messages)
@@ -245,7 +250,7 @@ public class AgentTurnExecutor {
                         directive.focus(),
                         directive.keepLast(),
                         directive.urgent(),
-                        () -> false,
+                        cancelled,
                         host.chatSettings,
                         compactionProgress(toolsTokens));
         if (!result.changed()) {
@@ -443,7 +448,7 @@ public class AgentTurnExecutor {
                 !host.skipConfiguredAgentModel && useProfileModel && (explicitModel == null || explicitModel.isBlank())
                         ? agent.model()
                         : contextualAgentTuning;
-        host.structuralCodeGraph.ensureReadyAsync();
+        host.structuralCodeGraph.ensureReadyAsync(host.sessionWorkdir);
         // fresh per-turn loop-guard state: repeat counts must not leak across turns
         // (the threshold cascade is resolved here, once per turn, like the plateau guards)
         host.repeats = new AgentLoop.ToolRepeats(host.resolvedRepeatSuccessThreshold(host.resolvedModel(runSettings)));
@@ -506,7 +511,8 @@ public class AgentTurnExecutor {
                     pause.durationMs(),
                     host.currentSessionId,
                     host.subagentId,
-                    host.subagentName));
+                    host.subagentName,
+                    host.sessionWorkdir));
         };
         // a resume right after an iteration-cap stop is a fresh window: make it visible instead of
         // looking like one seamless turn in the transcript
@@ -532,7 +538,8 @@ public class AgentTurnExecutor {
             if ("Cancelled".equals(e.getMessage())) {
                 // user interrupt surfaced through the stream/backoff paths: a normal end,
                 // not a failure - the transcript must not render it as an host.error
-                host.emit(new AgentEvent.TurnCancelled(host.currentSessionId, host.subagentId, host.subagentName));
+                host.emit(new AgentEvent.TurnCancelled(
+                        host.currentSessionId, host.subagentId, host.subagentName, host.sessionWorkdir));
             } else {
                 host.emit(host.error(e.getMessage()));
             }
@@ -540,7 +547,8 @@ public class AgentTurnExecutor {
         } catch (final InterruptedException e) {
             Thread.currentThread().interrupt();
             if (cancelled.getAsBoolean()) {
-                host.emit(new AgentEvent.TurnCancelled(host.currentSessionId, host.subagentId, host.subagentName));
+                host.emit(new AgentEvent.TurnCancelled(
+                        host.currentSessionId, host.subagentId, host.subagentName, host.sessionWorkdir));
             } else {
                 host.emit(host.error("Interrupted"));
             }
@@ -785,7 +793,8 @@ public class AgentTurnExecutor {
                     delivery.cancelled(),
                     sessionId,
                     delivery.subagentId(),
-                    delivery.name()));
+                    delivery.name(),
+                    host.sessionWorkdir));
         }
     }
 
@@ -839,7 +848,7 @@ public class AgentTurnExecutor {
         // snapshot which tools the registry actually serves (unfiltered by mode): plan mode may hide an EDIT
         // tool from this turn's wire list, so a call to a served EDIT tool in plan mode is a hidden-tool call
         // to auto-reject (never gate). Bare/empty test registries simply serve nothing and stay unaffected.
-        host.servedToolNames = host.toolRegistry.toWireTools().stream()
+        host.servedToolNames = host.toolRegistry.toWireTools(host.sessionWorkdir).stream()
                 .map(t -> t.function().name())
                 .collect(Collectors.toSet());
         var overflowRetried = false;
@@ -899,7 +908,7 @@ public class AgentTurnExecutor {
                     final var directive = host.contextView.poll();
                     if (directive != null) {
                         toolDirectiveApplied = true;
-                        applyToolDirective(sessionId, messages, directive, toolsTokens);
+                        applyToolDirective(sessionId, messages, directive, toolsTokens, cancelled);
                     }
                 }
                 // zero-LLM DCP-style strategies (dedup, write superseding, host.error-input purge) run only at
@@ -972,6 +981,9 @@ public class AgentTurnExecutor {
                                 toolsTokens,
                                 () -> host.closed || cancelled.getAsBoolean(),
                                 useProfileModel ? runSettings : host.chatSettings);
+                        if (adopted != null && adopted.changed()) {
+                            host.emitAdoptedCompaction(adopted);
+                        }
                         compacted = adopted != null
                                 ? adopted
                                 : host.contextManager.compact(
@@ -1337,7 +1349,8 @@ public class AgentTurnExecutor {
                         host.turnState.llmCalls,
                         host.currentSessionId,
                         host.subagentId,
-                        host.subagentName));
+                        host.subagentName,
+                        host.sessionWorkdir));
                 host.emitPhase(AgentEvent.Phase.STREAM_COMPLETE);
                 // inbound restore: replace provenance fakes in the assistant reply with the real
                 // values (only what we emitted outbound; model-invented token shapes stay as-is)
@@ -1435,7 +1448,7 @@ public class AgentTurnExecutor {
                         // loop) host.emit TurnCancelled before returning, without it the transcript stays
                         // busy forever and the live thinking tail keeps animating after the interrupt
                         host.emit(new AgentEvent.TurnCancelled(
-                                host.currentSessionId, host.subagentId, host.subagentName));
+                                host.currentSessionId, host.subagentId, host.subagentName, host.sessionWorkdir));
                         host.emitTurnMetrics(null, turnStartNanos);
                         return AgentLoop.str(assistant.content());
                     }
@@ -1479,7 +1492,8 @@ public class AgentTurnExecutor {
                                         + (host.configuration.llm().continueOnTruncation()
                                                 ? " Gave up after " + truncationContinues + " continuation"
                                                         + (truncationContinues == 1 ? "" : "s") + "."
-                                                : " Enable yca.llm.continueOnTruncation to auto-continue.")));
+                                                : " Enable yca.llm.continueOnTruncation to auto-continue."),
+                                reason));
                         host.emitTurnMetrics(content, turnStartNanos);
                         return content;
                     }
@@ -1676,7 +1690,7 @@ public class AgentTurnExecutor {
                     final var directive = host.contextView.poll();
                     if (directive != null) {
                         toolDirectiveApplied = true;
-                        applyToolDirective(sessionId, messages, directive, toolsTokens);
+                        applyToolDirective(sessionId, messages, directive, toolsTokens, cancelled);
                     }
                 }
             }
@@ -1684,7 +1698,8 @@ public class AgentTurnExecutor {
             // pending and auto-continuation is allowed, start a fresh window instead of stopping, so a
             // model that keeps calling tools is not capped by the per-window budget alone
             if (cancelled.getAsBoolean()) {
-                host.emit(new AgentEvent.TurnCancelled(host.currentSessionId, host.subagentId, host.subagentName));
+                host.emit(new AgentEvent.TurnCancelled(
+                        host.currentSessionId, host.subagentId, host.subagentName, host.sessionWorkdir));
                 host.emitTurnMetrics(null, turnStartNanos);
                 return null;
             }
@@ -1708,7 +1723,8 @@ public class AgentTurnExecutor {
             host.emitTurnMetrics(null, turnStartNanos);
             return null;
         }
-        host.emit(new AgentEvent.TurnCancelled(host.currentSessionId, host.subagentId, host.subagentName));
+        host.emit(new AgentEvent.TurnCancelled(
+                host.currentSessionId, host.subagentId, host.subagentName, host.sessionWorkdir));
         host.emitTurnMetrics(null, turnStartNanos);
         return null;
     }
@@ -1875,7 +1891,15 @@ public class AgentTurnExecutor {
     private AgentEvent.ToolFinished toolFinished(
             final String name, final String output, final boolean success, final boolean pending, final long ordinal) {
         return new AgentEvent.ToolFinished(
-                name, output, success, pending, ordinal, host.currentSessionId, host.subagentId, host.subagentName);
+                name,
+                output,
+                success,
+                pending,
+                ordinal,
+                host.currentSessionId,
+                host.subagentId,
+                host.subagentName,
+                host.sessionWorkdir);
     }
 
     void attachSessionSettings(final ChatSettings settings) {
@@ -2044,32 +2068,16 @@ public class AgentTurnExecutor {
 
     /** The per-session provider/model selection rides the session's {@link ChatSettings}; make the tracker see it. */
     AgentEvent.TextDelta textDelta(final String delta) {
-        return new AgentEvent.TextDelta(delta, host.currentSessionId, host.subagentId, host.subagentName);
+        return new AgentEvent.TextDelta(
+                delta, host.currentSessionId, host.subagentId, host.subagentName, host.sessionWorkdir);
     }
 
     AgentEvent.TextReset textReset() {
-        return new AgentEvent.TextReset(host.currentSessionId, host.subagentId, host.subagentName);
+        return new AgentEvent.TextReset(host.currentSessionId, host.subagentId, host.subagentName, host.sessionWorkdir);
     }
 
     AgentEvent.ThinkingDelta thinkingDelta(final String delta) {
-        return new AgentEvent.ThinkingDelta(delta, host.currentSessionId, host.subagentId, host.subagentName);
+        return new AgentEvent.ThinkingDelta(
+                delta, host.currentSessionId, host.subagentId, host.subagentName, host.sessionWorkdir);
     }
-
-    /**
-     * The session's resolved working/project directory, frozen once when the session runtime is
-     * created. Null means "use the process default ({@code host.configuration.resolveProjectDir()})".
-     * It is injected into every per-turn {@link ToolContext} so file-rooted tools resolve paths
-     * against the session's root. Set once by {@code SessionRuntimeFactory}; a mid-session change
-     * (web {@code session.setProject}) rebuilds the runtime rather than mutating this field.
-     *
-     * private AgentEvent.ToolStarted toolStarted(final String name, final String args, final long ordinal) {
-     * return new AgentEvent.ToolStarted(name, args, ordinal, host.currentSessionId, host.subagentId, host.subagentName);
-     * }
-     *
-     * /**
-     * Cancels the tool call with the given ordinal (the TUI's #{@code n} card): flips its per-call
-     * probe so the running tool aborts on its next cancellation poll. Does nothing when the call
-     * already finished. The turn itself keeps running - the aborting tool result is fed back to the
-     * model like any other failure.
-     */
 }

@@ -25,6 +25,7 @@ import io.yupiik.ia.agent.core.tools.Schemas;
 import io.yupiik.ia.agent.core.tools.ToolCategory;
 import io.yupiik.ia.agent.core.tools.ToolContext;
 import io.yupiik.ia.agent.core.tools.ToolResult;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Locale;
 import java.util.Map;
@@ -60,7 +61,7 @@ public class CheckSubagentsTool implements EmbeddedTool {
     }
 
     @Override
-    public String description() {
+    public String description(final Path workdir) {
         return "Monitor and manage spawned sub-agents. "
                 + "Actions: 'poll' (list active + status), 'collect' (block up to max_wait_ms, default "
                 + DEFAULT_MAX_WAIT_MS / 1000
@@ -84,11 +85,6 @@ public class CheckSubagentsTool implements EmbeddedTool {
                                 Schemas.str("Max milliseconds to block a 'collect' for a still-running "
                                         + "sub-agent (default " + DEFAULT_MAX_WAIT_MS + ").")),
                 "action");
-    }
-
-    @Override
-    public ToolResult execute(final Map<String, Object> args) {
-        return execute(args, ToolContext.empty());
     }
 
     @Override

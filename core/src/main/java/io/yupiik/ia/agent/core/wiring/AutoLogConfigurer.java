@@ -148,7 +148,7 @@ public class AutoLogConfigurer {
         return installed;
     }
 
-    public void onStop(@OnEvent final Stop stop) {
+    public void onStop(@OnEvent @Order(Integer.MAX_VALUE) final Stop stop) {
         final var handler = installed;
         if (handler != null) {
             Logger.getLogger("").removeHandler(handler);

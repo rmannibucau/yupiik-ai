@@ -60,6 +60,11 @@ import org.junit.jupiter.api.io.TempDir;
  */
 @Disabled("benchmark, not a unit test - run explicitly")
 class MavenRepositoryKnowledgeProvisionBenchmark {
+    private static final Pattern BASE_URL = Pattern.compile("\"baseUrl\"\\s*:\\s*(?:\"([^\"]*)\"|([0-9.]+))");
+    private static final Pattern API_KEY = Pattern.compile("\"apiKey\"\\s*:\\s*(?:\"([^\"]*)\"|([0-9.]+))");
+    private static final Pattern MODEL = Pattern.compile("\"model\"\\s*:\\s*(?:\"([^\"]*)\"|([0-9.]+))");
+    private static final Pattern CONTEXT_WINDOW =
+            Pattern.compile("\"contextWindow\"\\s*:\\s*(?:\"([^\"]*)\"|([0-9.]+))");
 
     private static final String HOP_PROJECT = "/opt/rmannibucau/dev/Github/hop";
 
@@ -120,6 +125,7 @@ class MavenRepositoryKnowledgeProvisionBenchmark {
                 final var done = new CountDownLatch(1);
                 final var start = System.nanoTime();
                 final var ack = service.startIndex(
+                        hop,
                         slice,
                         false,
                         progress -> {
@@ -134,7 +140,8 @@ class MavenRepositoryKnowledgeProvisionBenchmark {
                                     TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start), size);
                             summary.lines().forEach(line -> System.out.println("[bench]   " + line));
                             done.countDown();
-                        });
+                        },
+                        null);
                 ack.forEach(line -> System.out.println("[bench] slice " + size + " ack: " + line));
                 if (!done.await(budgetsMs[i], TimeUnit.MILLISECONDS)) {
                     System.out.println("[bench] slice " + size + " did not finish within " + (budgetsMs[i] / 1000)
@@ -223,10 +230,10 @@ class MavenRepositoryKnowledgeProvisionBenchmark {
         }
         final var provider = objectBlock(json, "provider");
         final var out = new LinkedHashMap<String, String>();
-        scalar(provider, "baseUrl").ifPresent(v -> out.put("baseUrl", v));
-        scalar(provider, "apiKey").ifPresent(v -> out.put("apiKey", v));
-        scalar(provider, "model").ifPresent(v -> out.put("model", v));
-        scalar(provider, "contextWindow").ifPresent(v -> out.put("contextWindow", v));
+        scalar(provider, BASE_URL).ifPresent(v -> out.put("baseUrl", v));
+        scalar(provider, API_KEY).ifPresent(v -> out.put("apiKey", v));
+        scalar(provider, MODEL).ifPresent(v -> out.put("model", v));
+        scalar(provider, CONTEXT_WINDOW).ifPresent(v -> out.put("contextWindow", v));
         if (out.size() < 3) {
             throw new IllegalStateException("provider baseUrl/apiKey/model not found in " + home);
         }
@@ -255,9 +262,8 @@ class MavenRepositoryKnowledgeProvisionBenchmark {
         throw new IllegalStateException("unbalanced object for key: " + key);
     }
 
-    private Optional<String> scalar(final String block, final String field) {
-        final var matcher = Pattern.compile("\"" + field + "\"\\s*:\\s*(?:\"([^\"]*)\"|([0-9.]+))")
-                .matcher(block);
+    private Optional<String> scalar(final String block, final Pattern field) {
+        final var matcher = field.matcher(block);
         if (!matcher.find()) {
             return Optional.empty();
         }

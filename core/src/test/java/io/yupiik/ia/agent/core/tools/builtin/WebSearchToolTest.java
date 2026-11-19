@@ -29,6 +29,7 @@ import io.yupiik.ia.agent.core.configuration.TestConfigs;
 import io.yupiik.ia.agent.core.configuration.WebSearchProvider;
 import io.yupiik.ia.agent.core.mcp.McpManager;
 import io.yupiik.ia.agent.core.mcp.WebSearchManager;
+import io.yupiik.ia.agent.core.tools.ToolContext;
 import io.yupiik.ia.agent.core.tools.ToolRegistry;
 import io.yupiik.ia.agent.test.TestJsonMapper;
 import io.yupiik.maven.knowledge.process.ProcessService;
@@ -81,7 +82,8 @@ class WebSearchToolTest {
         try (final var mock = Mock.start(mapper).payload(parallelPayload())) {
             final var config = TestConfigs.codingAgent(singleProvider(WebSearchProvider.PARALLEL, mock.url()));
             final var tool = new WebSearchTool(new WebSearchManager(mapper, config, client), config);
-            final var result = tool.execute(Map.of("query", "apache maven build tool"));
+            final var result = tool.execute(
+                    Map.of("query", "apache maven build tool"), ToolContext.empty(config.resolveWorkingDir()));
             assertTrue(result.success());
             assertTrue(result.output().contains("- First (https://example.com/a, published 2026-06-30)"));
             assertTrue(result.output().contains("\n  part one\n\n  part two"));
@@ -94,7 +96,8 @@ class WebSearchToolTest {
         try (final var mock = Mock.start(mapper).payload("{\"search_id\":\"s1\",\"results\":[]}")) {
             final var config = TestConfigs.codingAgent(singleProvider(WebSearchProvider.PARALLEL, mock.url()));
             final var tool = new WebSearchTool(new WebSearchManager(mapper, config, client), config);
-            final var result = tool.execute(Map.of("query", "apache maven build tool"));
+            final var result = tool.execute(
+                    Map.of("query", "apache maven build tool"), ToolContext.empty(config.resolveWorkingDir()));
             assertTrue(result.success());
             assertEquals(NO_RESULTS, result.output());
         }
@@ -104,7 +107,7 @@ class WebSearchToolTest {
     void queryIsRequired() {
         final var config = TestConfigs.codingAgent(defaultConfig());
         final var tool = new WebSearchTool(new WebSearchManager(mapper, config, client), config);
-        final var result = tool.execute(Map.of());
+        final var result = tool.execute(Map.of(), ToolContext.empty(config.resolveWorkingDir()));
         assertFalse(result.success());
         assertEquals("query is required", result.output());
     }
@@ -114,14 +117,14 @@ class WebSearchToolTest {
         final var config = TestConfigs.codingAgent(
                 Map.of("yca.storageHome", tempDir.toString(), "yca.tools.websearch.providers.length", "0"));
         final var tool = new WebSearchTool(new WebSearchManager(mapper, config, client), config);
-        assertFalse(tool.usable());
-        final var mcpManager = new McpManager(config, mapper, List.of(tool), client, new ProcessService());
+        assertFalse(tool.usable(config.resolveWorkingDir()));
+        final var mcpManager = new McpManager(config, mapper, List.of(tool), null, new ProcessService());
         mcpManager.start();
         final var registry = new ToolRegistry(mcpManager);
-        assertFalse(registry.describe().contains("websearch"));
-        assertTrue(registry.toWireTools().stream()
+        assertFalse(registry.describe(config.resolveWorkingDir()).contains("websearch"));
+        assertTrue(registry.toWireTools(config.resolveWorkingDir()).stream()
                 .noneMatch(t -> "websearch".equals(t.function().name())));
-        final var executed = tool.execute(Map.of("query", "anything"));
+        final var executed = tool.execute(Map.of("query", "anything"), ToolContext.empty(config.resolveWorkingDir()));
         assertFalse(executed.success());
         assertTrue(executed.output().contains("disabled"));
     }
@@ -130,12 +133,12 @@ class WebSearchToolTest {
     void toolIsVisibleWithDefaultProviders() {
         final var config = TestConfigs.codingAgent(defaultConfig());
         final var tool = new WebSearchTool(new WebSearchManager(mapper, config, client), config);
-        assertTrue(tool.usable());
-        final var mcpManager = new McpManager(config, mapper, List.of(tool), client, new ProcessService());
+        assertTrue(tool.usable(config.resolveWorkingDir()));
+        final var mcpManager = new McpManager(config, mapper, List.of(tool), null, new ProcessService());
         mcpManager.start();
         final var registry = new ToolRegistry(mcpManager);
-        assertTrue(registry.describe().contains("websearch"));
-        assertTrue(registry.toWireTools().stream()
+        assertTrue(registry.describe(config.resolveWorkingDir()).contains("websearch"));
+        assertTrue(registry.toWireTools(config.resolveWorkingDir()).stream()
                 .anyMatch(t -> "websearch".equals(t.function().name())));
     }
 
@@ -237,7 +240,7 @@ class WebSearchToolTest {
                                 "jsonrpc",
                                 "2.0",
                                 "id",
-                                1,
+                                ((Map<?, ?>) mapper.fromString(Object.class, body)).get("id"),
                                 "result",
                                 Map.of("content", List.of(Map.of("type", "text", "text", payload))))));
             }

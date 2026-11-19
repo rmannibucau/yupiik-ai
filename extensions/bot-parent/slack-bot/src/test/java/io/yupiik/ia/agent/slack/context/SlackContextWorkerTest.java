@@ -22,6 +22,7 @@ import io.yupiik.ia.agent.bot.runtime.admission.HostAdmission;
 import io.yupiik.ia.agent.bot.runtime.admission.HostAdmissionConfiguration;
 import io.yupiik.ia.agent.bot.runtime.configuration.ExecutorConfiguration;
 import io.yupiik.ia.agent.bot.runtime.model.AgentConfigurationDocument;
+import io.yupiik.ia.agent.core.tools.ToolContext;
 import io.yupiik.ia.agent.slack.configuration.AgentSlackContextConfiguration;
 import io.yupiik.ia.agent.slack.configuration.SlackContextConfiguration;
 import io.yupiik.ia.agent.slack.configuration.SlackThreadConfiguration;
@@ -388,7 +389,9 @@ class SlackContextWorkerTest {
                                             (String) binding.get("channel"),
                                             5),
                                     fixture.json));
-                            tool.execute(Map.of("operation", "search", "terms", List.of("release")));
+                            tool.execute(
+                                    Map.of("operation", "search", "terms", List.of("release")),
+                                    ToolContext.empty(attempt));
                         }
                         if (!"postcompletion".equals(loss)) {
                             try {
@@ -688,8 +691,9 @@ class SlackContextWorkerTest {
                             new AgentSlackContextConfiguration(
                                     true, mailboxPath.toString(), (String) context.get("channel"), 15),
                             fixture.json));
-                    assertTrue(tool.usable());
-                    final var resolved = tool.execute(Map.of("operation", "resolve_user", "userId", "U1"));
+                    assertTrue(tool.usable(attempt));
+                    final var resolved = tool.execute(
+                            Map.of("operation", "resolve_user", "userId", "U1"), ToolContext.empty(attempt));
                     if (cancellation) {
                         assertTrue(resolved.error());
                         completed.complete(null);
@@ -702,7 +706,8 @@ class SlackContextWorkerTest {
                     assertEquals("Ada", name.get("displayName"));
                     assertEquals(true, name.get("untrusted"));
                     final var searched = tool.execute(
-                            Map.of("operation", "search", "authorUserId", "U1", "terms", List.of("release train")));
+                            Map.of("operation", "search", "authorUserId", "U1", "terms", List.of("release train")),
+                            ToolContext.empty(attempt));
                     assertFalse(searched.error(), searched.output());
                     final var search = (Map<?, ?>) fixture.json.fromString(Object.class, searched.output());
                     assertEquals("ok", search.get("status"));

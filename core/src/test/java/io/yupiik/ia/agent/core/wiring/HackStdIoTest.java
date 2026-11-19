@@ -25,6 +25,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import io.yupiik.fusion.framework.api.configuration.Configuration;
 import io.yupiik.fusion.framework.api.container.configuration.ConfigurationRegistration;
 import io.yupiik.fusion.framework.api.lifecycle.Stop;
+import io.yupiik.fusion.framework.api.main.Args;
 import io.yupiik.ia.agent.core.cli.prompt.PromptOutput;
 import java.io.ByteArrayOutputStream;
 import java.io.PrintStream;
@@ -32,6 +33,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -192,14 +194,14 @@ class HackStdIoTest {
     @Test
     void controlCtorDoesNotInstall() {
         final var capturedOut = System.out;
-        final var control = new StdIoControl();
+        final var control = new StdIoControl(Optional.empty());
         assertSame(capturedOut, System.out, "the control ctor must not take the streams over");
         assertFalse(control.hackStdIo().installed(), "the produced control must start uninstalled");
     }
 
     @Test
     void controlInstallsWhenAutoIsDefaultedOrEnabled() {
-        final var control = new StdIoControl();
+        final var control = new StdIoControl(Optional.empty());
         try {
             control.install(registration(Map.of()));
             assertInstanceOf(
@@ -218,7 +220,7 @@ class HackStdIoTest {
     @Test
     void controlLeavesTheStreamsAloneWhenAutoIsDisabled() {
         final var capturedOut = System.out;
-        final var control = new StdIoControl();
+        final var control = new StdIoControl(Optional.empty());
         control.install(registration(Map.of("yca.logging.auto", "false")));
         assertSame(capturedOut, System.out, "yca.logging.auto=false must never install");
         assertFalse(
@@ -228,10 +230,27 @@ class HackStdIoTest {
     }
 
     @Test
+    void controlLeavesProtocolStreamsAloneForAcp() {
+        final var capturedOut = System.out;
+        final var capturedErr = System.err;
+        final var control = new StdIoControl(Optional.of(new Args(List.of("acp"))));
+        try {
+            control.install(registration(Map.of("yca.logging.auto", "true")));
+            assertFalse(control.hackStdIo().installed(), "ACP must skip the terminal takeover even with auto logging");
+            assertSame(capturedOut, System.out);
+            assertSame(capturedErr, System.err);
+        } finally {
+            control.uninstall(new Stop());
+        }
+        assertSame(capturedOut, System.out);
+        assertSame(capturedErr, System.err);
+    }
+
+    @Test
     void controlStopListenerRestoresTheStreams() {
         final var capturedOut = System.out;
         final var capturedErr = System.err;
-        final var control = new StdIoControl();
+        final var control = new StdIoControl(Optional.empty());
         control.install(registration(Map.of()));
         assertInstanceOf(HackStdIo.HijackedPrintStream.class, System.out, "the takeover must be active");
         control.uninstall(new Stop());

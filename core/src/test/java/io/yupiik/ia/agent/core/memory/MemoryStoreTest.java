@@ -18,10 +18,13 @@ package io.yupiik.ia.agent.core.memory;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.TestConfigs;
+import io.yupiik.ia.agent.core.tools.ToolContext;
+import io.yupiik.ia.agent.core.tools.builtin.MemoryWriteTool;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.HashMap;
@@ -36,6 +39,50 @@ class MemoryStoreTest {
     Path home;
 
     @Test
+    void writesAreIsolatedByExplicitRootAndGlobalStorageIsShared() throws Exception {
+        final var configuredRoot = home.resolve("configured-workdir");
+        final var storage = home.resolve("shared-storage");
+        final var store = new MemoryStore(config(
+                home,
+                Map.of(
+                        "yca.workingDir", configuredRoot.toString(),
+                        "yca.projectDir",
+                                home.resolve("different-project-config").toString(),
+                        "yca.storageHome", storage.toString())));
+        final var alpha = home.resolve("alpha");
+        final var beta = home.resolve("beta");
+        assertEquals(configuredRoot.resolve(".yca/memory/MEMORY.md"), MemoryStore.projectFile(configuredRoot));
+        assertEquals(storage.resolve("memory/MEMORY.md"), store.globalFile());
+
+        store.append(false, List.of("alpha architecture"), alpha);
+        store.appendText(false, "beta deployment\n\nbeta operations", beta);
+        assertThrows(NullPointerException.class, () -> store.appendText(false, "rejected fact", null));
+        final var alphaOriginal = store.readProject(alpha);
+        final var betaOriginal = store.readProject(beta);
+        store.append(true, List.of("shared user preference"), alpha);
+        store.appendText(true, "another global preference", beta);
+        assertEquals(alphaOriginal, store.readProject(alpha));
+        assertEquals(betaOriginal, store.readProject(beta));
+        assertFalse(alphaOriginal.contains("beta"));
+        assertFalse(betaOriginal.contains("alpha"));
+        assertFalse(Files.exists(MemoryStore.projectFile(configuredRoot)));
+        assertTrue(store.readGlobal().contains("shared user preference"));
+        assertTrue(store.readGlobal().contains("another global preference"));
+
+        store.replace(false, List.of("alpha rewritten"), alpha);
+        assertEquals(
+                alphaOriginal, Files.readString(MemoryStore.projectFile(alpha).resolveSibling("MEMORY.md.bak")));
+        assertEquals(betaOriginal, store.readProject(beta));
+        assertFalse(store.readProject(alpha).contains("architecture"));
+        assertThrows(NullPointerException.class, () -> store.replace(false, List.of("rejected replacement"), null));
+        store.replace(true, List.of("global replacement"), beta);
+        assertTrue(store.readGlobal().contains("global replacement"));
+        assertEquals(betaOriginal, store.readProject(beta));
+        assertTrue(store.promptSection(null, 2000, alpha).contains("alpha rewritten"));
+        assertFalse(store.promptSection(null, 2000, alpha).contains("beta deployment"));
+    }
+
+    @Test
     void promptSectionFiltersHeaderAndDeduplicates() throws Exception {
         final var store = new MemoryStore(config(home, Map.of()));
         Files.createDirectories(store.globalFile().getParent());
@@ -46,7 +93,7 @@ class MemoryStoreTest {
                         + "- fact one\n"
                         + "- fact one\n"
                         + "- fact two\n");
-        final var section = store.promptSection(null);
+        final var section = store.promptSection(null, 2000, home);
         assertFalse(section.contains("Durable facts"), "the file header must not leak into the prompt: " + section);
         assertEquals(1, count(section, "- fact one"), "duplicated bullets must be deduplicated: " + section);
         assertEquals(1, count(section, "- fact two"), "distinct bullets must be kept: " + section);
@@ -55,22 +102,22 @@ class MemoryStoreTest {
     @Test
     void versionIsStableThenBumpsOnAppend() throws Exception {
         final var store = new MemoryStore(config(home, Map.of()));
-        final var v1 = store.version();
-        assertEquals(v1, store.version(), "version must be stable while memory is untouched");
-        store.append(true, List.of("a new durable fact"));
-        final var v2 = store.version();
+        final var v1 = store.version(home);
+        assertEquals(v1, store.version(home), "version must be stable while memory is untouched");
+        store.append(true, List.of("a new durable fact"), home);
+        final var v2 = store.version(home);
         assertTrue(v2 != v1, "a write must bump the content version");
-        assertEquals(v2, store.version(), "the new version must be stable too");
+        assertEquals(v2, store.version(home), "the new version must be stable too");
     }
 
     @Test
     void appendDeduplicatesIdenticalFacts() throws Exception {
         final var store = new MemoryStore(config(home, Map.of()));
-        final var first = store.append(true, List.of("the same fact"));
-        final var second = store.append(true, List.of("the same fact"));
+        final var first = store.append(true, List.of("the same fact"), home);
+        final var second = store.append(true, List.of("the same fact"), home);
         assertEquals(1, first.size());
         assertTrue(second.isEmpty(), "a repeated append of the same fact must be a no-op");
-        assertEquals(1, count(store.promptSection(null), "- the same fact"));
+        assertEquals(1, count(store.promptSection(null, 2000, home), "- the same fact"));
     }
 
     @Test
@@ -82,10 +129,10 @@ class MemoryStoreTest {
                 "# Memory\n\nDurable facts, decisions and preferences. One bullet per line.\n\n"
                         + "- alpha beta gamma delta epsilon zeta\n"
                         + "- a b c d e f g h i j k l\n");
-        assertTrue(store.promptSection(null, 0).isEmpty(), "budget 0 must disable the section");
-        assertTrue(store.promptSection(null, 5).isEmpty(), "tiny budget must disable the section");
-        assertTrue(store.promptSection(null, 120).isEmpty(), "budget below the 500 floor is auto-off");
-        final var small = store.promptSection(null, 700);
+        assertTrue(store.promptSection(null, 0, home).isEmpty(), "budget 0 must disable the section");
+        assertTrue(store.promptSection(null, 5, home).isEmpty(), "tiny budget must disable the section");
+        assertTrue(store.promptSection(null, 120, home).isEmpty(), "budget below the 500 floor is auto-off");
+        final var small = store.promptSection(null, 700, home);
         // the global (only 2 bullets, ~65 chars) fits in the budget: the section keeps content
         assertTrue(small.contains("- alpha"), "budgeted section must keep content: " + small);
         assertTrue(small.length() <= 900, "budgeted section must stay small: " + small.length());
@@ -97,12 +144,14 @@ class MemoryStoreTest {
         store.append(
                 true,
                 List.of(
-                        "FileSessionStore and InMemorySessionStore must round-trip Message.others() on load and replace"));
+                        "FileSessionStore and InMemorySessionStore must round-trip Message.others() on load and replace"),
+                home);
         store.append(
                 true,
                 List.of(
-                        "FileSessionStore and InMemorySessionStore must round-trip Message.others in load() and replace()"));
-        final var section = store.promptSection(null);
+                        "FileSessionStore and InMemorySessionStore must round-trip Message.others in load() and replace()"),
+                home);
+        final var section = store.promptSection(null, 2000, home);
         assertEquals(
                 1,
                 count(section, "FileSessionStore and InMemorySessionStore must round-trip"),
@@ -113,9 +162,9 @@ class MemoryStoreTest {
     @Test
     void appendKeepsDistinctBulletsEvenWhenTokensOverlap() throws Exception {
         final var store = new MemoryStore(config(home, Map.of()));
-        store.append(true, List.of("the agent prefers tabs for indentation"));
-        store.append(true, List.of("the agent prefers spaces in documentation files"));
-        final var section = store.promptSection(null);
+        store.append(true, List.of("the agent prefers tabs for indentation"), home);
+        store.append(true, List.of("the agent prefers spaces in documentation files"), home);
+        final var section = store.promptSection(null, 2000, home);
         assertEquals(1, count(section, "the agent prefers tabs"), "distinct fact must be kept: " + section);
         assertEquals(1, count(section, "the agent prefers spaces"), "distinct fact must be kept: " + section);
     }
@@ -125,8 +174,8 @@ class MemoryStoreTest {
         final var store = new MemoryStore(config(home, Map.of()));
         final var stored = MemoryStore.withMeta(5, List.of("maven", "build"), "src/main/App.java", "always run mvn -o");
         assertTrue(stored.startsWith("- 5|"), "stored bullet carries the p5 envelope: " + stored);
-        store.append(true, List.of(stored));
-        final var section = store.promptSection(null);
+        store.append(true, List.of(stored), home);
+        final var section = store.promptSection(null, 2000, home);
         assertTrue(section.contains("- always run mvn -o"), "fact text must be injected: " + section);
         assertFalse(section.contains("5|"), "the envelope must never leak into the prompt: " + section);
         assertFalse(section.contains("maven|build"), "topic must not leak: " + section);
@@ -145,7 +194,7 @@ class MemoryStoreTest {
                 + "- a hand-written line with | pipe characters in it\n";
         Files.writeString(store.globalFile(), original);
         // reading must not rewrite or touch a compat line
-        final var section = store.promptSection(null);
+        final var section = store.promptSection(null, 2000, home);
         assertTrue(section.contains("- user prefers tabs"), "plain line must be injected: " + section);
         assertTrue(
                 section.contains("- a hand-written line with | pipe characters in it"),
@@ -166,7 +215,8 @@ class MemoryStoreTest {
                         MemoryStore.withMeta(5, null, null, "never edit generated files"),
                         MemoryStore.withMeta(5, null, null, "always run mvn -o"),
                         "an ordinary observation one",
-                        "an ordinary observation two"));
+                        "an ordinary observation two"),
+                home);
         final var file = Files.readString(store.globalFile());
         assertTrue(file.contains("never edit generated files"), "keep bullets must survive eviction: " + file);
         assertTrue(file.contains("always run mvn -o"), "keep bullets must survive eviction: " + file);
@@ -186,7 +236,8 @@ class MemoryStoreTest {
                 true,
                 List.of(
                         MemoryStore.withMeta(5, null, null, "first directive"),
-                        MemoryStore.withMeta(5, null, null, "second directive")));
+                        MemoryStore.withMeta(5, null, null, "second directive")),
+                home);
         final var file = Files.readString(store.globalFile());
         // with maxKeepLines=1 and two keep bullets, one keep is demoted to p4 (kept, not dropped)
         assertEquals(1, keepCount(file, 5), "exactly one keep bullet may remain: " + file);
@@ -225,8 +276,8 @@ class MemoryStoreTest {
     @Test
     void memoryWriteToolStoresAnExplicitKeepEnvelopeByDefault() throws Exception {
         final var store = new MemoryStore(config(home, Map.of()));
-        final var tool = new io.yupiik.ia.agent.core.tools.builtin.MemoryWriteTool(store);
-        final var result = tool.execute(Map.of("fact", "always use tabs", "scope", "global"));
+        final var tool = new MemoryWriteTool(store);
+        final var result = tool.execute(Map.of("fact", "always use tabs", "scope", "global"), ToolContext.empty(home));
         assertTrue(result.output().contains("Remembered"), "the write must report success: " + result.output());
         final var file = Files.readString(store.globalFile());
         // memory_write defaults to an explicit keep directive (p5) with no path/topic, stamped today
@@ -241,13 +292,15 @@ class MemoryStoreTest {
     @Test
     void memoryWriteToolHonorsKeepFalseAndPathTopic() throws Exception {
         final var store = new MemoryStore(config(home, Map.of()));
-        final var tool = new io.yupiik.ia.agent.core.tools.builtin.MemoryWriteTool(store);
-        tool.execute(Map.of(
-                "fact", "the discount rule",
-                "scope", "global",
-                "keep", "false",
-                "path", "src/main/CartTotals.java",
-                "topic", "rounding discount"));
+        final var tool = new MemoryWriteTool(store);
+        tool.execute(
+                Map.of(
+                        "fact", "the discount rule",
+                        "scope", "global",
+                        "keep", "false",
+                        "path", "src/main/CartTotals.java",
+                        "topic", "rounding discount"),
+                ToolContext.empty(home));
         final var file = Files.readString(store.globalFile());
         final var line = file.lines()
                 .filter(l -> MemoryStore.textOf(l).equals("the discount rule"))

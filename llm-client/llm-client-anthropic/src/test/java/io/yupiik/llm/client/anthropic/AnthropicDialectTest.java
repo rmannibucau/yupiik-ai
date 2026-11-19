@@ -66,6 +66,10 @@ import org.junit.jupiter.api.extension.ExtendWith;
 
 @ExtendWith(TestJsonMapper.class)
 class AnthropicDialectTest {
+    private static int cacheControls(final String body) {
+        return (body.length() - body.replace("cache_control", "").length()) / "cache_control".length();
+    }
+
     private HttpServer server;
     private HttpClient delegate;
     private ExtendedHttpClient client;
@@ -308,10 +312,7 @@ class AnthropicDialectTest {
         dialect.chat(request).toCompletableFuture().get(5, TimeUnit.SECONDS);
         final var body = reqBody.get();
         // system + stable prefix breakpoints, plus automatic caching of the conversation
-        assertEquals(
-                3,
-                body.split("cache_control", -1).length - 1,
-                "expected system + stable prefix + automatic caching:\n" + body);
+        assertEquals(3, cacheControls(body), "expected system + stable prefix + automatic caching:\n" + body);
         assertTrue(body.contains("<session-state>\\nDate: x\\n</session-state>"), body);
         assertFalse(body.contains("volatileTail"), "the message flag must not leak to the payload:\n" + body);
     }
@@ -353,7 +354,7 @@ class AnthropicDialectTest {
         dialect.chat(request).toCompletableFuture().get(5, TimeUnit.SECONDS);
         final var body = reqBody.get();
         // no explicit splitBlocks extension -> no split, tail inline, system + automatic caching
-        assertEquals(2, body.split("cache_control", -1).length - 1, "expected system + automatic caching:\n" + body);
+        assertEquals(2, cacheControls(body), "expected system + automatic caching:\n" + body);
         assertTrue(body.contains("\"content\":\"prompt\\n\\n<session-state>\\nDate: x\\n</session-state>\""), body);
     }
 
@@ -394,7 +395,7 @@ class AnthropicDialectTest {
         dialect.chat(request).toCompletableFuture().get(5, TimeUnit.SECONDS);
         final var body = reqBody.get();
         // the tail rides inline as a plain string; automatic caching remains enabled
-        assertEquals(2, body.split("cache_control", -1).length - 1, "expected system + automatic caching:\n" + body);
+        assertEquals(2, cacheControls(body), "expected system + automatic caching:\n" + body);
         assertTrue(body.contains("\"content\":\"prompt\\n\\n<session-state>\\nDate: x\\n</session-state>\""), body);
         assertFalse(body.contains("anthropicSplitBlocks"), "the flag must not leak to the payload:\n" + body);
     }

@@ -127,7 +127,7 @@ Verify includes, tables, code blocks and old anchors before publishing.
 
 === Automated checks
 
-Run `mvn -pl documentation test` after compiling the reactor metadata for source-level navigation, diagrams and scoped configuration generation regressions.
+Run `mvn -pl documentation test` after compiling the reactor metadata for configuration generation regressions.
 The scoped-reference tests use the configured POM filters and actual metadata, check every matching option and environment name, reject output collisions, and verify that includes and producers agree.
 After building the minisite, run the opt-in browser check with Playwright:
 
@@ -142,4 +142,7 @@ PLAYWRIGHT_MODULE=/tmp/yca-doc-browser/node_modules/playwright/index.mjs \
 
 Pass the generated site directory as the script's first argument if the version or output location differs.
 Set `CHROME_BIN` to use an existing Chrome/Chromium executable instead of Playwright's downloaded browser.
-The check validates local links and anchors, scoped option/environment references, generated command directories, diagram rendering and failure fallback, theme changes, mobile layout, keyboard access and configuration filtering.
+The check discovers diagram pages in the generated HTML and validates Mermaid rendering, failure fallback, malformed-diagram isolation, theme changes, mobile layout, keyboard access and configuration filtering.
+It does not enforce page wording, command inventories or navigation layout.
+Local link and anchor validation belongs in the AsciiDoc/minisite layer and is not checked here.
+Diagram rendering requires access to the Mermaid CDN.

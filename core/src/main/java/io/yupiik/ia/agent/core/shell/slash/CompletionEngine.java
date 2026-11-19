@@ -20,6 +20,8 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Locale;
+import java.util.Objects;
+import java.util.regex.Pattern;
 
 /**
  * Prompt-line completion engine shared by the TUI and the JLine completer.
@@ -31,6 +33,7 @@ import java.util.Locale;
  * free-text {@code @agent} prefix.
  */
 public final class CompletionEngine {
+    private static final Pattern WHITESPACE = Pattern.compile("\\s+");
     /** A completion candidate: the range of text to replace and the matches. */
     public record Suggestion(List<String> items, int replaceStart, int replaceEnd, String label) {
         public boolean empty() {
@@ -86,7 +89,7 @@ public final class CompletionEngine {
             }
             return Suggestion.none();
         }
-        final var firstToken = beforeRaw.strip().split("\\s+")[0];
+        final var firstToken = WHITESPACE.split(beforeRaw.strip())[0];
         if (!firstToken.startsWith("/")) {
             return Suggestion.none();
         }
@@ -97,7 +100,7 @@ public final class CompletionEngine {
         // Split on any whitespace (space, tab) so tab-separated args behave
         // exactly like space-separated ones.
         final var typed = text.substring(0, tokenStart).strip();
-        final var typedTokens = typed.split("\\s+", 2);
+        final var typedTokens = WHITESPACE.split(typed, 2);
         final var arg = typedTokens.length > 1 ? typedTokens[1].strip() : "";
         final var completion = registry.completionFor(command);
         if (completion.wholeArgument()) {
@@ -127,11 +130,13 @@ public final class CompletionEngine {
     }
 
     /** Filesystem path completer used by the shell env implementations of /context and /editplan. */
-    public static List<String> pathCandidates(final String token) {
+    public static List<String> pathCandidates(final String token, final Path workdir) {
+        Objects.requireNonNull(workdir, "workdir");
         final var base = token.isEmpty() ? "." : token;
         final var norm = base.replace("~", System.getProperty("user.home"));
-        final var path = Path.of(norm).toAbsolutePath();
-        final var parent = path.getParent() == null ? Path.of(".") : path.getParent();
+        final var supplied = Path.of(norm);
+        final var path = supplied.isAbsolute() ? supplied : workdir.resolve(supplied);
+        final var parent = path.getParent() == null ? workdir : path.getParent();
         final var lastSlash = base.lastIndexOf('/');
         final var dirPart = lastSlash >= 0 ? base.substring(0, lastSlash + 1) : "";
         final var fileName =

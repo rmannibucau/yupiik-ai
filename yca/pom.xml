@@ -17,6 +17,11 @@
   <dependencies>
     <dependency>
       <groupId>io.yupiik.ia.agent</groupId>
+      <artifactId>acp</artifactId>
+      <version>${project.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>io.yupiik.ia.agent</groupId>
       <artifactId>nono-notifications-linux</artifactId>
       <version>${project.version}</version>
     </dependency>

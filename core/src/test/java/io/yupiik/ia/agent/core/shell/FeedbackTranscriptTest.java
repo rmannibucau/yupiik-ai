@@ -22,29 +22,38 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import io.yupiik.ia.agent.core.agent.AgentEvent;
 import io.yupiik.ia.agent.core.agent.FeedbackTiming;
 import io.yupiik.ia.agent.core.llm.Message;
+import java.nio.file.Path;
 import java.util.List;
+import java.util.regex.Pattern;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 class FeedbackTranscriptTest {
+    private static final Pattern FIRST_ASSISTANT_HEADER = Pattern.compile("\\Q**[1000] Assistant**\\E");
+    private static final Pattern SECOND_ASSISTANT_HEADER = Pattern.compile("\\Q**[3000] Assistant**\\E");
+
+    @TempDir
+    private static Path eventWorkdir;
+
     @Test
     void pendingFlushAndFinalKeepTheSameHeadingButNextFeedbackGetsANewOne() {
         final var transcript = transcript();
         transcript.startUserTurn("hi");
-        transcript.onEvent(new AgentEvent.FeedbackStarted("text", 1000, "s", null, null));
-        transcript.onEvent(new AgentEvent.TextDelta("first", "s"));
+        transcript.onEvent(new AgentEvent.FeedbackStarted("text", 1000, "s", null, null, eventWorkdir));
+        transcript.onEvent(new AgentEvent.TextDelta("first", "s", eventWorkdir));
         final var pending = transcript.markdown("", "");
         assertTrue(pending.contains("**[1000] Assistant**\n\nfirst"), pending);
         assertSame(pending, transcript.markdown("", ""));
-        transcript.onEvent(new AgentEvent.ToolStarted("read", "{}", "s"));
-        transcript.onEvent(new AgentEvent.FeedbackStarted("thinking", 2000, "s", null, null));
-        transcript.onEvent(new AgentEvent.ThinkingDelta("why", "s"));
+        transcript.onEvent(new AgentEvent.ToolStarted("read", "{}", "s", eventWorkdir));
+        transcript.onEvent(new AgentEvent.FeedbackStarted("thinking", 2000, "s", null, null, eventWorkdir));
+        transcript.onEvent(new AgentEvent.ThinkingDelta("why", "s", eventWorkdir));
         assertEquals("[2000] Assistant - Thinking", transcript.thinkingLabel());
-        transcript.onEvent(new AgentEvent.FeedbackStarted("text", 3000, "s", null, null));
-        transcript.onEvent(new AgentEvent.TextDelta("last", "s"));
-        transcript.onEvent(new AgentEvent.TurnDone("last", "s"));
+        transcript.onEvent(new AgentEvent.FeedbackStarted("text", 3000, "s", null, null, eventWorkdir));
+        transcript.onEvent(new AgentEvent.TextDelta("last", "s", eventWorkdir));
+        transcript.onEvent(new AgentEvent.TurnDone("last", "s", eventWorkdir));
         final var result = transcript.markdown("", "");
-        assertEquals(1, result.split("\\Q**[1000] Assistant**\\E", -1).length - 1, result);
-        assertEquals(1, result.split("\\Q**[3000] Assistant**\\E", -1).length - 1, result);
+        assertEquals(1, FIRST_ASSISTANT_HEADER.split(result, -1).length - 1, result);
+        assertEquals(1, SECOND_ASSISTANT_HEADER.split(result, -1).length - 1, result);
         assertTrue(result.indexOf("first") < result.indexOf("why"), result);
         assertTrue(result.indexOf("why") < result.indexOf("last"), result);
     }

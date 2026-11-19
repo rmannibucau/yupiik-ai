@@ -15,20 +15,23 @@
  */
 package io.yupiik.ia.agent.core.agent;
 
+import io.yupiik.ia.agent.core.context.CompactionResult.Mode;
 import io.yupiik.ia.agent.core.context.ContextMeasurement;
 import io.yupiik.ia.agent.core.llm.Usage;
+import io.yupiik.ia.agent.core.tools.FileMutation;
 import io.yupiik.ia.agent.core.usage.CodexUsageSnapshot;
+import java.nio.file.Path;
 import java.util.List;
 import java.util.Objects;
 
 /**
- * Events emitted on the global bus by the agent loops. Every event is tagged
- * with the {@code sessionId} of the session (tab) that owns the turn plus the
- * subagent coordinates when the turn runs inside a subagent: this is what lets
+ * Events emitted on the global bus by agent loops and session operations. Every event is tagged
+ * with the owning session (tab)'s {@code sessionId} plus any invocation subagent coordinates: this lets
  * {@code ShellRegistry} route a given event stream to the right shell when
  * several sessions run concurrently in the same process. Producers must always
  * set the session id - there is no implicit fallback - so convenience
- * constructors take it explicitly.
+ * constructors take it and the immutable session workdir explicitly.
+ * Workdirs are resolved at the session/invocation boundary, never inferred by observers.
  */
 public sealed interface AgentEvent {
     /**
@@ -37,6 +40,9 @@ public sealed interface AgentEvent {
      *         events without a session.
      */
     String sessionId();
+
+    /** The required, absolute, normalized root of the owning session or invocation. */
+    Path workdir();
 
     /**
      * @return the subagent id when the event was produced inside a subagent turn,
@@ -55,13 +61,68 @@ public sealed interface AgentEvent {
         return null;
     }
 
-    /** First visible feedback in a structural block, never a token or repaint timestamp. */
-    record FeedbackStarted(String kind, long startedAt, String sessionId, String subagentId, String subagentName)
-            implements AgentEvent {}
+    /**
+     * Authoritative compaction operation lifecycle on the normal AgentEvent bus, not another
+     * transcript line. Each admitted compact invocation emits STARTED and exactly one terminal
+     * status with the same session-unique id. Retries/chunks are parts of that one pass.
+     * No model continuation digest, Throwable, invented token counts or public summary is carried.
+     * Consumers must not derive outcomes from legacy Notice or merged Compacted events.
+     */
+    record CompactionPass(
+            String id,
+            Status status,
+            Mode mode,
+            String detail,
+            String sessionId,
+            String subagentId,
+            String subagentName,
+            Path workdir)
+            implements AgentEvent {
+        public enum Status {
+            STARTED,
+            SUCCEEDED,
+            SKIPPED,
+            FAILED,
+            CANCELLED
+        }
 
-    record TextDelta(String delta, String sessionId, String subagentId, String subagentName) implements AgentEvent {
-        public TextDelta(String delta, String sessionId) {
-            this(delta, sessionId, null, null);
+        public CompactionPass {
+            Objects.requireNonNull(id, "id");
+            Objects.requireNonNull(status, "status");
+            Objects.requireNonNull(sessionId, "sessionId");
+            Objects.requireNonNull(workdir, "workdir");
+            if (id.isBlank()) {
+                throw new IllegalArgumentException("a compaction id is required");
+            }
+            if (!workdir.isAbsolute() || !workdir.equals(workdir.normalize())) {
+                throw new IllegalArgumentException("workdir must be absolute and normalized: " + workdir);
+            }
+        }
+    }
+
+    /** First visible feedback in a structural block, never a token or repaint timestamp. */
+    record FeedbackStarted(
+            String kind, long startedAt, String sessionId, String subagentId, String subagentName, Path workdir)
+            implements AgentEvent {
+        public FeedbackStarted {
+            Objects.requireNonNull(workdir, "workdir");
+            if (!workdir.isAbsolute() || !workdir.equals(workdir.normalize())) {
+                throw new IllegalArgumentException("workdir must be absolute and normalized: " + workdir);
+            }
+        }
+    }
+
+    record TextDelta(String delta, String sessionId, String subagentId, String subagentName, Path workdir)
+            implements AgentEvent {
+        public TextDelta {
+            Objects.requireNonNull(workdir, "workdir");
+            if (!workdir.isAbsolute() || !workdir.equals(workdir.normalize())) {
+                throw new IllegalArgumentException("workdir must be absolute and normalized: " + workdir);
+            }
+        }
+
+        public TextDelta(String delta, String sessionId, final Path workdir) {
+            this(delta, sessionId, null, null, workdir);
         }
     }
 
@@ -69,22 +130,70 @@ public sealed interface AgentEvent {
      * The streaming buffers must be discarded: the interrupted stream is retried from scratch and
      * the fragments received before the failure would otherwise duplicate the retried reply prefix.
      */
-    record TextReset(String sessionId, String subagentId, String subagentName) implements AgentEvent {
-        public TextReset(String sessionId) {
-            this(sessionId, null, null);
+    record TextReset(String sessionId, String subagentId, String subagentName, Path workdir) implements AgentEvent {
+        public TextReset {
+            Objects.requireNonNull(workdir, "workdir");
+            if (!workdir.isAbsolute() || !workdir.equals(workdir.normalize())) {
+                throw new IllegalArgumentException("workdir must be absolute and normalized: " + workdir);
+            }
+        }
+
+        public TextReset(String sessionId, final Path workdir) {
+            this(sessionId, null, null, workdir);
         }
     }
 
-    record ThinkingDelta(String delta, String sessionId, String subagentId, String subagentName) implements AgentEvent {
-        public ThinkingDelta(String delta, String sessionId) {
-            this(delta, sessionId, null, null);
-        }
-    }
-
-    record ToolStarted(String name, String args, long ordinal, String sessionId, String subagentId, String subagentName)
+    record ThinkingDelta(String delta, String sessionId, String subagentId, String subagentName, Path workdir)
             implements AgentEvent {
-        public ToolStarted(String name, String args, String sessionId) {
-            this(name, args, -1, sessionId, null, null);
+        public ThinkingDelta {
+            Objects.requireNonNull(workdir, "workdir");
+            if (!workdir.isAbsolute() || !workdir.equals(workdir.normalize())) {
+                throw new IllegalArgumentException("workdir must be absolute and normalized: " + workdir);
+            }
+        }
+
+        public ThinkingDelta(String delta, String sessionId, final Path workdir) {
+            this(delta, sessionId, null, null, workdir);
+        }
+    }
+
+    record ToolStarted(
+            String name,
+            String args,
+            long ordinal,
+            String sessionId,
+            String subagentId,
+            String subagentName,
+            Path workdir)
+            implements AgentEvent {
+        public ToolStarted {
+            Objects.requireNonNull(workdir, "workdir");
+            if (!workdir.isAbsolute() || !workdir.equals(workdir.normalize())) {
+                throw new IllegalArgumentException("workdir must be absolute and normalized: " + workdir);
+            }
+        }
+
+        public ToolStarted(String name, String args, String sessionId, final Path workdir) {
+            this(name, args, -1, sessionId, null, null, workdir);
+        }
+    }
+
+    /** Execution-time UI data; emitted before ToolFinished, including completed writes of a failed patch. */
+    record ToolFilesChanged(
+            String name,
+            List<FileMutation> files,
+            long ordinal,
+            String sessionId,
+            String subagentId,
+            String subagentName,
+            Path workdir)
+            implements AgentEvent {
+        public ToolFilesChanged {
+            files = List.copyOf(files);
+            Objects.requireNonNull(workdir, "workdir");
+            if (!workdir.isAbsolute() || !workdir.equals(workdir.normalize())) {
+                throw new IllegalArgumentException("workdir must be absolute and normalized: " + workdir);
+            }
         }
     }
 
@@ -96,46 +205,60 @@ public sealed interface AgentEvent {
             long ordinal,
             String sessionId,
             String subagentId,
-            String subagentName)
+            String subagentName,
+            Path workdir)
             implements AgentEvent {
-        public ToolFinished(String name, String output, boolean success, String sessionId) {
-            this(name, output, success, false, -1, sessionId, null, null);
+        public ToolFinished {
+            Objects.requireNonNull(workdir, "workdir");
+            if (!workdir.isAbsolute() || !workdir.equals(workdir.normalize())) {
+                throw new IllegalArgumentException("workdir must be absolute and normalized: " + workdir);
+            }
+        }
+
+        public ToolFinished(String name, String output, boolean success, String sessionId, final Path workdir) {
+            this(name, output, success, false, -1, sessionId, null, null, workdir);
         }
 
         public ToolFinished(
-                String name, String output, boolean success, String sessionId, String subagentId, String subagentName) {
-            this(name, output, success, false, -1, sessionId, subagentId, subagentName);
-        }
-
-        public ToolFinished(
-                final String name,
-                final String output,
-                final boolean success,
-                final boolean pending,
-                final long ordinal,
-                final String sessionId,
-                final String subagentId,
-                final String subagentName) {
-            this.name = name;
-            this.output = output;
-            this.success = success;
-            this.pending = pending;
-            this.ordinal = ordinal;
-            this.sessionId = sessionId;
-            this.subagentId = subagentId;
-            this.subagentName = subagentName;
+                String name,
+                String output,
+                boolean success,
+                String sessionId,
+                String subagentId,
+                String subagentName,
+                final Path workdir) {
+            this(name, output, success, false, -1, sessionId, subagentId, subagentName, workdir);
         }
     }
 
     record ToolStream(
-            String name, String fragment, long ordinal, String sessionId, String subagentId, String subagentName)
+            String name,
+            String fragment,
+            long ordinal,
+            String sessionId,
+            String subagentId,
+            String subagentName,
+            Path workdir)
             implements AgentEvent {
-        public ToolStream(String name, String fragment, String sessionId) {
-            this(name, fragment, -1, sessionId, null, null);
+        public ToolStream {
+            Objects.requireNonNull(workdir, "workdir");
+            if (!workdir.isAbsolute() || !workdir.equals(workdir.normalize())) {
+                throw new IllegalArgumentException("workdir must be absolute and normalized: " + workdir);
+            }
         }
 
-        public ToolStream(String name, String fragment, String sessionId, String subagentId, String subagentName) {
-            this(name, fragment, -1, sessionId, subagentId, subagentName);
+        public ToolStream(String name, String fragment, String sessionId, final Path workdir) {
+            this(name, fragment, -1, sessionId, null, null, workdir);
+        }
+
+        public ToolStream(
+                String name,
+                String fragment,
+                String sessionId,
+                String subagentId,
+                String subagentName,
+                final Path workdir) {
+            this(name, fragment, -1, sessionId, subagentId, subagentName, workdir);
         }
     }
 
@@ -150,8 +273,16 @@ public sealed interface AgentEvent {
             String subagentId,
             String subagentName,
             Quota quota,
-            ContextMeasurement.Snapshot contextMeasurement)
+            ContextMeasurement.Snapshot contextMeasurement,
+            Path workdir)
             implements AgentEvent {
+        public UsageUpdated {
+            Objects.requireNonNull(workdir, "workdir");
+            if (!workdir.isAbsolute() || !workdir.equals(workdir.normalize())) {
+                throw new IllegalArgumentException("workdir must be absolute and normalized: " + workdir);
+            }
+        }
+
         public UsageUpdated(
                 final Usage usage,
                 final int estimatedContextTokens,
@@ -162,7 +293,8 @@ public sealed interface AgentEvent {
                 final String sessionId,
                 final String subagentId,
                 final String subagentName,
-                final Quota quota) {
+                final Quota quota,
+                final Path workdir) {
             this(
                     usage,
                     estimatedContextTokens,
@@ -174,11 +306,24 @@ public sealed interface AgentEvent {
                     subagentId,
                     subagentName,
                     quota,
-                    null);
+                    null,
+                    workdir);
         }
 
-        public UsageUpdated(Usage usage, int estimatedContextTokens, double contextPercent, String sessionId) {
-            this(usage, estimatedContextTokens, contextPercent, 0, -1, null, sessionId, null, null, Quota.NONE);
+        public UsageUpdated(
+                Usage usage, int estimatedContextTokens, double contextPercent, String sessionId, final Path workdir) {
+            this(
+                    usage,
+                    estimatedContextTokens,
+                    contextPercent,
+                    0,
+                    -1,
+                    null,
+                    sessionId,
+                    null,
+                    null,
+                    Quota.NONE,
+                    workdir);
         }
 
         /** The account quota carried by a usage event, {@link #NONE} when the provider does not expose usage. */
@@ -298,11 +443,24 @@ public sealed interface AgentEvent {
      *        independently, 1, 2, 3, ...)
      */
     record LlmRequestCompleted(
-            Usage usage, String model, int index, String sessionId, String subagentId, String subagentName)
+            Usage usage,
+            String model,
+            int index,
+            String sessionId,
+            String subagentId,
+            String subagentName,
+            Path workdir)
             implements AgentEvent {
+        public LlmRequestCompleted {
+            Objects.requireNonNull(workdir, "workdir");
+            if (!workdir.isAbsolute() || !workdir.equals(workdir.normalize())) {
+                throw new IllegalArgumentException("workdir must be absolute and normalized: " + workdir);
+            }
+        }
 
-        public LlmRequestCompleted(final Usage usage, final String model, final int index, final String sessionId) {
-            this(usage, model, index, sessionId, null, null);
+        public LlmRequestCompleted(
+                final Usage usage, final String model, final int index, final String sessionId, final Path workdir) {
+            this(usage, model, index, sessionId, null, null, workdir);
         }
     }
 
@@ -312,8 +470,15 @@ public sealed interface AgentEvent {
             String sessionId,
             String subagentId,
             String subagentName,
-            CompactionTokens tokens)
+            CompactionTokens tokens,
+            Path workdir)
             implements AgentEvent {
+        public Compacted {
+            Objects.requireNonNull(workdir, "workdir");
+            if (!workdir.isAbsolute() || !workdir.equals(workdir.normalize())) {
+                throw new IllegalArgumentException("workdir must be absolute and normalized: " + workdir);
+            }
+        }
 
         /**
          * Estimated raw context size before/after the applied reductions, in tokens (never the
@@ -323,24 +488,38 @@ public sealed interface AgentEvent {
         public record CompactionTokens(int before, int after) {}
 
         /** Convenience for the single-strategy case (explicit tool request, LLM-only compaction...). */
-        public Compacted(String kind, String mode, String sessionId) {
-            this(List.of(kind), mode, sessionId, null, null, null);
+        public Compacted(String kind, String mode, String sessionId, final Path workdir) {
+            this(List.of(kind), mode, sessionId, null, null, null, workdir);
         }
 
         /** Convenience for the merged-strategy case (several reductions of the same checkpoint). */
-        public Compacted(List<String> kinds, String mode, String sessionId) {
-            this(kinds, mode, sessionId, null, null, null);
+        public Compacted(List<String> kinds, String mode, String sessionId, final Path workdir) {
+            this(kinds, mode, sessionId, null, null, null, workdir);
         }
 
         /** Convenience carrying the measured tokens (before/after, raw estimates). */
-        public Compacted(List<String> kinds, String mode, String sessionId, String subagentId, String subagentName) {
-            this(kinds, mode, sessionId, subagentId, subagentName, null);
+        public Compacted(
+                List<String> kinds,
+                String mode,
+                String sessionId,
+                String subagentId,
+                String subagentName,
+                final Path workdir) {
+            this(kinds, mode, sessionId, subagentId, subagentName, null, workdir);
         }
     }
 
-    record Status(String message, String sessionId, String subagentId, String subagentName) implements AgentEvent {
-        public Status(String message, final String sessionId) {
-            this(message, sessionId, null, null);
+    record Status(String message, String sessionId, String subagentId, String subagentName, Path workdir)
+            implements AgentEvent {
+        public Status {
+            Objects.requireNonNull(workdir, "workdir");
+            if (!workdir.isAbsolute() || !workdir.equals(workdir.normalize())) {
+                throw new IllegalArgumentException("workdir must be absolute and normalized: " + workdir);
+            }
+        }
+
+        public Status(String message, final String sessionId, final Path workdir) {
+            this(message, sessionId, null, null, workdir);
         }
     }
 
@@ -354,24 +533,44 @@ public sealed interface AgentEvent {
      * transient feedback, the caller reports the failure itself if retries
      * eventually exhaust.
      */
-    record Pause(Kind kind, String message, long durationMs, String sessionId, String subagentId, String subagentName)
+    record Pause(
+            Kind kind,
+            String message,
+            long durationMs,
+            String sessionId,
+            String subagentId,
+            String subagentName,
+            Path workdir)
             implements AgentEvent {
+        public Pause {
+            Objects.requireNonNull(workdir, "workdir");
+            if (!workdir.isAbsolute() || !workdir.equals(workdir.normalize())) {
+                throw new IllegalArgumentException("workdir must be absolute and normalized: " + workdir);
+            }
+        }
 
         public enum Kind {
             THROTTLE,
             RETRY
         }
 
-        public Pause(final Kind kind, final String message, final long durationMs, final String sessionId) {
-            this(kind, message, durationMs, sessionId, null, null);
+        public Pause(
+                final Kind kind,
+                final String message,
+                final long durationMs,
+                final String sessionId,
+                final Path workdir) {
+            this(kind, message, durationMs, sessionId, null, null, workdir);
         }
 
-        public static Pause throttle(final String message, final long durationMs, final String sessionId) {
-            return new Pause(Kind.THROTTLE, message, durationMs, sessionId);
+        public static Pause throttle(
+                final String message, final long durationMs, final String sessionId, final Path workdir) {
+            return new Pause(Kind.THROTTLE, message, durationMs, sessionId, workdir);
         }
 
-        public static Pause retry(final String message, final long durationMs, final String sessionId) {
-            return new Pause(Kind.RETRY, message, durationMs, sessionId);
+        public static Pause retry(
+                final String message, final long durationMs, final String sessionId, final Path workdir) {
+            return new Pause(Kind.RETRY, message, durationMs, sessionId, workdir);
         }
     }
 
@@ -389,7 +588,8 @@ public sealed interface AgentEvent {
             String subagentId,
             String subagentName,
             Throwable cause,
-            CompactionLifecycle compaction)
+            CompactionLifecycle compaction,
+            Path workdir)
             implements AgentEvent {
 
         public enum Level {
@@ -415,29 +615,27 @@ public sealed interface AgentEvent {
         }
 
         public Notice {
+            Objects.requireNonNull(workdir, "workdir");
+            if (!workdir.isAbsolute() || !workdir.equals(workdir.normalize())) {
+                throw new IllegalArgumentException("workdir must be absolute and normalized: " + workdir);
+            }
             Objects.requireNonNull(compaction, "compaction lifecycle is required");
         }
 
-        public Notice(final Level level, final String message, final String sessionId) {
-            this(level, message, null, sessionId, null, null, null, CompactionLifecycle.NONE);
+        public Notice(final Level level, final String message, final String sessionId, final Path workdir) {
+            this(level, message, null, sessionId, null, null, null, CompactionLifecycle.NONE, workdir);
         }
 
-        public Notice(final Level level, final String message, final String finishReason, final String sessionId) {
-            this(level, message, finishReason, sessionId, null, null, null, CompactionLifecycle.NONE);
-        }
-
-        /** Cause-less construction keeping the pre-stack-trace arity; {@code cause} defaults to {@code null}. */
         public Notice(
                 final Level level,
                 final String message,
                 final String finishReason,
                 final String sessionId,
-                final String subagentId,
-                final String subagentName) {
-            this(level, message, finishReason, sessionId, subagentId, subagentName, null, CompactionLifecycle.NONE);
+                final Path workdir) {
+            this(level, message, finishReason, sessionId, null, null, null, CompactionLifecycle.NONE, workdir);
         }
 
-        /** 7-arg construction with a cause and no compaction lifecycle. */
+        /** Cause-less construction; {@code cause} defaults to {@code null}. */
         public Notice(
                 final Level level,
                 final String message,
@@ -445,54 +643,118 @@ public sealed interface AgentEvent {
                 final String sessionId,
                 final String subagentId,
                 final String subagentName,
-                final Throwable cause) {
-            this(level, message, finishReason, sessionId, subagentId, subagentName, cause, CompactionLifecycle.NONE);
+                final Path workdir) {
+            this(
+                    level,
+                    message,
+                    finishReason,
+                    sessionId,
+                    subagentId,
+                    subagentName,
+                    null,
+                    CompactionLifecycle.NONE,
+                    workdir);
         }
 
-        public static Notice info(final String message, final String sessionId) {
-            return new Notice(Level.INFO, message, sessionId);
+        /** Construction with a cause and no compaction lifecycle. */
+        public Notice(
+                final Level level,
+                final String message,
+                final String finishReason,
+                final String sessionId,
+                final String subagentId,
+                final String subagentName,
+                final Throwable cause,
+                final Path workdir) {
+            this(
+                    level,
+                    message,
+                    finishReason,
+                    sessionId,
+                    subagentId,
+                    subagentName,
+                    cause,
+                    CompactionLifecycle.NONE,
+                    workdir);
         }
 
-        public static Notice warn(final String message, final String sessionId) {
-            return new Notice(Level.WARN, message, sessionId);
+        public static Notice info(final String message, final String sessionId, final Path workdir) {
+            return new Notice(Level.INFO, message, sessionId, workdir);
         }
 
-        public static Notice error(final String message, final String sessionId) {
-            return new Notice(Level.ERROR, message, sessionId);
+        public static Notice warn(final String message, final String sessionId, final Path workdir) {
+            return new Notice(Level.WARN, message, sessionId, workdir);
+        }
+
+        public static Notice error(final String message, final String sessionId, final Path workdir) {
+            return new Notice(Level.ERROR, message, sessionId, workdir);
         }
 
         /** Info lifecycle notice arming the compacting indicator. */
-        public static Notice compactionStart(final String message, final String sessionId) {
-            return new Notice(Level.INFO, message, null, sessionId, null, null, null, CompactionLifecycle.START);
+        public static Notice compactionStart(final String message, final String sessionId, final Path workdir) {
+            return new Notice(
+                    Level.INFO, message, null, sessionId, null, null, null, CompactionLifecycle.START, workdir);
         }
 
         /** Info lifecycle notice clearing the compacting indicator after a successful pass. */
-        public static Notice compacted(final String message, final String sessionId) {
-            return new Notice(Level.INFO, message, null, sessionId, null, null, null, CompactionLifecycle.COMPLETED);
+        public static Notice compacted(final String message, final String sessionId, final Path workdir) {
+            return new Notice(
+                    Level.INFO, message, null, sessionId, null, null, null, CompactionLifecycle.COMPLETED, workdir);
         }
 
         /** Error lifecycle notice clearing the compacting indicator when the compaction gate escalates. */
-        public static Notice compactionGateEscalated(final String message, final String sessionId) {
+        public static Notice compactionGateEscalated(final String message, final String sessionId, final Path workdir) {
             return new Notice(
-                    Level.ERROR, message, null, sessionId, null, null, null, CompactionLifecycle.GATE_ESCALATED);
+                    Level.ERROR,
+                    message,
+                    null,
+                    sessionId,
+                    null,
+                    null,
+                    null,
+                    CompactionLifecycle.GATE_ESCALATED,
+                    workdir);
         }
     }
 
-    record TurnDone(String content, String sessionId, String subagentId, String subagentName) implements AgentEvent {
-        public TurnDone(String content, final String sessionId) {
-            this(content, sessionId, null, null);
+    record TurnDone(String content, String sessionId, String subagentId, String subagentName, Path workdir)
+            implements AgentEvent {
+        public TurnDone {
+            Objects.requireNonNull(workdir, "workdir");
+            if (!workdir.isAbsolute() || !workdir.equals(workdir.normalize())) {
+                throw new IllegalArgumentException("workdir must be absolute and normalized: " + workdir);
+            }
+        }
+
+        public TurnDone(String content, final String sessionId, final Path workdir) {
+            this(content, sessionId, null, null, workdir);
         }
     }
 
-    record TurnCancelled(String sessionId, String subagentId, String subagentName) implements AgentEvent {
-        public TurnCancelled(final String sessionId) {
-            this(sessionId, null, null);
+    record TurnCancelled(String sessionId, String subagentId, String subagentName, Path workdir) implements AgentEvent {
+        public TurnCancelled {
+            Objects.requireNonNull(workdir, "workdir");
+            if (!workdir.isAbsolute() || !workdir.equals(workdir.normalize())) {
+                throw new IllegalArgumentException("workdir must be absolute and normalized: " + workdir);
+            }
+        }
+
+        public TurnCancelled(final String sessionId, final Path workdir) {
+            this(sessionId, null, null, workdir);
         }
     }
 
-    record Error(String message, String sessionId, String subagentId, String subagentName) implements AgentEvent {
-        public Error(String message, final String sessionId) {
-            this(message, sessionId, null, null);
+    record Error(String message, String sessionId, String subagentId, String subagentName, Path workdir)
+            implements AgentEvent {
+        public Error {
+            Objects.requireNonNull(workdir, "workdir");
+            if (!workdir.isAbsolute() || !workdir.equals(workdir.normalize())) {
+                throw new IllegalArgumentException("workdir must be absolute and normalized: " + workdir);
+            }
+        }
+
+        public Error(String message, final String sessionId, final Path workdir) {
+            this(message, sessionId, null, null, workdir);
         }
     }
 
@@ -505,11 +767,23 @@ public sealed interface AgentEvent {
      *              is usually resolved after the spawn, so started events carry {@code null}; the
      *              completion carries the resolved model)
      */
-    record SubagentStarted(String task, String sessionId, String subagentId, String subagentName, String model)
+    record SubagentStarted(
+            String task, String sessionId, String subagentId, String subagentName, String model, Path workdir)
             implements AgentEvent {
+        public SubagentStarted {
+            Objects.requireNonNull(workdir, "workdir");
+            if (!workdir.isAbsolute() || !workdir.equals(workdir.normalize())) {
+                throw new IllegalArgumentException("workdir must be absolute and normalized: " + workdir);
+            }
+        }
+
         public SubagentStarted(
-                final String task, final String sessionId, final String subagentId, final String subagentName) {
-            this(task, sessionId, subagentId, subagentName, null);
+                final String task,
+                final String sessionId,
+                final String subagentId,
+                final String subagentName,
+                final Path workdir) {
+            this(task, sessionId, subagentId, subagentName, null, workdir);
         }
     }
 
@@ -528,16 +802,24 @@ public sealed interface AgentEvent {
             String sessionId,
             String subagentId,
             String subagentName,
-            String model)
+            String model,
+            Path workdir)
             implements AgentEvent {
+        public SubagentCompleted {
+            Objects.requireNonNull(workdir, "workdir");
+            if (!workdir.isAbsolute() || !workdir.equals(workdir.normalize())) {
+                throw new IllegalArgumentException("workdir must be absolute and normalized: " + workdir);
+            }
+        }
 
         public SubagentCompleted(
                 final String summary,
                 final boolean success,
                 final String sessionId,
                 final String subagentId,
-                final String subagentName) {
-            this(summary, success, false, sessionId, subagentId, subagentName, null);
+                final String subagentName,
+                final Path workdir) {
+            this(summary, success, false, sessionId, subagentId, subagentName, null, workdir);
         }
 
         public SubagentCompleted(
@@ -546,8 +828,9 @@ public sealed interface AgentEvent {
                 final boolean cancelled,
                 final String sessionId,
                 final String subagentId,
-                final String subagentName) {
-            this(summary, success, cancelled, sessionId, subagentId, subagentName, null);
+                final String subagentName,
+                final Path workdir) {
+            this(summary, success, cancelled, sessionId, subagentId, subagentName, null, workdir);
         }
     }
 
@@ -562,11 +845,23 @@ public sealed interface AgentEvent {
             boolean cancelled,
             String sessionId,
             String subagentId,
-            String subagentName)
+            String subagentName,
+            Path workdir)
             implements AgentEvent {
+        public SubagentDelivered {
+            Objects.requireNonNull(workdir, "workdir");
+            if (!workdir.isAbsolute() || !workdir.equals(workdir.normalize())) {
+                throw new IllegalArgumentException("workdir must be absolute and normalized: " + workdir);
+            }
+        }
+
         public SubagentDelivered(
-                final String summary, final boolean success, final boolean cancelled, final String sessionId) {
-            this(summary, success, cancelled, sessionId, null, null);
+                final String summary,
+                final boolean success,
+                final boolean cancelled,
+                final String sessionId,
+                final Path workdir) {
+            this(summary, success, cancelled, sessionId, null, null, workdir);
         }
     }
 
@@ -574,10 +869,17 @@ public sealed interface AgentEvent {
      * A queued prompt was injected into the running turn before it completed, so
      * the user does not have to wait for the current turn to finish.
      */
-    record PromptIntegrated(String text, String sessionId, String subagentId, String subagentName)
+    record PromptIntegrated(String text, String sessionId, String subagentId, String subagentName, Path workdir)
             implements AgentEvent {
-        public PromptIntegrated(String text, String sessionId) {
-            this(text, sessionId, null, null);
+        public PromptIntegrated {
+            Objects.requireNonNull(workdir, "workdir");
+            if (!workdir.isAbsolute() || !workdir.equals(workdir.normalize())) {
+                throw new IllegalArgumentException("workdir must be absolute and normalized: " + workdir);
+            }
+        }
+
+        public PromptIntegrated(String text, String sessionId, final Path workdir) {
+            this(text, sessionId, null, null, workdir);
         }
     }
 
@@ -678,8 +980,15 @@ public sealed interface AgentEvent {
             Throughput throughput,
             String sessionId,
             String subagentId,
-            String subagentName)
+            String subagentName,
+            Path workdir)
             implements AgentEvent {
+        public TurnMetrics {
+            Objects.requireNonNull(workdir, "workdir");
+            if (!workdir.isAbsolute() || !workdir.equals(workdir.normalize())) {
+                throw new IllegalArgumentException("workdir must be absolute and normalized: " + workdir);
+            }
+        }
 
         public TurnMetrics(
                 int llmCalls,
@@ -688,7 +997,8 @@ public sealed interface AgentEvent {
                 long toolDurationWallMs,
                 int toolsRun,
                 long turnDurationMs,
-                String sessionId) {
+                String sessionId,
+                final Path workdir) {
             this(
                     llmCalls,
                     thinkingDurationMs,
@@ -699,7 +1009,8 @@ public sealed interface AgentEvent {
                     Throughput.EMPTY,
                     sessionId,
                     null,
-                    null);
+                    null,
+                    workdir);
         }
 
         public TurnMetrics(
@@ -710,7 +1021,8 @@ public sealed interface AgentEvent {
                 int toolsRun,
                 long turnDurationMs,
                 Throughput throughput,
-                String sessionId) {
+                String sessionId,
+                final Path workdir) {
             this(
                     llmCalls,
                     thinkingDurationMs,
@@ -721,7 +1033,8 @@ public sealed interface AgentEvent {
                     throughput,
                     sessionId,
                     null,
-                    null);
+                    null,
+                    workdir);
         }
     }
 
@@ -740,12 +1053,24 @@ public sealed interface AgentEvent {
             boolean parallelBatch,
             String sessionId,
             String subagentId,
-            String subagentName)
+            String subagentName,
+            Path workdir)
             implements AgentEvent {
+        public ToolTimingEvent {
+            Objects.requireNonNull(workdir, "workdir");
+            if (!workdir.isAbsolute() || !workdir.equals(workdir.normalize())) {
+                throw new IllegalArgumentException("workdir must be absolute and normalized: " + workdir);
+            }
+        }
 
         public ToolTimingEvent(
-                String toolName, long durationMs, long wallDurationMs, boolean parallelBatch, String sessionId) {
-            this(toolName, durationMs, wallDurationMs, parallelBatch, sessionId, null, null);
+                String toolName,
+                long durationMs,
+                long wallDurationMs,
+                boolean parallelBatch,
+                String sessionId,
+                final Path workdir) {
+            this(toolName, durationMs, wallDurationMs, parallelBatch, sessionId, null, null, workdir);
         }
     }
 
@@ -758,7 +1083,15 @@ public sealed interface AgentEvent {
      * @param name one of {@code request-sent}, {@code stream-complete}, {@code tool-batch-complete},
      *     {@code iteration-complete}.
      */
-    record Phase(String name, String sessionId, String subagentId, String subagentName) implements AgentEvent {
+    record Phase(String name, String sessionId, String subagentId, String subagentName, Path workdir)
+            implements AgentEvent {
+        public Phase {
+            Objects.requireNonNull(workdir, "workdir");
+            if (!workdir.isAbsolute() || !workdir.equals(workdir.normalize())) {
+                throw new IllegalArgumentException("workdir must be absolute and normalized: " + workdir);
+            }
+        }
+
         public static final String REQUEST_SENT = "request-sent";
         public static final String STREAM_COMPLETE = "stream-complete";
         public static final String TOOL_BATCH_COMPLETE = "tool-batch-complete";
@@ -783,8 +1116,8 @@ public sealed interface AgentEvent {
         public static final String INITIAL_PROMPT_START = "initial-prompt-start";
         public static final String INITIAL_PROMPT_END = "initial-prompt-end";
 
-        public Phase(final String name, final String sessionId) {
-            this(name, sessionId, null, null);
+        public Phase(final String name, final String sessionId, final Path workdir) {
+            this(name, sessionId, null, null, workdir);
         }
     }
 }

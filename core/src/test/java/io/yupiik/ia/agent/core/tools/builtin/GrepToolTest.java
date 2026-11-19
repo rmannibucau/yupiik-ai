@@ -18,10 +18,12 @@ package io.yupiik.ia.agent.core.tools.builtin;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import io.yupiik.ia.agent.core.tools.ToolContext;
 import java.io.IOException;
 import java.nio.file.FileSystems;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.PosixFilePermissions;
 import java.util.List;
 import java.util.Map;
 import org.junit.jupiter.api.Assumptions;
@@ -42,7 +44,7 @@ class GrepToolTest {
         write(root.resolve(".yca/generated/graph/wiring.json"), "needle here\n");
         write(root.resolve("target/Class.class"), "needle here\n");
 
-        final var out = tool.execute(Map.of("pattern", "needle", "path", root.toString()))
+        final var out = tool.execute(Map.of("pattern", "needle", "path", root.toString()), ToolContext.empty(root))
                 .output();
 
         assertTrue(out.contains("App.java"));
@@ -56,7 +58,8 @@ class GrepToolTest {
         for (var i = 0; i < 10; i++) {
             write(root.resolve("F" + i + ".txt"), "hit\n");
         }
-        final var out = tool.execute(Map.of("pattern", "hit", "path", root.toString(), "maxResults", "3"))
+        final var out = tool.execute(
+                        Map.of("pattern", "hit", "path", root.toString(), "maxResults", "3"), ToolContext.empty(root))
                 .output();
         assertTrue(out.contains("3 match(es)"), out);
         assertTrue(out.contains("results capped at 3"), out);
@@ -71,13 +74,13 @@ class GrepToolTest {
         final var denied = root.resolve("denied");
         Files.createDirectories(denied);
         write(denied.resolve("Hidden.txt"), "needle hidden\n");
-        Files.setPosixFilePermissions(denied, java.nio.file.attribute.PosixFilePermissions.fromString("---------"));
+        Files.setPosixFilePermissions(denied, PosixFilePermissions.fromString("---------"));
         final var locked = root.resolve("locked.txt");
         write(locked, "needle locked\n");
-        Files.setPosixFilePermissions(locked, java.nio.file.attribute.PosixFilePermissions.fromString("---------"));
+        Files.setPosixFilePermissions(locked, PosixFilePermissions.fromString("---------"));
         write(root.resolve("ok/App.java"), "needle here\n");
 
-        final var out = tool.execute(Map.of("pattern", "needle", "path", root.toString()))
+        final var out = tool.execute(Map.of("pattern", "needle", "path", root.toString()), ToolContext.empty(root))
                 .output();
 
         assertTrue(out.contains("App.java"), "the walk must continue past an unreadable dir:\n" + out);
@@ -89,9 +92,7 @@ class GrepToolTest {
         write(projectDir.resolve("src/App.java"), "needle here\n");
         write(projectDir.resolve("src/Other.java"), "nothing\n");
         // relative "src" must be rooted on the session projectDir, not the JVM working directory
-        final var out = tool.execute(
-                        Map.of("pattern", "needle", "path", "src"),
-                        io.yupiik.ia.agent.core.tools.ToolContext.empty(projectDir))
+        final var out = tool.execute(Map.of("pattern", "needle", "path", "src"), ToolContext.empty(projectDir))
                 .output();
         assertTrue(out.contains("App.java"), out);
         assertFalse(out.contains("Other.java"), out);
@@ -102,7 +103,8 @@ class GrepToolTest {
         write(root.resolve("Foo.java"), "boolean handleKey( final int a\nboolean key( final int b\n");
         write(root.resolve("Bar.java"), "void dispatch();\n");
 
-        final var out = tool.execute(Map.of("pattern", "handleKey(|key(", "path", root.toString()))
+        final var out = tool.execute(
+                        Map.of("pattern", "handleKey(|key(", "path", root.toString()), ToolContext.empty(root))
                 .output();
 
         assertTrue(out.contains("handleKey("), "the repaired pattern must actually match: " + out);
@@ -113,7 +115,7 @@ class GrepToolTest {
     void invalidPatternReturnsHelpfulErrorWithLiteralGuidance() throws IOException {
         write(root.resolve("a.txt"), "x\n");
 
-        final var out = tool.execute(Map.of("pattern", "(bad\\p{q}", "path", root.toString()));
+        final var out = tool.execute(Map.of("pattern", "(bad\\p{q}", "path", root.toString()), ToolContext.empty(root));
 
         assertFalse(out.success(), "an unrepairable pattern must error: " + out.output());
         assertTrue(out.output().contains("literal: true"), "the error must steer toward literal matching: " + out);
@@ -125,7 +127,9 @@ class GrepToolTest {
         write(root.resolve("a/No.java"), "nothing\n");
         write(root.resolve("b/Two.java"), "needle two\n");
 
-        final var out = tool.execute(Map.of("pattern", "needle", "path", root.resolve("a") + " " + root.resolve("b")))
+        final var out = tool.execute(
+                        Map.of("pattern", "needle", "path", root.resolve("a") + " " + root.resolve("b")),
+                        ToolContext.empty(root))
                 .output();
 
         assertTrue(out.contains("One.java"), "first root must be searched:\n" + out);
@@ -138,8 +142,13 @@ class GrepToolTest {
         write(root.resolve("README.adoc"), "needle readme\n");
         write(root.resolve("src/main/App.java"), "needle app\n");
 
-        final var out = tool.execute(Map.of(
-                        "pattern", "needle", "path", root.resolve("README.adoc") + " " + root.resolve("src/main")))
+        final var out = tool.execute(
+                        Map.of(
+                                "pattern",
+                                "needle",
+                                "path",
+                                root.resolve("README.adoc") + " " + root.resolve("src/main")),
+                        ToolContext.empty(root))
                 .output();
 
         assertTrue(out.contains("README.adoc"), "the file token must be searched:\n" + out);
@@ -151,18 +160,25 @@ class GrepToolTest {
         write(root.resolve("my dir/App.java"), "needle in dir\n");
         write(root.resolve("my notes.txt"), "needle in file\n");
 
-        final var dirOut = tool.execute(Map.of(
-                        "pattern", "needle", "path", root.resolve("my dir").toString()))
+        final var dirOut = tool.execute(
+                        Map.of(
+                                "pattern",
+                                "needle",
+                                "path",
+                                root.resolve("my dir").toString()),
+                        ToolContext.empty(root))
                 .output();
         assertTrue(
                 dirOut.contains("App.java"),
                 "an existing directory with a space must be searched verbatim:\n" + dirOut);
 
-        final var fileOut = tool.execute(Map.of(
-                        "pattern",
-                        "needle",
-                        "path",
-                        root.resolve("my notes.txt").toString()))
+        final var fileOut = tool.execute(
+                        Map.of(
+                                "pattern",
+                                "needle",
+                                "path",
+                                root.resolve("my notes.txt").toString()),
+                        ToolContext.empty(root))
                 .output();
         assertTrue(
                 fileOut.contains("my notes.txt"),
@@ -171,8 +187,9 @@ class GrepToolTest {
 
     @Test
     void missingRootsAreReportedPerRoot() {
-        final var out =
-                tool.execute(Map.of("pattern", "needle", "path", root.resolve("nope1") + " " + root.resolve("nope2")));
+        final var out = tool.execute(
+                Map.of("pattern", "needle", "path", root.resolve("nope1") + " " + root.resolve("nope2")),
+                ToolContext.empty(root));
 
         assertFalse(out.success(), "missing roots must error rather than silently return no match: " + out.output());
         assertTrue(out.output().contains("nope1"), out.output());
@@ -187,10 +204,12 @@ class GrepToolTest {
         write(root.resolve("b/F3.txt"), "hit\n");
         write(root.resolve("b/F4.txt"), "hit\n");
 
-        final var out = tool.execute(Map.of(
-                        "pattern", "hit",
-                        "path", root.resolve("a") + " " + root.resolve("b"),
-                        "maxResults", "2"))
+        final var out = tool.execute(
+                        Map.of(
+                                "pattern", "hit",
+                                "path", root.resolve("a") + " " + root.resolve("b"),
+                                "maxResults", "2"),
+                        ToolContext.empty(root))
                 .output();
 
         assertTrue(out.contains("2 match(es)"), out);
@@ -202,11 +221,15 @@ class GrepToolTest {
         write(root.resolve("a/One.java"), "needle one\n");
         write(root.resolve("b/Two.java"), "needle two\n");
 
-        final var out = tool.execute(Map.of(
-                        "pattern",
-                        "needle",
-                        "path",
-                        List.of(root.resolve("a").toString(), root.resolve("b").toString())))
+        final var out = tool.execute(
+                        Map.of(
+                                "pattern",
+                                "needle",
+                                "path",
+                                List.of(
+                                        root.resolve("a").toString(),
+                                        root.resolve("b").toString())),
+                        ToolContext.empty(root))
                 .output();
 
         assertTrue(out.contains("One.java"), "first array element must be searched:\n" + out);

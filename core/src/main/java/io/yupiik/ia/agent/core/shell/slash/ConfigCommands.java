@@ -50,6 +50,7 @@ import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.function.Consumer;
+import java.util.regex.Pattern;
 
 /**
  * Configuration commands shared by every shell: mode, model, provider, agent,
@@ -57,6 +58,8 @@ import java.util.function.Consumer;
  */
 @ApplicationScoped
 public class ConfigCommands implements SlashCommandSet {
+    private static final Pattern WHITESPACE = Pattern.compile("\\s+");
+
     @Override
     public String title() {
         return "Configuration commands";
@@ -119,7 +122,7 @@ public class ConfigCommands implements SlashCommandSet {
                                 return ArgCompletion.fuzzyResult("model", env.models(), token);
                             }
                             return ArgCompletion.fuzzyResult(
-                                    "variant", env.variants(arg.strip().split("\\s+")[0]), token);
+                                    "variant", env.variants(WHITESPACE.split(arg.strip())[0]), token);
                         },
                         this::model),
                 SlashCommand.of(
@@ -249,7 +252,7 @@ public class ConfigCommands implements SlashCommandSet {
         options.add("default");
         chatClient.variants(settings, model).forEach(v -> options.add(v.name()));
         var updated = agentSessionService.setModel(model, settings);
-        env.session().runtime().updateChatSettings(updated);
+        env.session().runtime().updateChatSettings(updated, env.io().settingsUpdateCancellation());
         if (options.size() <= 1) {
             return CompletableFuture.completedStage(ShellOutcome.status(modelStatus(model, env)));
         }
@@ -260,7 +263,7 @@ public class ConfigCommands implements SlashCommandSet {
             final var finalUpdated = "default".equals(selected.get())
                     ? updated.withVariant(null).withSampling(null)
                     : updated.withVariant(selected.get()).withSampling(null);
-            env.session().runtime().updateChatSettings(finalUpdated);
+            env.session().runtime().updateChatSettings(finalUpdated, env.io().settingsUpdateCancellation());
             return ShellOutcome.status(modelStatus(model, env));
         });
     }
@@ -277,7 +280,7 @@ public class ConfigCommands implements SlashCommandSet {
         final var settings = env.session().chatSettings();
         final var upserts = new LinkedHashMap<String, String>();
         final var positional = new ArrayList<String>();
-        for (final var token : arg.strip().split("\\s+")) {
+        for (final var token : WHITESPACE.split(arg.strip())) {
             final var eq = token.indexOf('=');
             if (eq > 0) {
                 upserts.put(token.substring(0, eq).toLowerCase(Locale.ROOT), token.substring(eq + 1));
@@ -306,10 +309,12 @@ public class ConfigCommands implements SlashCommandSet {
         }
         env.session()
                 .runtime()
-                .updateChatSettings(agentSessionService
-                        .setModel(model, settings)
-                        .withVariant(variant)
-                        .withSampling(upserts.isEmpty() ? null : parseSampling(upserts)));
+                .updateChatSettings(
+                        agentSessionService
+                                .setModel(model, settings)
+                                .withVariant(variant)
+                                .withSampling(upserts.isEmpty() ? null : parseSampling(upserts)),
+                        env.io().settingsUpdateCancellation());
         return ShellOutcome.status(modelStatus(model, env));
     }
 
@@ -350,7 +355,7 @@ public class ConfigCommands implements SlashCommandSet {
             final var updated = "default".equals(selected.get())
                     ? settings.withVariant(null).withSampling(null)
                     : settings.withVariant(selected.get()).withSampling(null);
-            env.session().runtime().updateChatSettings(updated);
+            env.session().runtime().updateChatSettings(updated, env.io().settingsUpdateCancellation());
             return ShellOutcome.status(modelStatus(model, env));
         });
     }
@@ -369,7 +374,7 @@ public class ConfigCommands implements SlashCommandSet {
         final var updated = "default".equalsIgnoreCase(name)
                 ? settings.withVariant(null).withSampling(null)
                 : settings.withVariant(name).withSampling(null);
-        env.session().runtime().updateChatSettings(updated);
+        env.session().runtime().updateChatSettings(updated, env.io().settingsUpdateCancellation());
         return ShellOutcome.status(modelStatus(model, env));
     }
 
@@ -506,7 +511,7 @@ public class ConfigCommands implements SlashCommandSet {
         final var settings = env.session().chatSettings();
         if (!arg.isBlank()) {
             final var updated = agentSessionService.setProvider(arg, settings);
-            env.session().runtime().updateChatSettings(updated);
+            env.session().runtime().updateChatSettings(updated, env.io().settingsUpdateCancellation());
             // an explicit /provider on an already-active provider is a no-op for updateChatSettings
             // (no provider change, hence no quota push): force the live attach + push so the TUI/web
             // gauge still shows usage immediately, also before the first turn
@@ -524,7 +529,7 @@ public class ConfigCommands implements SlashCommandSet {
                 return ShellOutcome.status("provider picker cancelled");
             }
             final var updated = agentSessionService.setProvider(selected.get(), settings);
-            env.session().runtime().updateChatSettings(updated);
+            env.session().runtime().updateChatSettings(updated, env.io().settingsUpdateCancellation());
             if (sameProvider(settings, updated)) {
                 env.session().runtime().refreshUsage();
             }
@@ -742,7 +747,7 @@ public class ConfigCommands implements SlashCommandSet {
             return ShellOutcome.status(
                     MetricsFormat.report(metrics, env.transcript(), runtime == null ? null : runtime.usage()));
         }
-        final var parts = value.split("\\s+", 2);
+        final var parts = WHITESPACE.split(value, 2);
         var updated = metrics;
         switch (parts[0]) {
             case "show" -> updated = new MetricsConfiguration(true, true, metrics.displayMode());

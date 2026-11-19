@@ -39,6 +39,25 @@ class CloudCredentialsSecretValuesContributorTest {
 
     private static final String AWS_PER_PROVIDER_VALUE = "rg21kg8g-jxISFl-R9k-K7oQUNtS-K1Nwg";
 
+    @Test
+    void awsIniRecognizesAllRegexLineBreaks(final JsonMapper mapper) throws Exception {
+        final var aws = tmp.resolve("unicode-lines.ini");
+        Files.writeString(
+                aws,
+                "[default]\r\naws_secret_access_key=" + AWS_PER_PROVIDER_VALUE + "\u0085"
+                        + "aws_session_token=second-secret-value\u2028region=us-east-1\u2029");
+        final var contributor = new CloudCredentialsSecretValuesContributor(
+                TestConfigs.codingAgent(Map.of(
+                        "yca.secrets.cloudCredentials.aws.locations", aws.toString(),
+                        "yca.secrets.cloudCredentials.gcp.locations", "",
+                        "yca.secrets.cloudCredentials.az.locations", "")),
+                mapper);
+        final var values = Set.copyOf(contributor.values());
+        assertTrue(values.contains(AWS_PER_PROVIDER_VALUE), values.toString());
+        assertTrue(values.contains("second-secret-value"), values.toString());
+        assertFalse(values.contains("us-east-1"), values.toString());
+    }
+
     @TempDir
     Path tmp;
 

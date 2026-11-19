@@ -95,8 +95,8 @@ class SessionRuntimeTest {
     @Test
     void routeApprovalsAreSessionOwnedAndClearedOnDisposal() {
         final var factory = factory();
-        final var first = factory.create("k1", "s1");
-        final var second = factory.create("k2", "s2");
+        final var first = factory.create("k1", "s1", storageHome);
+        final var second = factory.create("k2", "s2", storageHome);
         final var routes = first.permissions().subagentRoutes();
         assertTrue(routes.approve(
                 "$private/main",
@@ -108,15 +108,18 @@ class SessionRuntimeTest {
         first.close();
         assertFalse(routes.allows("$external/model"));
         assertTrue(routes.routes().isEmpty());
-        assertFalse(factory.create("k1", "s1").permissions().subagentRoutes().allows("$external/model"));
+        assertFalse(factory.create("k1", "s1", storageHome)
+                .permissions()
+                .subagentRoutes()
+                .allows("$external/model"));
         second.close();
     }
 
     @Test
     void permissionsAndTodosAreIsolatedPerSession() {
         final var factory = factory();
-        final var first = factory.create("k1", "s1");
-        final var second = factory.create("k2", "s2");
+        final var first = factory.create("k1", "s1", storageHome);
+        final var second = factory.create("k2", "s2", storageHome);
 
         assertNotSame(first.permissions(), second.permissions());
         first.permissions().setMode(AgentMode.BUILD);
@@ -135,36 +138,38 @@ class SessionRuntimeTest {
     @Test
     void todosArePersistedPerSessionKey() throws Exception {
         final var factory = factory();
-        factory.create("k1", "s1").todos().replace(List.of(new TodoItem("step", "pending")));
+        factory.create("k1", "s1", storageHome).todos().replace(List.of(new TodoItem("step", "pending")));
 
         final var file = storageHome.resolve("todos-k1.json");
         assertTrue(Files.isRegularFile(file), "the tab todo list is stored under its own key");
         assertFalse(Files.exists(storageHome.resolve("todos-k2.json")));
 
         // a later runtime for the same key reloads its own list, a different key starts empty
-        assertEquals(1, factory.create("k1", "s1-again").todos().all().size());
-        assertTrue(factory.create("k2", "s2").todos().all().isEmpty());
+        assertEquals(
+                1, factory.create("k1", "s1-again", storageHome).todos().all().size());
+        assertTrue(factory.create("k2", "s2", storageHome).todos().all().isEmpty());
     }
 
     @Test
     void sessionShapedKeysPersistTodosInTheSessionFolder() throws Exception {
         final var factory = factory();
         final var key = "s1a0e47e830a";
-        factory.create(key, "s1").todos().replace(List.of(new TodoItem("step", "pending")));
+        factory.create(key, "s1", storageHome).todos().replace(List.of(new TodoItem("step", "pending")));
 
         final var file = storageHome.resolve("sessions").resolve(key).resolve("todos.json");
         assertTrue(Files.isRegularFile(file), "a session-shaped key stores todos in the session folder");
         assertFalse(Files.exists(storageHome.resolve("todos-" + key + ".json")), "no legacy root file anymore");
 
         // a later runtime for the same key reloads its own list
-        assertEquals(1, factory.create(key, "s1-again").todos().all().size());
+        assertEquals(
+                1, factory.create(key, "s1-again", storageHome).todos().all().size());
     }
 
     @Test
     void chatSettingsArePerSessionAndSharedWithTheLoop() {
         final var factory = factory();
-        final var first = factory.create("k1", "s1");
-        final var second = factory.create("k2", "s2");
+        final var first = factory.create("k1", "s1", storageHome);
+        final var second = factory.create("k2", "s2", storageHome);
 
         assertSame(first.loop().chatSettings(), first.chatSettings(), "the runtime exposes the loop's settings");
         first.updateChatSettings(first.chatSettings().withModel("model-a"));

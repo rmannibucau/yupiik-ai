@@ -35,7 +35,6 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.function.Consumer;
-import java.util.function.Function;
 import java.util.function.Predicate;
 
 /**
@@ -69,12 +68,13 @@ final class CodexBrowserFlow {
      */
     static CodexTokenStore run(
             final CodexOAuthClient oauth, final Consumer<String> authorised, final Predicate<Boolean> cancelled) {
+        CodexOAuthClient.checkCancelled(cancelled);
         final SecureRandom random = new SecureRandom();
         final String verifier = base64Url(randomBytes(random, 32));
         final String challenge = sha256(verifier);
         final String state = base64Url(randomBytes(random, 32));
         final var config = oauth.config();
-        final CompletableFuture<CodexTokenStore> tokenFuture = new CompletableFuture<>();
+        final CompletableFuture<PendingAuthorization> codeFuture = new CompletableFuture<>();
 
         HttpServer server = null;
         try {
@@ -87,35 +87,45 @@ final class CodexBrowserFlow {
                         e);
             }
             final int port = server.getAddress().getPort();
-            server.setExecutor(null); // one-shot callback: the default single-threaded dispatcher is enough
-
-            // the redirect_uri mirrors the loopback callback server and must be exactly
-            // http://127.0.0.1:{port}/auth/callback: OpenAI registers 127.0.0.1 as the allowed
-            // loopback redirect for the Codex client (a "localhost" variant is rejected with
-            // invalid_authorize_request). The exchange must use the same redirect_uri.
+            server.setExecutor(null);
             final String redirectUri = "http://127.0.0.1:" + port + "/auth/callback";
-            server.createContext(
-                    "/auth/callback",
-                    exchange -> handleCallback(
-                            exchange,
-                            state,
-                            tokenFuture,
-                            code -> oauth.toStore(oauth.exchangeCode(code, verifier, redirectUri))));
+            server.createContext("/auth/callback", exchange -> handleCallback(exchange, state, codeFuture));
             server.start();
             final String authorizeUrl = authorizeUrl(config, state, verifier, challenge, redirectUri);
-
-            // surface the authorize URL to the caller (open a browser / show a modal / print)
+            CodexOAuthClient.checkCancelled(cancelled);
             if (authorised != null) {
                 authorised.accept(authorizeUrl);
             }
-            if (cancelled != null && cancelled.test(Boolean.TRUE)) {
-                throw new IllegalStateException("Codex browser login cancelled before authorization");
-            }
-
             try {
-                return tokenFuture.get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
-            } catch (final TimeoutException e) {
-                throw new IllegalStateException("Codex browser login timed out waiting for the redirect", e);
+                final var deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(TIMEOUT_SECONDS);
+                while (System.nanoTime() < deadline) {
+                    CodexOAuthClient.checkCancelled(cancelled);
+                    final PendingAuthorization authorization;
+                    try {
+                        authorization = codeFuture.get(200, TimeUnit.MILLISECONDS);
+                    } catch (final TimeoutException pending) {
+                        continue;
+                    }
+                    try {
+                        CodexOAuthClient.checkCancelled(cancelled);
+                        // Provider I/O belongs to the owned worker, not an untracked callback thread.
+                        final var store =
+                                oauth.toStore(oauth.exchangeCode(authorization.code(), verifier, redirectUri));
+                        CodexOAuthClient.checkCancelled(cancelled);
+                        respond(
+                                authorization.exchange(),
+                                200,
+                                "Authorization complete. Return to the terminal to finish saving your session.");
+                        return store;
+                    } catch (final RuntimeException | Error e) {
+                        respond(
+                                authorization.exchange(),
+                                500,
+                                "Login failed while exchanging authorization. Return to the terminal for details.");
+                        throw e;
+                    }
+                }
+                throw new IllegalStateException("Codex browser login timed out waiting for the redirect");
             } catch (final InterruptedException e) {
                 Thread.currentThread().interrupt();
                 throw new IllegalStateException("Codex browser login interrupted", e);
@@ -126,7 +136,7 @@ final class CodexBrowserFlow {
             }
         } finally {
             if (server != null) {
-                server.stop(0); // torn down in all exit paths
+                server.stop(0);
             }
         }
     }
@@ -148,8 +158,7 @@ final class CodexBrowserFlow {
     private static void handleCallback(
             final HttpExchange exchange,
             final String expectedState,
-            final CompletableFuture<CodexTokenStore> tokenFuture,
-            final Function<String, CodexTokenStore> exchangeCode) {
+            final CompletableFuture<PendingAuthorization> codeFuture) {
         try {
             final String query = exchange.getRequestURI().getRawQuery();
             final Map<String, String> params = parseQuery(query);
@@ -159,14 +168,17 @@ final class CodexBrowserFlow {
                 respond(exchange, 400, "State mismatch or missing code.");
                 return;
             }
-            final var store = exchangeCode.apply(code);
-            respond(exchange, 200, "Authorization complete. Return to the terminal to finish saving your session.");
-            tokenFuture.complete(store);
+            // Transfer the validated exchange to the login worker, including response/close ownership.
+            if (!codeFuture.complete(new PendingAuthorization(code, exchange))) {
+                respond(exchange, 400, "Authorization already received.");
+            }
         } catch (final RuntimeException e) {
             respond(exchange, 500, "Login failed while exchanging authorization. Return to the terminal for details.");
-            tokenFuture.completeExceptionally(e);
+            codeFuture.completeExceptionally(e);
         }
     }
+
+    private record PendingAuthorization(String code, HttpExchange exchange) {}
 
     private static void respond(final HttpExchange exchange, final int status, final String message) {
         try {

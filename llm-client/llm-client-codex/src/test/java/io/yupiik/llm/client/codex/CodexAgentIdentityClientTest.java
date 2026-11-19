@@ -37,6 +37,7 @@ import java.util.Base64;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.regex.Pattern;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -52,6 +53,7 @@ import org.junit.jupiter.api.extension.ExtendWith;
  */
 @ExtendWith(TestJsonMapper.class)
 class CodexAgentIdentityClientTest {
+    private static final Pattern TASK_REGISTRATION_PATH = Pattern.compile(".*/v1/agent/[^/]+/task/register");
 
     private HttpServer authApi;
     private String authApiUrl;
@@ -97,7 +99,7 @@ class CodexAgentIdentityClientTest {
                 headers.getFirst("X-OpenAI-Fedramp")));
         if (path.endsWith("/v1/agent/register")) {
             respond(exchange, 200, "{\"agent_runtime_id\":\"runtime-abc123\"}");
-        } else if (path.matches(".*/v1/agent/[^/]+/task/register")) {
+        } else if (TASK_REGISTRATION_PATH.matcher(path).matches()) {
             respond(exchange, 200, "{\"task_id\":\"task-1\"}");
         } else {
             respond(exchange, 404, "{}");

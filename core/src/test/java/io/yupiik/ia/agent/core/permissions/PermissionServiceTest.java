@@ -22,7 +22,11 @@ import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.ia.agent.core.configuration.AgentMode;
+import io.yupiik.ia.agent.core.configuration.CommandOptionsConfiguration;
+import io.yupiik.ia.agent.core.configuration.CommandPermissionConfiguration;
+import io.yupiik.ia.agent.core.configuration.CommandStartMatcherConfiguration;
 import io.yupiik.ia.agent.core.configuration.PermissionMode;
+import io.yupiik.ia.agent.core.configuration.TestConfigs;
 import io.yupiik.ia.agent.core.tools.ToolCategory;
 import java.nio.file.Path;
 import java.util.HashMap;
@@ -53,8 +57,8 @@ class PermissionServiceTest {
         props.put("yca.permissions.allow", String.join(",", allow));
         props.put("yca.permissions.deny", String.join(",", deny));
         props.putAll(extra);
-        final var configuration = io.yupiik.ia.agent.core.configuration.TestConfigs.codingAgent(props);
-        final var service = new PermissionService(configuration);
+        final var configuration = TestConfigs.codingAgent(props);
+        final var service = new PermissionService(configuration, (configuration).resolveWorkingDir());
         // these build-mode behaviour tests rely on a BUILD baseline; plan mode is
         // exercised explicitly via setMode(AgentMode.PLAN) in dedicated tests
         service.setMode(AgentMode.BUILD);
@@ -100,9 +104,8 @@ class PermissionServiceTest {
 
     @Test
     void defaultModeIsPlanWhenConfigUnset() {
-        final var configuration = io.yupiik.ia.agent.core.configuration.TestConfigs.codingAgent(
-                Map.of("yca.storageHome", storageHome.toString()));
-        final var service = new PermissionService(configuration);
+        final var configuration = TestConfigs.codingAgent(Map.of("yca.storageHome", storageHome.toString()));
+        final var service = new PermissionService(configuration, (configuration).resolveWorkingDir());
         assertEquals(AgentMode.PLAN, service.mode());
     }
 
@@ -706,21 +709,19 @@ class PermissionServiceTest {
 
     @Test
     void dynamicRulesExtendTheEffectiveRulesAndAreSessionScoped() {
-        final var registry = new BashRulesRegistry(io.yupiik.ia.agent.core.configuration.TestConfigs.codingAgent(
-                Map.of("yca.storageHome", storageHome.toString())));
+        final var registry =
+                new BashRulesRegistry(TestConfigs.codingAgent(Map.of("yca.storageHome", storageHome.toString())));
         final var service = new PermissionService(
-                io.yupiik.ia.agent.core.configuration.TestConfigs.codingAgent(
-                        Map.of("yca.storageHome", storageHome.toString())),
+                TestConfigs.codingAgent(Map.of("yca.storageHome", storageHome.toString())),
                 null,
-                registry);
+                registry,
+                (TestConfigs.codingAgent(Map.of("yca.storageHome", storageHome.toString()))).resolveWorkingDir());
         service.setMode(AgentMode.BUILD);
         // mvn is not part of the default read-only families: denied without an override
         assertFalse(service.check("bash", ToolCategory.BASH, Map.of("command", "mvn install"))
                 .allowed());
-        service.addDynamicRule(new io.yupiik.ia.agent.core.configuration.CommandPermissionConfiguration(
-                new io.yupiik.ia.agent.core.configuration.CommandStartMatcherConfiguration(
-                        new io.yupiik.ia.agent.core.configuration.CommandOptionsConfiguration(List.of("mvn")),
-                        List.of()),
+        service.addDynamicRule(new CommandPermissionConfiguration(
+                new CommandStartMatcherConfiguration(new CommandOptionsConfiguration(List.of("mvn")), List.of()),
                 PermissionMode.YOLO,
                 null));
         assertTrue(service.check("bash", ToolCategory.BASH, Map.of("command", "mvn install"))

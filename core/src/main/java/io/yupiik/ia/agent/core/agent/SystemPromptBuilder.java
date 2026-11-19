@@ -26,6 +26,8 @@ import io.yupiik.ia.agent.core.maven.MavenRepositoryKnowledgeService;
 import io.yupiik.ia.agent.core.memory.MemoryStore;
 import io.yupiik.ia.agent.core.permissions.PermissionService;
 import io.yupiik.ia.agent.core.security.SecretRedactor;
+import io.yupiik.ia.agent.core.session.SessionMetadata;
+import io.yupiik.ia.agent.core.skills.SkillLocator;
 import io.yupiik.ia.agent.core.todo.TodoStore;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import java.io.IOException;
@@ -33,13 +35,19 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.LocalDate;
 import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Objects;
 import java.util.regex.Pattern;
 
 public class SystemPromptBuilder {
     private static final Pattern RELATIVE_ROOT_PREFIX = Pattern.compile("^\\.?/");
     private static final Pattern QUESTION_PHRASE =
             Pattern.compile(".*(how (do|can|to|would)|what (about|if)|why (not|do)|where (do|can)).*");
+    private static final Pattern CHANGE_VERB =
+            Pattern.compile("\\b(implement|fix|add|refactor|create|change|remove|delete|migrate|rewrite|rename|"
+                    + "update|modify|patch|write|build|scaffold|port|extract|introduce|enable|disable|wire|simplify|"
+                    + "move|split|rework)\\w*\\b");
 
     /**
      * Files that used to be inlined eagerly into the system prompt as {@code <project-file>} blocks. Removed:
@@ -58,6 +66,8 @@ public class SystemPromptBuilder {
      */
     private static final int SYSTEM_PROMPT_CAP = 32_000;
 
+    private static final String WORKSPACE_ELISION = "[...leading workspace context elided...]\n";
+
     private final CodingAgentConfiguration configuration;
     private final MemoryStore memoryStore;
     private final TodoStore todoStore;
@@ -73,10 +83,9 @@ public class SystemPromptBuilder {
     /**
      * The session's resolved working/project directory, set exactly once when the session runtime is
      * created (never mid-conversation) so the stable system-prompt core stays byte-identical across
-     * turns and provider prefix caches keep hitting. When {@code null} the process default
-     * ({@code configuration.resolveWorkingDir()/resolveProjectDir()}) is used.
+     * turns and provider prefix caches keep hitting. Required and immutable.
      */
-    protected volatile Path workdir;
+    private final Path workdir;
 
     /**
      * The durable {@code <memory>} section of the system prompt, computed once per session - lazily
@@ -89,10 +98,88 @@ public class SystemPromptBuilder {
      * {@code null} until the first build; {@code ""} when memory is disabled or empty.
      */
     private String cachedMemorySection;
+    /** Metadata only, frozen for this session just like its durable memory snapshot. */
+    private String cachedSkillsCatalog;
+    /** Rendered once at successful setup, including the client headers and root-policy explanation. */
+    private String retainedContext = "";
 
-    /** Attach the owning session's working directory; called once at runtime creation. */
-    public void workdir(final Path dir) {
-        this.workdir = dir == null ? null : dir.toAbsolutePath().normalize();
+    private boolean keepDefaultInstructions = true;
+    private boolean contextConfigured;
+
+    /** Configure once before publishing a runtime. Directory context never changes permission rules. */
+    public void configureSessionContext(final List<Path> directories, final SessionMetadata.Instructions instructions) {
+        if (contextConfigured) {
+            throw new IllegalStateException("Session context is immutable");
+        }
+        final var roots = new LinkedHashSet<Path>();
+        for (final var root : directories) {
+            if (root == null || !root.isAbsolute() || !root.equals(root.normalize()) || !Files.isDirectory(root)) {
+                throw new IllegalArgumentException("Invalid additional directory");
+            }
+            if (!workdir.equals(root)) {
+                roots.add(root);
+            }
+        }
+        // Render once before installation: headers, separators and the cwd explanation count too.
+        final var context = new StringBuilder();
+        if (!roots.isEmpty()) {
+            context.append("\nAdditional workspace directories (context only):\n");
+            roots.forEach(root -> context.append("- ").append(root).append('\n'));
+            context.append("Relative paths still resolve against ")
+                    .append(workdir)
+                    .append(
+                            ". Directory context grants no access: tool permissions, approvals and ceilings still apply.\n");
+        }
+        if (instructions != null) {
+            context.append("\nClient system instructions (")
+                    .append(instructions.mode())
+                    .append("):\n");
+            if ("append".equals(instructions.mode())) {
+                context.append(
+                        "These supplement the required agent instructions; those instructions take precedence on conflict.\n");
+            }
+            instructions.text().forEach(text -> context.append(text).append('\n'));
+        }
+        final var capturedContext = context.toString();
+        final var keepDefaults = instructions == null || "append".equals(instructions.mode());
+        final var selection = settings;
+        if (requiredContextBudget(capturedContext, keepDefaults, selection) > resolvedSystemPromptCap(selection)) {
+            throw new IllegalArgumentException("Session context exceeds system prompt budget");
+        }
+        retainedContext = capturedContext;
+        keepDefaultInstructions = keepDefaults;
+        contextConfigured = true;
+    }
+
+    /** A later selector must not silently discard accepted session instructions to fit a smaller model budget. */
+    public void validateChatSettings(final ChatSettings selection) {
+        if (requiredContextBudget(retainedContext, keepDefaultInstructions, selection)
+                > resolvedSystemPromptCap(selection)) {
+            throw new IllegalArgumentException("Selected model cannot accommodate the session instructions");
+        }
+    }
+
+    private long requiredContextBudget(final String context, final boolean keepDefaults, final ChatSettings selection) {
+        if (context.isEmpty()) {
+            return 0; // Preserve legacy capping when no client context was supplied.
+        }
+        long required =
+                keepDefaults ? defaultInstructions(selection, AgentMode.BUILD).length() : 0;
+        if (permissionService != null) {
+            // A later mode switch or ordinary prompt must still fit, even if setup starts in BUILD.
+            final var planDefaults = keepDefaults
+                    ? defaultInstructions(selection, AgentMode.PLAN).length()
+                    : 0;
+            final var planPolicySize =
+                    Math.max(planPolicy(true).length(), planPolicy(false).length());
+            required = Math.max(required, (long) planDefaults + planPolicySize);
+        }
+        return required + context.length() + WORKSPACE_ELISION.length();
+    }
+
+    /** The owning session's required, immutable working directory. */
+    public Path effectiveWorkdir() {
+        return workdir;
     }
 
     /** Attach the owning session's model/provider selection so this builder resolves the right caps. */
@@ -123,7 +210,9 @@ public class SystemPromptBuilder {
             final ProviderManager providerManager,
             final TodoPromptResolver todoPromptResolver,
             final MavenRepositoryKnowledgeService mavenRepositoryKnowledge,
-            final SecretRedactor secretRedactor) {
+            final SecretRedactor secretRedactor,
+            final Path workdir) {
+        this.workdir = Objects.requireNonNull(workdir, "workdir");
         this.configuration = configuration;
         this.memoryStore = memoryStore;
         this.todoStore = todoStore;
@@ -135,7 +224,8 @@ public class SystemPromptBuilder {
         this.secretRedactor = secretRedactor;
     }
 
-    protected SystemPromptBuilder() {
+    protected SystemPromptBuilder(final Path workdir) {
+        this.workdir = Objects.requireNonNull(workdir, "workdir");
         this.configuration = null;
         this.memoryStore = null;
         this.todoStore = null;
@@ -161,15 +251,7 @@ public class SystemPromptBuilder {
         return build(prompt, null);
     }
 
-    /**
-     * Builds the system prompt, optionally augmented with a custom agent's instructions on top of
-     * the base prompt (rules, environment, project context, skills and memory).
-     *
-     * @param prompt the current (first) user message; may be null
-     * @param agent the custom agent whose prompt is injected on top; may be null
-     * @return the assembled system prompt
-     */
-    public String build(final String prompt, final AgentConfiguration agent) {
+    private String defaultInstructions(final ChatSettings selection, final AgentMode mode) {
         final var sb = new StringBuilder();
         // stable core: byte-identical across turns and modes so provider-side prompt caches (implicit
         // or explicit breakpoints) keep hitting; the PLAN mode tail and the volatile session state
@@ -213,7 +295,7 @@ public class SystemPromptBuilder {
                 "- Work with absolute paths; resolve relative paths against their intended root before using a tool.\n");
         sb.append(
                 "- Target directory: if the user names an explicit directory for the task, treat it as the target and build there, regardless of where the tool was started; the working-directory repository is only where you launched. For a scaffold into an empty directory create the structure there from scratch.\n");
-        appendTodoGuidance(sb);
+        appendTodoGuidance(sb, selection, mode);
         sb.append('\n');
         sb.append("You may invoke a tool only if its exact name appears in the `tools` field of this request. "
                 + "Do not invent, abbreviate, or guess tool names: any other name will be rejected. "
@@ -248,31 +330,40 @@ public class SystemPromptBuilder {
                 "- Avoid repeating the same tool with the same parameters once you have useful results: use the result "
                         + "to take the next step (\u2192 pick one match, read that file, then act) instead of searching again in a loop.\n");
         sb.append('\n');
-        // per-session override wins when set (frozen once at runtime creation so the stable prefix stays
-        // byte-identical across turns); otherwise the process default applies.
-        final var workingDir = workdir != null
-                ? workdir
-                : configuration.resolveWorkingDir().toAbsolutePath().normalize();
-        final var projectDir = workdir != null
-                ? workdir
-                : configuration.resolveProjectDir().toAbsolutePath().normalize();
+        return sb.toString();
+    }
+
+    /** Build system-level instructions, preserving required defaults in append mode. */
+    public String build(final String prompt, final AgentConfiguration agent) {
+        final var selection = settings;
+        validateChatSettings(selection);
+        final var cap = resolvedSystemPromptCap(selection);
+        final var mode = permissionService == null ? AgentMode.BUILD : permissionService.mode();
+        // Override replaces only default prose, not environment/AGENTS/skills/mode policy.
+        final var defaults = keepDefaultInstructions ? defaultInstructions(selection, mode) : "";
+        final var sb = new StringBuilder(defaults);
         sb.append("Environment:\n");
-        sb.append("- Working directory: ").append(workingDir).append('\n');
-        if (!projectDir.equals(workingDir)) {
-            sb.append("- Target project directory: ").append(projectDir).append('\n');
-        }
+        sb.append("- Working directory: ").append(workdir).append('\n');
         sb.append("- Platform: ")
                 .append(System.getProperty("os.name"))
                 .append(' ')
                 .append(System.getProperty("os.version"))
                 .append('\n');
         sb.append("- Java: ").append(System.getProperty("java.version")).append('\n');
-        final var project = projectContext(projectDir);
+        final var project = projectContext(workdir);
         if (!project.isBlank()) {
             sb.append('\n').append(project).append('\n');
         }
+        if (configuration.skills() != null && configuration.skills().enabled()) {
+            if (cachedSkillsCatalog == null) {
+                cachedSkillsCatalog = SkillLocator.availableSkillsCatalog(configuration, workdir);
+            }
+            if (!cachedSkillsCatalog.isBlank()) {
+                sb.append('\n').append(cachedSkillsCatalog).append('\n');
+            }
+        }
         if (mavenRepositoryKnowledge != null) {
-            final var sessionSkills = mavenRepositoryKnowledge.sessionSkillBlocks();
+            final var sessionSkills = mavenRepositoryKnowledge.sessionSkillBlocks(workdir);
             if (!sessionSkills.isEmpty()) {
                 sb.append('\n');
                 for (final var block : sessionSkills) {
@@ -290,9 +381,6 @@ public class SystemPromptBuilder {
                         .append("\n</agent>\n");
             }
         }
-        // mode tail last: only a mode switch rewrites this suffix, so every turn within a mode keeps
-        // the whole system prompt byte-stable and provider caches keep hitting
-        final var plan = permissionService != null && permissionService.mode() == AgentMode.PLAN;
         // durable memory lives in the stable prefix (message[0]) as a session-frozen snapshot built
         // once on the first build and reused verbatim on every turn. The current session never
         // re-reads MEMORY.md after this snapshot, so mid-session file writes (memory_write, extraction)
@@ -304,32 +392,52 @@ public class SystemPromptBuilder {
         if (memory != null && !memory.isBlank()) {
             sb.append('\n').append(memory).append('\n');
         }
-        if (plan) {
-            sb.append('\n');
-            sb.append(
-                    "Mode: PLAN. Repository mutations are forbidden by default: no file creation, edits or deletions, and no state-changing shell commands - write_todo is the only state-changing tool allowed.\n");
-            final var hints = configuration.permissions() != null
-                            && configuration.permissions().bash() != null
-                    ? configuration.permissions().bash().readOnlyPromptHints()
-                    : null;
-            if (hints != null && !hints.isBlank()) {
-                sb.append(hints).append('\n');
-            }
-            if (taskImpliesChanges(prompt)) {
-                sb.append(
-                        "Todos are the plan, not a progress report: every item stays 'pending' - statuses only advance in build mode, once a step is actually executed.\n");
-                sb.append(
-                        "Analyze the codebase and deliver a detailed, concrete implementation plan (files to touch, steps, approach and trade-offs, risks), ready for the user to review before anything is applied.\n");
-                sb.append(
-                        "Record the plan with write_todo and keep the list in sync with the discussion: whenever a follow-up changes the plan (scope, steps, approach, trade-offs), update it in the same turn so it always mirrors the latest agreed plan. Completed or cancelled items from earlier build sessions are progress history: keep them.\n");
-            } else {
-                // informational request (explain/what/how/describe/...): no todo ceremony, no forced plan
-                // deliverable - explore as needed and answer directly, like the non-plan harnesses do.
-                sb.append(
-                        "The request is informational: explore the codebase as needed and answer directly - no plan or todo list is required.\n");
-            }
+        final var modeTail = mode == AgentMode.PLAN ? planPolicy(taskImpliesChanges(prompt)) : "";
+        if (retainedContext.isEmpty()) {
+            return capSystemPrompt(sb.append(modeTail).toString(), cap);
         }
-        return capSystemPrompt(sb.toString(), resolvedSystemPromptCap());
+        // Only workspace content is tail-capped; accepted client text, defaults and mode policy survive intact.
+        final var workspaceBudget = cap - defaults.length() - retainedContext.length() - modeTail.length();
+        return defaults + capWorkspace(sb.substring(defaults.length()), workspaceBudget) + retainedContext + modeTail;
+    }
+
+    private String capWorkspace(final String workspace, final int maxChars) {
+        if (maxChars < WORKSPACE_ELISION.length()) {
+            throw new IllegalArgumentException("Session context exceeds system prompt budget");
+        }
+        if (workspace.length() <= maxChars) {
+            return workspace;
+        }
+        final var tailSize = maxChars - WORKSPACE_ELISION.length();
+        return WORKSPACE_ELISION + workspace.substring(workspace.length() - tailSize);
+    }
+
+    private String planPolicy(final boolean changes) {
+        final var sb = new StringBuilder();
+        sb.append('\n');
+        sb.append(
+                "Mode: PLAN. Repository mutations are forbidden by default: no file creation, edits or deletions, and no state-changing shell commands - write_todo is the only state-changing tool allowed.\n");
+        final var hints = configuration.permissions() != null
+                        && configuration.permissions().bash() != null
+                ? configuration.permissions().bash().readOnlyPromptHints()
+                : null;
+        if (hints != null && !hints.isBlank()) {
+            sb.append(hints).append('\n');
+        }
+        if (changes) {
+            sb.append(
+                    "Todos are the plan, not a progress report: every item stays 'pending' - statuses only advance in build mode, once a step is actually executed.\n");
+            sb.append(
+                    "Analyze the codebase and deliver a detailed, concrete implementation plan (files to touch, steps, approach and trade-offs, risks), ready for the user to review before anything is applied.\n");
+            sb.append(
+                    "Record the plan with write_todo and keep the list in sync with the discussion: whenever a follow-up changes the plan (scope, steps, approach, trade-offs), update it in the same turn so it always mirrors the latest agreed plan. Completed or cancelled items from earlier build sessions are progress history: keep them.\n");
+        } else {
+            // informational request (explain/what/how/describe/...): no todo ceremony, no forced plan
+            // deliverable - explore as needed and answer directly, like the non-plan harnesses do.
+            sb.append(
+                    "The request is informational: explore the codebase as needed and answer directly - no plan or todo list is required.\n");
+        }
+        return sb.toString();
     }
 
     /**
@@ -495,6 +603,10 @@ public class SystemPromptBuilder {
      * declaring a large completion budget gets a proportionally smaller prompt.
      */
     public int resolvedSystemPromptCap() {
+        return resolvedSystemPromptCap(settings);
+    }
+
+    private int resolvedSystemPromptCap(final ChatSettings settings) {
         final var provider = providerManager == null ? null : provider(settings);
         final var model = provider == null
                 ? null
@@ -561,16 +673,15 @@ public class SystemPromptBuilder {
         return guidance == null || guidance.isBlank() ? "auto" : guidance;
     }
 
-    private void appendTodoGuidance(final StringBuilder sb) {
+    private void appendTodoGuidance(final StringBuilder sb, final ChatSettings selection, final AgentMode agentMode) {
         if (todoPromptResolver == null) {
             return;
         }
-        final var provider = providerManager == null ? null : providerManager.current();
+        final var provider = provider(selection);
         final var baseUrl = provider == null ? null : provider.baseUrl();
         // a provider configuring its own guidance wins; the providers configuring none inherit the
         // global yca.todos.guidance (blank there means the usual 'auto' family detection)
         final var mode = provider != null && provider.todoPromptConfigured() ? provider.todoPrompt() : globalGuidance();
-        final var agentMode = permissionService == null ? null : permissionService.mode();
         final var guidance = todoPromptResolver.resolve(mode, baseUrl, agentMode);
         if (!guidance.isBlank()) {
             sb.append("<todo-guidance>\n").append(guidance).append("\n</todo-guidance>\n");
@@ -661,10 +772,7 @@ public class SystemPromptBuilder {
             return false;
         }
         final var lower = prompt.toLowerCase();
-        final var changed = "\\b(implement|fix|add|refactor|create|change|remove|delete|migrate|rewrite|rename|"
-                + "update|modify|patch|write|build|scaffold|port|extract|introduce|enable|disable|wire|simplify|"
-                + "move|split|rework)\\w*\\b";
-        var matcher = Pattern.compile(changed).matcher(lower);
+        final var matcher = CHANGE_VERB.matcher(lower);
         while (matcher.find()) {
             // questions about *how to* change (how do I add X?) are still informational; bare
             // imperatives ("fix X", "add Y") imply work

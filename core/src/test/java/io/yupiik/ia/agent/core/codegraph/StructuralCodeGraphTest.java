@@ -32,7 +32,6 @@ import io.yupiik.ia.agent.core.llm.ChatCompletionRequest;
 import io.yupiik.ia.agent.core.llm.ChatResult;
 import io.yupiik.ia.agent.core.llm.Message;
 import io.yupiik.ia.agent.core.optimize.AfterToolExecutionEvent;
-import io.yupiik.ia.agent.core.optimize.BeforeToolExecutionEvent;
 import io.yupiik.ia.agent.core.wiring.HttpClientProducer;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import io.yupiik.ia.agent.test.TestJsonMapper;
@@ -63,6 +62,9 @@ import org.junit.jupiter.api.parallel.ResourceLock;
 @ExtendWith(TestJsonMapper.class)
 @ResourceLock("java.util.logging")
 class StructuralCodeGraphTest {
+    @TempDir
+    private static Path testWorkdir;
+
     private static final long TIMEOUT_MS = Duration.ofSeconds(5).toMillis();
 
     @TempDir
@@ -120,24 +122,10 @@ class StructuralCodeGraphTest {
         return graph;
     }
 
-    /**
-     * Waits (bounded) for the async build to expose a non-empty store so assertions never observe the pre-build
-     * empty window (a slow build used to surface as "expected X indexed" failures under parallel test load). On
-     * timeout the (still empty) store is returned and the calling assertion fails as before.
-     */
-    private GraphStore awaitNonEmpty(final StructuralCodeGraph graph) {
-        final var deadline = System.currentTimeMillis() + TimeUnit.SECONDS.toMillis(15);
-        var store = graph.graph();
-        while (store.symbols().isEmpty() && System.currentTimeMillis() < deadline) {
-            try {
-                Thread.sleep(10);
-            } catch (final InterruptedException e) {
-                Thread.currentThread().interrupt();
-                break;
-            }
-            store = graph.graph();
-        }
-        return store;
+    /** Reads the completed build for the explicit project root, never its surrounding temporary directory. */
+    private GraphStore awaitNonEmpty(final StructuralCodeGraph graph, final Path root) {
+        graph.ensureReady(root);
+        return graph.graph(root);
     }
 
     private final List<ExtendedHttpClient> httpClients = new ArrayList<>();
@@ -188,12 +176,12 @@ class StructuralCodeGraphTest {
         };
         final var graph = newGraph(config(project, Map.of()), mapper, List.of(blocked));
         final var started = System.nanoTime();
-        graph.ensureReadyAsync();
+        graph.ensureReadyAsync(project);
         assertTrue(TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started) < 500, "readiness must not probe inline");
         assertTrue(entered.await(2, TimeUnit.SECONDS), "background availability check did not start");
         final var query = Executors.newSingleThreadExecutor();
         try {
-            final Future<GraphStore> result = query.submit(graph::graph);
+            final Future<GraphStore> result = query.submit(() -> graph.graph(project));
             Thread.sleep(100);
             assertFalse(result.isDone(), "graph query must wait for readiness");
             release.countDown();
@@ -229,8 +217,8 @@ class StructuralCodeGraphTest {
         final var graph = newGraph(config, mapper);
 
         // the default root serves its own graph
-        graph.ensureReady();
-        final var defaultIdx = graph.queryIndex();
+        graph.ensureReady(config.resolveWorkingDir());
+        final var defaultIdx = graph.queryIndex(config.resolveWorkingDir());
         assertTrue(defaultIdx != null && defaultIdx.resolve("demo.Foo") != null);
         assertNull(defaultIdx.resolve("other.Baz"), "default root must not know the second project");
 
@@ -240,9 +228,7 @@ class StructuralCodeGraphTest {
         assertNotNull(secondIdx.resolve("other.Baz"), "second root should resolve its own symbol");
         assertNull(secondIdx.resolve("demo.Foo"), "second root must not contain the default project's symbol");
 
-        // path resolution must be root-aware
-        final var root = graph.projectDir(second);
-        assertEquals(second.toAbsolutePath().normalize(), root);
+        assertEquals("Baz.java", graph.rel(second, second.resolve("Baz.java")));
     }
 
     @Test
@@ -379,9 +365,9 @@ class StructuralCodeGraphTest {
 
         final var graph = newGraph(config, mapper);
 
-        graph.ensureReady();
-        graph.flushPersist();
-        final var built = awaitNonEmpty(graph);
+        graph.ensureReady(config.resolveWorkingDir());
+        graph.flushPersist(config.resolveWorkingDir());
+        final var built = awaitNonEmpty(graph, project);
         assertEquals(4, built.symbols().size(), "expected Foo + Foo.add + Bar + Bar.go symbols");
         final var types = built.symbols().stream()
                 .filter(s -> s.kind() == GraphModel.Kind.TYPE)
@@ -412,7 +398,7 @@ class StructuralCodeGraphTest {
         assertTrue(wiring.contains("\"summary_state\":\"pending\""), "expected a pending summary state");
         assertTrue(wiring.contains("CALLS"), "expected an edge relation in wiring graph");
         // deterministic: a no-change resync must not rewrite (and thus not churn) the wiring graph
-        graph.resync();
+        graph.resync(config.resolveWorkingDir());
         assertEquals(wiring, Files.readString(wiringFile), "wiring.json must be byte-stable across builds");
 
         // per-source-file doc tree must mirror the source paths, at the store root, extension stripped
@@ -436,7 +422,7 @@ class StructuralCodeGraphTest {
             }
             """);
         graph.refreshFile(project.resolve("Foo.java"));
-        final var after = graph.graph();
+        final var after = graph.graph(config.resolveWorkingDir());
         assertTrue(
                 after.symbols().stream().anyMatch(s -> s.fqn().equals("demo.Foo.sub")),
                 "expected the added method symbol after refresh");
@@ -448,16 +434,17 @@ class StructuralCodeGraphTest {
         Files.delete(project.resolve("Foo.java"));
         graph.refreshFile(project.resolve("Foo.java"));
         assertFalse(Files.exists(docsFoo), "expected doc removed when source file deleted");
-        final var afterDelete = graph.graph();
+        final var afterDelete = graph.graph(config.resolveWorkingDir());
         assertTrue(
                 afterDelete.symbols().stream().noneMatch(s -> s.fqn().startsWith("demo.Foo")),
                 "deleted file symbols must be dropped by the refresh");
 
         // reload from disk must match in-memory state
         final var reloaded = newGraph(config, mapper);
-        reloaded.ensureReady();
+        reloaded.ensureReady(project);
         assertEquals(
-                afterDelete.symbols().size(), awaitNonEmpty(reloaded).symbols().size());
+                afterDelete.symbols().size(),
+                awaitNonEmpty(reloaded, project).symbols().size());
     }
 
     @Test
@@ -470,14 +457,18 @@ class StructuralCodeGraphTest {
 
         final var config = config(project, Map.of());
         final var graph = newGraph(config, mapper);
-        graph.ensureReady();
-        assertEquals(2, awaitNonEmpty(graph).symbols().size());
+        graph.ensureReady(config.resolveWorkingDir());
+        assertEquals(2, awaitNonEmpty(graph, project).symbols().size());
 
         graph.refreshFile(outside.resolve("Bar.java"));
         assertTrue(
-                graph.graph().symbols().stream().noneMatch(s -> s.fqn().startsWith("outside")),
+                graph.graph(config.resolveWorkingDir()).symbols().stream()
+                        .noneMatch(s -> s.fqn().startsWith("outside")),
                 "a file outside the project dir must not be indexed");
-        assertEquals(2, graph.graph().symbols().size(), "refreshing an outside file must not change the graph");
+        assertEquals(
+                2,
+                graph.graph(config.resolveWorkingDir()).symbols().size(),
+                "refreshing an outside file must not change the graph");
 
         // any nested level inside the project dir is still indexed
         Files.createDirectory(project.resolve("nested"));
@@ -485,7 +476,8 @@ class StructuralCodeGraphTest {
                 project.resolve("nested/Baz.java"), "package nested;\npublic class Baz { public void run() {} }\n");
         graph.refreshFile(project.resolve("nested/Baz.java"));
         assertTrue(
-                graph.graph().symbols().stream().anyMatch(s -> s.fqn().equals("nested.Baz")),
+                graph.graph(config.resolveWorkingDir()).symbols().stream()
+                        .anyMatch(s -> s.fqn().equals("nested.Baz")),
                 "a nested file inside the project dir must be indexed");
     }
 
@@ -538,28 +530,30 @@ class StructuralCodeGraphTest {
         final var config = config(project, Map.of("yca.structuralCodeGraph.batchRefreshDebounceMillis", "50"));
         final var batchParser = new CapturingBatchParser();
         final var graph = newGraph(config, mapper, List.of(batchParser));
-        graph.ensureReady();
+        graph.ensureReady(config.resolveWorkingDir());
         // sanity: the batch-capable parser owns .java and produced the initial graph through its
         // parseBatch
-        assertEquals(1, graph.graph().symbols().size(), "expected the initial graph to index Foo.java");
+        assertEquals(
+                1,
+                graph.graph(config.resolveWorkingDir()).symbols().size(),
+                "expected the initial graph to index Foo.java");
         assertTrue(
                 batchParser.batchInputs.contains(foo),
                 "the initial build should route Foo.java through the batch parser's parseBatch");
 
         // write_file/edit_file/apply_patch on a non-Java file (pom.xml) must not reach the java batch
         // parse
-        graph.onBeforeTool(new BeforeToolExecutionEvent(
-                "write_file", Map.of("path", project.resolve("pom.xml").toString())));
-        graph.onToolExecuted(new AfterToolExecutionEvent("write_file", true, "ok"));
-        graph.ensureRefreshedReady();
+        graph.onToolExecuted(new AfterToolExecutionEvent(
+                "write_file", true, "ok", null, null, null, Map.of("path", "pom.xml"), project));
+        graph.ensureRefreshedReady(config.resolveWorkingDir());
         assertTrue(
                 batchParser.batchInputs.stream().noneMatch(p -> p.endsWith("pom.xml")),
                 "a pom.xml written by a file tool must never reach the java batch parse");
 
         // a Java file edit still flows through the batch path
-        graph.onBeforeTool(new BeforeToolExecutionEvent("write_file", Map.of("path", foo.toString())));
-        graph.onToolExecuted(new AfterToolExecutionEvent("write_file", true, "ok"));
-        graph.ensureRefreshedReady();
+        graph.onToolExecuted(new AfterToolExecutionEvent(
+                "write_file", true, "ok", null, null, null, Map.of("path", "Foo.java"), project));
+        graph.ensureRefreshedReady(config.resolveWorkingDir());
         assertTrue(
                 batchParser.batchInputs.stream().anyMatch(foo::equals),
                 "a Java file edit should still be batched for re-indexing");
@@ -573,9 +567,9 @@ class StructuralCodeGraphTest {
         Files.writeString(project.resolve("Foo.java"), "package demo;\npublic class Foo { public void run() {} }\n");
         final var config = config(project, Map.of());
         final var graph = newGraph(config, mapper);
-        graph.ensureReady();
+        graph.ensureReady(config.resolveWorkingDir());
         assertTrue(
-                graph.graph().symbols().isEmpty(),
+                graph.graph(config.resolveWorkingDir()).symbols().isEmpty(),
                 "a directory without a project marker must not be indexed into a structural code graph");
     }
 
@@ -584,9 +578,9 @@ class StructuralCodeGraphTest {
         final var project = Files.createDirectory(temp.resolve("scaffold"));
         final var config = config(project, Map.of());
         final var graph = newGraph(config, mapper);
-        graph.ensureReady();
+        graph.ensureReady(config.resolveWorkingDir());
         assertTrue(
-                graph.graph().symbols().isEmpty(),
+                graph.graph(config.resolveWorkingDir()).symbols().isEmpty(),
                 "an empty target project dir must not be indexed into a structural code graph");
     }
 
@@ -621,9 +615,9 @@ class StructuralCodeGraphTest {
 
         final var config = config(project, Map.of());
         final var graph = newGraph(config, mapper);
-        graph.ensureReady();
+        graph.ensureReady(config.resolveWorkingDir());
 
-        final var symbols = awaitNonEmpty(graph).symbols();
+        final var symbols = awaitNonEmpty(graph, project).symbols();
         assertTrue(
                 symbols.stream().anyMatch(s -> s.fqn().equals("demo.A")),
                 "expected the source under src/main/java to be indexed");
@@ -659,9 +653,9 @@ class StructuralCodeGraphTest {
         final var config = config(project, Map.of("yca.structuralCodeGraph.ignoreGlobs", "custom/**"));
 
         final var graph = newGraph(config, mapper);
-        graph.ensureReady();
+        graph.ensureReady(config.resolveWorkingDir());
 
-        final var symbols = awaitNonEmpty(graph).symbols();
+        final var symbols = awaitNonEmpty(graph, project).symbols();
         assertTrue(symbols.stream().anyMatch(s -> s.fqn().equals("demo.A")), "expected demo.A indexed");
         assertTrue(symbols.stream().anyMatch(s -> s.fqn().equals("demo.F")), "expected demo.F indexed");
         assertTrue(
@@ -676,12 +670,12 @@ class StructuralCodeGraphTest {
         Files.writeString(project.resolve("Foo.java"), "package demo;\npublic class Foo { public void run() {} }\n");
         final var config = config(project, Map.of());
         final var graph = newGraph(config, mapper);
-        graph.ensureReady();
+        graph.ensureReady(config.resolveWorkingDir());
 
         final var docRoot = Path.of(config.structuralCodeGraph().resolvedStoreDir(project.toString()))
                 .toAbsolutePath()
                 .normalize();
-        final var built = awaitNonEmpty(graph);
+        final var built = awaitNonEmpty(graph, project);
         final var model = new GraphModel("java", built.symbols(), built.edges());
         final var rel = "Foo.java";
         final var doc = docRoot.resolve("Foo.md");
@@ -733,8 +727,8 @@ class StructuralCodeGraphTest {
         // the shared TestJsonMapper container, so enum-backed graphs work without manual codecs.
         final var graph = newGraph(config, mapper);
 
-        final String status = graph.resync();
-        graph.flushPersist();
+        final String status = graph.resync(config.resolveWorkingDir());
+        graph.flushPersist(config.resolveWorkingDir());
 
         assertTrue(status.startsWith("symbols="), "expected status to report symbols, got: " + status);
         assertTrue(status.contains("files="), "expected status to report parsed files, got: " + status);
@@ -750,12 +744,16 @@ class StructuralCodeGraphTest {
         assertTrue(
                 stored.symbols().stream().anyMatch(s -> s.kind() == GraphModel.Kind.ENUM),
                 "expected an enum symbol to round-trip through the binary index");
-        assertEquals(graph.graph().symbols().size(), stored.symbols().size());
+        assertEquals(
+                graph.graph(config.resolveWorkingDir()).symbols().size(),
+                stored.symbols().size());
 
         // a fresh instance re-loaded from the same binary index must reproduce the same symbols
         final var reloaded = newGraph(config, mapper);
-        reloaded.ensureReady();
-        assertEquals(stored.symbols().size(), awaitNonEmpty(reloaded).symbols().size());
+        reloaded.ensureReady(project);
+        assertEquals(
+                stored.symbols().size(),
+                awaitNonEmpty(reloaded, project).symbols().size());
     }
 
     @Test
@@ -869,18 +867,19 @@ class StructuralCodeGraphTest {
 
         final var config = config(project, Map.of());
         final var graph = newGraph(config, mapper);
-        graph.ensureReady();
-        graph.flushPersist();
+        graph.ensureReady(config.resolveWorkingDir());
+        graph.flushPersist(config.resolveWorkingDir());
         assertTrue(
-                awaitNonEmpty(graph).symbols().stream().anyMatch(s -> s.fqn().equals("demo.sub.Bar")),
+                awaitNonEmpty(graph, project).symbols().stream()
+                        .anyMatch(s -> s.fqn().equals("demo.sub.Bar")),
                 "expected Bar symbols before the deletion");
 
         // delete a file offline (no refreshFile event): a resync must fully reconcile the store
         Files.delete(project.resolve("other/Bar.java"));
-        graph.resync();
-        graph.flushPersist();
+        graph.resync(config.resolveWorkingDir());
+        graph.flushPersist(config.resolveWorkingDir());
 
-        final var after = graph.graph();
+        final var after = graph.graph(config.resolveWorkingDir());
         assertTrue(
                 after.symbols().stream().noneMatch(s -> s.fqn().startsWith("demo.sub")),
                 "deleted file symbols must be dropped by patch");
@@ -899,10 +898,10 @@ class StructuralCodeGraphTest {
 
         // a fresh session must reload the reconciled index: no ghost symbols survive
         final var reloaded = newGraph(config, mapper);
-        reloaded.ensureReady();
+        reloaded.ensureReady(project);
         assertEquals(
                 after.symbols().size(),
-                awaitNonEmpty(reloaded).symbols().size(),
+                awaitNonEmpty(reloaded, project).symbols().size(),
                 "reloaded index must not carry ghost symbols for the deleted file");
     }
 
@@ -914,15 +913,15 @@ class StructuralCodeGraphTest {
 
         final var config = config(project, Map.of());
         final var built = newGraph(config, mapper);
-        built.ensureReady();
+        built.ensureReady(project);
 
         // add a file offline: every known mtime still matches, only the #count gate can notice the
         // addition
         Files.writeString(project.resolve("Baz.java"), "package demo;\npublic class Baz { public void stop() {} }\n");
         final var reloaded = newGraph(config, mapper);
-        reloaded.ensureReady();
+        reloaded.ensureReady(project);
 
-        final var symbols = awaitNonEmpty(reloaded).symbols();
+        final var symbols = awaitNonEmpty(reloaded, project).symbols();
         assertTrue(
                 symbols.stream().anyMatch(s -> s.fqn().equals("demo.Baz")),
                 "a file added offline must be indexed on session start");
@@ -942,8 +941,8 @@ class StructuralCodeGraphTest {
 
         final var config = config(project, Map.of());
         final var built = newGraph(config, mapper);
-        built.ensureReady();
-        built.flushPersist();
+        built.ensureReady(project);
+        built.flushPersist(project);
 
         // touch without a content change: the gate must fail once, the hash-identical patch must
         // refresh
@@ -952,7 +951,7 @@ class StructuralCodeGraphTest {
                 Files.getLastModifiedTime(project.resolve("Foo.java")).toMillis() + 60_000;
         Files.setLastModifiedTime(project.resolve("Foo.java"), FileTime.fromMillis(newMtime));
         final var reloaded = newGraph(config, mapper);
-        reloaded.ensureReady();
+        reloaded.ensureReady(project);
         final var meta = Files.readString(project.resolve(".yca/generated/graph/index.meta"));
         assertTrue(
                 meta.contains("Foo.java\t" + newMtime),
@@ -960,10 +959,10 @@ class StructuralCodeGraphTest {
 
         // ... so the next session hits the fresh fast path and serves the same symbols
         final var third = newGraph(config, mapper);
-        third.ensureReady();
+        third.ensureReady(project);
         assertEquals(
-                awaitNonEmpty(reloaded).symbols().size(),
-                awaitNonEmpty(third).symbols().size());
+                awaitNonEmpty(reloaded, project).symbols().size(),
+                awaitNonEmpty(third, project).symbols().size());
     }
 
     /**

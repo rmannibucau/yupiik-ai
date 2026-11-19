@@ -26,11 +26,18 @@ import io.yupiik.llm.client.codex.CodexOAuthConfig;
 import io.yupiik.llm.client.codex.model.AgentIdentityRecord;
 import io.yupiik.llm.client.codex.model.CodexTokenStore;
 import java.io.IOException;
+import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.nio.file.attribute.PosixFilePermission;
+import java.util.Objects;
 import java.util.Set;
+import java.util.concurrent.CancellationException;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionStage;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Consumer;
 import java.util.function.Predicate;
 
@@ -118,10 +125,26 @@ public class CodexLoginService {
             final Consumer<String> urlSink,
             final Predicate<Boolean> cancelled,
             final CodexOAuthConfig config) {
+        final var store = authenticate(device, urlSink, null, cancelled, config);
+        save(provider, store, cancelled);
+        return store;
+    }
+
+    private CodexTokenStore authenticate(
+            final boolean device,
+            final Consumer<String> urlSink,
+            final Consumer<DeviceChallenge> deviceSink,
+            final Predicate<Boolean> cancelled,
+            final CodexOAuthConfig config) {
+        checkCancelled(cancelled);
         final var oauth = new CodexOAuthClient(mapper, httpClient, config);
         CodexTokenStore store;
         if (device) {
             final var challenge = oauth.deviceCode();
+            checkCancelled(cancelled);
+            if (deviceSink != null) {
+                deviceSink.accept(new DeviceChallenge(challenge.verificationUrl(), challenge.userCode()));
+            }
             if (urlSink != null) {
                 urlSink.accept(challenge.prompt());
             }
@@ -129,7 +152,7 @@ public class CodexLoginService {
         } else {
             store = oauth.browserFlow(urlSink, cancelled);
         }
-        secretRegistration.register(store);
+        checkCancelled(cancelled);
         // record the OAuth authority (provenance) at login, in BOTH flows (mirrors upstream
         // persist_tokens_async which always writes issuer/client_id; the device flow only omits the
         // api key below). Do this BEFORE obtainApiKey so the id token is read from the annotated store.
@@ -144,11 +167,12 @@ public class CodexLoginService {
                 // non-fatal: the login still succeeds without the api-key token (upstream .ok())
                 apiKey = null;
             }
+            checkCancelled(cancelled);
             if (apiKey != null && !apiKey.isBlank()) {
                 store = store.withApiKey(apiKey);
             }
         }
-        save(provider, store);
+        checkCancelled(cancelled);
         return store;
     }
 
@@ -200,7 +224,7 @@ public class CodexLoginService {
             final Predicate<Boolean> cancelled,
             final String forcedWorkspaceId) {
         final CodexTokenStore oauthSession = signIn(provider, device, urlSink, cancelled);
-        return enrollNow(provider, oauthSession, forcedWorkspaceId);
+        return enrollNow(provider, oauthSession, forcedWorkspaceId, cancelled);
     }
 
     /**
@@ -216,15 +240,35 @@ public class CodexLoginService {
      */
     public CodexTokenStore enrollNow(
             final String provider, final CodexTokenStore oauthSession, final String forcedWorkspaceId) {
+        return enrollNow(provider, oauthSession, forcedWorkspaceId, null);
+    }
+
+    /** Cancellation-aware enrollment; an already committed OAuth session is not rolled back. */
+    public CodexTokenStore enrollNow(
+            final String provider,
+            final CodexTokenStore oauthSession,
+            final String forcedWorkspaceId,
+            final Predicate<Boolean> cancelled) {
+        final var enrolled = enroll(oauthSession, forcedWorkspaceId, cancelled);
+        save(provider, enrolled, cancelled);
+        return enrolled;
+    }
+
+    private CodexTokenStore enroll(
+            final CodexTokenStore oauthSession, final String forcedWorkspaceId, final Predicate<Boolean> cancelled) {
+        checkCancelled(cancelled);
         if (oauthSession.accessToken() == null || oauthSession.accessToken().isBlank()) {
             throw new IllegalStateException("ChatGPT/Codex login succeeded but produced no access token");
         }
         final var agentIdentity = new CodexAgentIdentityClient(mapper, httpClient, CodexAgentIdentityConfig.DEFAULT);
         final var record = agentIdentity.enroll(
-                oauthSession.accessToken(), oauthSession.idToken(), oauthSession.accountId(), forcedWorkspaceId);
-        final CodexTokenStore enrolled = oauthSession.withAgentIdentity(record);
-        save(provider, enrolled);
-        return enrolled;
+                oauthSession.accessToken(),
+                oauthSession.idToken(),
+                oauthSession.accountId(),
+                forcedWorkspaceId,
+                cancelled);
+        checkCancelled(cancelled);
+        return oauthSession.withAgentIdentity(record);
     }
 
     /** The token store for a provider, or {@code null} when no session exists yet. */
@@ -244,16 +288,298 @@ public class CodexLoginService {
 
     /** Persists a session atomically (temp file + move, owner-only perms). */
     public void save(final String provider, final CodexTokenStore store) {
+        save(provider, store, null);
+    }
+
+    private void save(final String provider, final CodexTokenStore store, final Predicate<Boolean> cancelled) {
+        checkCancelled(cancelled);
         secretRegistration.register(store);
         final var file = codexAuthFile(provider);
+        final var tmp = stage(file, store);
         try {
-            Files.createDirectories(file.getParent());
-            final var tmp = file.resolveSibling(file.getFileName() + ".tmp");
-            Files.write(tmp, mapper.toBytes(store));
-            restrictToOwner(tmp);
-            Files.move(tmp, file, StandardCopyOption.REPLACE_EXISTING);
+            checkCancelled(cancelled);
+            replace(tmp, file);
         } catch (final IOException e) {
             throw new IllegalStateException("Cannot persist the Codex session to " + file + ": " + e.getMessage(), e);
+        } finally {
+            deleteStaged(tmp);
+        }
+    }
+
+    private Path stage(final Path file, final CodexTokenStore store) {
+        Path tmp = null;
+        try {
+            Files.createDirectories(file.getParent());
+            // Unique, owner-only staging files also permit concurrent services targeting one store.
+            tmp = Files.createTempFile(file.getParent(), "codex.auth-", ".tmp");
+            restrictToOwner(tmp);
+            Files.write(tmp, mapper.toBytes(store));
+            return tmp;
+        } catch (final IOException | RuntimeException | Error e) {
+            deleteStaged(tmp);
+            throw new IllegalStateException("Cannot stage the Codex session", e);
+        }
+    }
+
+    private void replace(final Path tmp, final Path file) throws IOException {
+        try {
+            Files.move(tmp, file, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+        } catch (final AtomicMoveNotSupportedException unsupported) {
+            Files.move(tmp, file, StandardCopyOption.REPLACE_EXISTING);
+        }
+    }
+
+    private void deleteStaged(final Path tmp) {
+        if (tmp != null) {
+            try {
+                Files.deleteIfExists(tmp);
+            } catch (final IOException ignored) {
+                // Best effort, like permission restriction on non-POSIX file systems.
+            }
+        }
+    }
+
+    private static void checkCancelled(final Predicate<Boolean> cancelled) {
+        if (Thread.currentThread().isInterrupted() || (cancelled != null && cancelled.test(Boolean.TRUE))) {
+            throw new CancellationException("Codex login cancelled");
+        }
+    }
+
+    /** Nonsecret routing data only: never pass an OAuth device_auth_id to a frontend. */
+    public record DeviceChallenge(String verificationUrl, String userCode) {}
+
+    public enum LoginStatus {
+        AUTHORIZING,
+        ENROLLING,
+        SAVING
+    }
+
+    public enum LoginState {
+        CREATED,
+        QUEUED,
+        RUNNING,
+        SUCCEEDED,
+        FAILED,
+        CANCELLED
+    }
+
+    /** Contains no credentials or provider exception text, including on failure. */
+    public record LoginResult(LoginState state, boolean credentialsCommitted) {}
+
+    public record LoginRequest(String provider, boolean device, boolean enterprise, String forcedWorkspaceId) {
+        public LoginRequest {
+            if (provider == null
+                    || provider.isBlank()
+                    || provider.equals(".")
+                    || provider.equals("..")
+                    || provider.contains("/")
+                    || provider.contains("\\")) {
+                throw new IllegalArgumentException("Invalid Codex provider identifier");
+            }
+        }
+    }
+
+    /**
+     * Nonblocking frontend callbacks, invoked on the attempt worker, never under its commit guard.
+     * Browser URLs carry OAuth state: route them to the user, not logs. Device URL and code are separate.
+     * No passwords, tokens or generic secret-input forms are requested by this API.
+     */
+    public interface LoginListener {
+        default void status(final LoginStatus status) {}
+
+        default void browser(final String authorizeUrl) {}
+
+        default void device(final DeviceChallenge challenge) {}
+    }
+
+    /**
+     * Creates an unstarted, caller-owned attempt. Retain it in the owning session until {@link
+     * LoginAttempt#drained()} settles; the service keeps no attempt registry. Cancellation before
+     * {@link LoginAttempt#start(ExecutorService)} prevents all startup work.
+     */
+    public LoginAttempt newAttempt(final LoginRequest request, final LoginListener listener) {
+        return new LoginAttempt(Objects.requireNonNull(request), listener);
+    }
+
+    /**
+     * A single login, not a job framework. close/cancel request interruption, but do not close the
+     * shared HTTP client or executor. completion reports the chosen outcome; drained reports actual
+     * worker/resource release (even if an external SDK ignores interruption). Callbacks admitted
+     * before cancel wins can finish before drained, but no further callbacks are admitted.
+     */
+    public final class LoginAttempt implements AutoCloseable {
+        private final ReentrantLock guard = new ReentrantLock();
+        private final CompletableFuture<LoginResult> completion = new CompletableFuture<>();
+        private final CompletableFuture<Void> drained = new CompletableFuture<>();
+        private volatile LoginState state = LoginState.CREATED;
+        private LoginRequest request;
+        private LoginListener listener;
+        private Thread worker;
+
+        private LoginAttempt(final LoginRequest request, final LoginListener listener) {
+            this.request = request;
+            this.listener = listener;
+        }
+
+        /** Uses an application-owned executor; never submits to the detached common pool. */
+        public LoginAttempt start(final ExecutorService executor) {
+            Objects.requireNonNull(executor);
+            guard.lock();
+            try {
+                if (state == LoginState.CANCELLED) {
+                    return this;
+                }
+                if (state != LoginState.CREATED) {
+                    throw new IllegalStateException("Codex login already started");
+                }
+                state = LoginState.QUEUED;
+            } finally {
+                guard.unlock();
+            }
+            try {
+                executor.execute(this::run);
+            } catch (final RuntimeException | Error ignored) {
+                finish();
+            }
+            return this;
+        }
+
+        public LoginState state() {
+            return state;
+        }
+
+        public CompletionStage<LoginResult> completion() {
+            return completion.minimalCompletionStage();
+        }
+
+        public CompletionStage<Void> drained() {
+            return drained.minimalCompletionStage();
+        }
+
+        /** Returns true only if cancellation wins before the durable commit/terminal outcome. */
+        public boolean cancel() {
+            final boolean idle;
+            guard.lock();
+            try {
+                if (terminal()) {
+                    return false;
+                }
+                state = LoginState.CANCELLED;
+                idle = worker == null;
+                listener = null;
+                request = null;
+                if (!idle) {
+                    // Inside the guard so a pooled thread cannot be interrupted after release/reuse.
+                    worker.interrupt();
+                }
+            } finally {
+                guard.unlock();
+            }
+            if (idle) {
+                // Queued runnables can only become no-ops after this transition.
+                drained.complete(null);
+            }
+            completion.complete(new LoginResult(LoginState.CANCELLED, false));
+            return true;
+        }
+
+        /** Requests cancellation; await drained() separately before disposing the callback owner. */
+        @Override
+        public void close() {
+            cancel();
+        }
+
+        private boolean terminal() {
+            return state == LoginState.SUCCEEDED || state == LoginState.FAILED || state == LoginState.CANCELLED;
+        }
+
+        private void notifyListener(final Consumer<LoginListener> callback) {
+            final LoginListener target;
+            guard.lock();
+            try {
+                checkActive();
+                target = listener;
+            } finally {
+                guard.unlock();
+            }
+            if (target != null) {
+                callback.accept(target);
+            }
+        }
+
+        private void checkActive() {
+            checkCancelled(b -> state == LoginState.CANCELLED);
+        }
+
+        private void run() {
+            final LoginRequest login;
+            guard.lock();
+            try {
+                if (state != LoginState.QUEUED) {
+                    return;
+                }
+                worker = Thread.currentThread();
+                state = LoginState.RUNNING;
+                login = request;
+            } finally {
+                guard.unlock();
+            }
+            Path tmp = null;
+            try {
+                checkActive();
+                notifyListener(l -> l.status(LoginStatus.AUTHORIZING));
+                var store = authenticate(
+                        login.device(),
+                        login.device() ? null : url -> notifyListener(l -> l.browser(url)),
+                        challenge -> notifyListener(l -> l.device(challenge)),
+                        b -> state == LoginState.CANCELLED,
+                        CodexOAuthConfig.DEFAULT);
+                if (login.enterprise()) {
+                    notifyListener(l -> l.status(LoginStatus.ENROLLING));
+                    store = enroll(store, login.forcedWorkspaceId(), b -> state == LoginState.CANCELLED);
+                }
+                notifyListener(l -> l.status(LoginStatus.SAVING));
+                checkActive();
+                secretRegistration.register(store);
+                final var file = codexAuthFile(login.provider());
+                tmp = stage(file, store);
+                guard.lock();
+                try {
+                    checkActive();
+                    // Only the final replacement is guarded, not OAuth, enrollment, JSON or hooks.
+                    replace(tmp, file);
+                    state = LoginState.SUCCEEDED;
+                } finally {
+                    guard.unlock();
+                }
+            } catch (final IOException | RuntimeException | Error ignored) {
+                // Never publish provider bodies, exception messages/causes, credentials or hook errors.
+            } finally {
+                try {
+                    deleteStaged(tmp);
+                } finally {
+                    finish();
+                }
+            }
+        }
+
+        private void finish() {
+            final LoginResult result;
+            guard.lock();
+            try {
+                if (!terminal()) {
+                    state = LoginState.FAILED;
+                }
+                result = new LoginResult(state, state == LoginState.SUCCEEDED);
+                worker = null;
+                request = null;
+                listener = null;
+            } finally {
+                guard.unlock();
+            }
+            // Separate from outcome cancellation; never use Future.cancel as evidence of drainage.
+            drained.complete(null);
+            completion.complete(result);
         }
     }
 

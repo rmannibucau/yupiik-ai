@@ -27,13 +27,21 @@ import io.yupiik.ia.agent.core.shell.SessionRuntime;
 import io.yupiik.ia.agent.core.shell.ShellSession;
 import io.yupiik.ia.agent.core.shell.ToolOutputVisibility;
 import io.yupiik.ia.agent.test.TestJsonMapper;
+import java.nio.file.Path;
 import java.time.Clock;
 import java.util.ArrayList;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.api.io.TempDir;
 
 @ExtendWith(TestJsonMapper.class)
 class CliUsagePrinterTest {
+    @TempDir
+    private static Path eventWorkdir;
+
+    @TempDir
+    private static Path testWorkdir;
+
     @Test
     void cachedPercentageUsesFullContextInput(final JsonMapper mapper) {
         final var tracker = new UsageTracker(null, null, null, Clock.systemUTC());
@@ -65,9 +73,9 @@ class CliUsagePrinterTest {
                 false,
                 false,
                 ToolOutputVisibility.COLLAPSED);
-        frontend.onEvent(new AgentEvent.UsageUpdated(usage, 68, 14, "s1"));
-        final var session =
-                new ShellSession().runtime(new SessionRuntime(null, null, null, tracker, null, null, null, null));
+        frontend.onEvent(new AgentEvent.UsageUpdated(usage, 68, 14, "s1", eventWorkdir));
+        final var session = new ShellSession()
+                .runtime(new SessionRuntime(null, null, null, tracker, null, null, null, null, testWorkdir));
         final var lines = new ArrayList<String>();
         final var printer = new CliUsagePrinter(
                 new CliCommand.CliConf("", "", "", false, true, "compact", false, "collapsed", true),

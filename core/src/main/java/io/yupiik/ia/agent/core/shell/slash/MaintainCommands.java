@@ -27,6 +27,8 @@ import java.util.List;
 import java.util.Locale;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
+import java.util.function.Consumer;
+import java.util.regex.Pattern;
 
 /**
  * Maintenance commands shared by every shell: compaction, snapshots, plan
@@ -34,6 +36,8 @@ import java.util.concurrent.CompletionStage;
  */
 @ApplicationScoped
 public class MaintainCommands implements SlashCommandSet {
+    private static final Pattern WHITESPACE = Pattern.compile("\\s+");
+
     @Override
     public String title() {
         return "Maintenance commands";
@@ -158,7 +162,7 @@ public class MaintainCommands implements SlashCommandSet {
         if (arg == null || arg.isBlank()) {
             return new CompactOptions(force, urgent, keepLast);
         }
-        for (final var token : arg.strip().split("\\s+")) {
+        for (final var token : WHITESPACE.split(arg.strip())) {
             final var t = token.toLowerCase(Locale.ROOT);
             if ("force".equals(t)) {
                 force = true;
@@ -231,7 +235,8 @@ public class MaintainCommands implements SlashCommandSet {
             return ShellOutcome.status("cannot resync the graph while busy");
         }
         try {
-            return ShellOutcome.status(agentSessionService.resyncGraph());
+            return ShellOutcome.status(
+                    agentSessionService.resyncGraph(env.session().runtime().workdir()));
         } catch (final RuntimeException e) {
             return ShellOutcome.error("resync failed: " + e.getMessage());
         }
@@ -245,21 +250,23 @@ public class MaintainCommands implements SlashCommandSet {
             if (arg == null || arg.isBlank()) {
                 return ShellOutcome.status("usage: /maven-repository-knowledge <refresh [gav]|status>");
             }
-            final var parts = arg.strip().split("\\s+", 2);
+            final var parts = WHITESPACE.split(arg.strip(), 2);
             final var sub = parts[0].toLowerCase(Locale.ROOT);
+            final var runtime = env.session().runtime();
+            final var root = runtime.workdir();
             if ("status".equals(sub)) {
                 return ShellOutcome.transcript(
-                        "> maven-repository-knowledge:\n" + String.join("\n", mavenKnowledgeService.status()));
+                        "> maven-repository-knowledge:\n" + String.join("\n", mavenKnowledgeService.status(root)));
             }
             if (!"refresh".equalsIgnoreCase(sub)) {
                 return ShellOutcome.status("usage: /maven-repository-knowledge <refresh [gav]|status>");
             }
             final var gav = parts.length > 1 ? parts[1].strip() : "";
+            final Consumer<String> progress = text -> env.frontend().status(text);
+            final Consumer<String> completed =
+                    summary -> env.frontend().transcript("\n\n> maven-repository-knowledge:\n" + summary);
             final var ack = mavenKnowledgeService.refresh(
-                    gav,
-                    progress -> env.frontend().status(progress),
-                    summary -> env.frontend().transcript("\n\n> maven-repository-knowledge:\n" + summary),
-                    env.session().chatSettings());
+                    root, gav, progress, completed, env.session().chatSettings());
             return ShellOutcome.transcript("> maven-repository-knowledge:\n" + String.join("\n", ack));
         } catch (final RuntimeException e) {
             return ShellOutcome.error("maven-repository-knowledge failed: " + e.getMessage());
@@ -278,7 +285,7 @@ public class MaintainCommands implements SlashCommandSet {
                 return ShellOutcome.transcript(
                         "**MCP servers**\n\n" + SlashRegistry.table(List.of("server", "state"), rows));
             }
-            final var parts = value.split("\\s+", 2);
+            final var parts = WHITESPACE.split(value, 2);
             if (!parts[0].equalsIgnoreCase("reset")) {
                 return ShellOutcome.status("usage: /mcp status|reset [server]");
             }

@@ -31,6 +31,7 @@ import io.yupiik.ia.agent.test.TestJsonMapper;
 import java.io.ByteArrayOutputStream;
 import java.io.PrintStream;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.BrokenBarrierException;
@@ -38,10 +39,12 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.CyclicBarrier;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.regex.Pattern;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.api.parallel.Isolated;
 import org.junit.jupiter.api.parallel.ResourceLock;
 import org.junit.jupiter.api.parallel.Resources;
@@ -53,20 +56,29 @@ import org.junit.jupiter.api.parallel.Resources;
 @ResourceLock(Resources.SYSTEM_ERR)
 @ExtendWith(TestJsonMapper.class)
 class AnsiShellFrontendTest {
+    private static final Pattern FIRST_MODEL_HEADER = Pattern.compile("\\Q[1000] model\\E");
+    private static final Pattern SECOND_MODEL_HEADER = Pattern.compile("\\Q[2000] model\\E");
+    private static final Pattern PARENT_DELTA = Pattern.compile(".*P\\d+ .*");
+    private static final Pattern CHILD_DELTA = Pattern.compile(".*C\\d+ .*");
+    private static final Pattern ANSI = Pattern.compile("\u001b\\[[0-9;]*m");
+
+    @TempDir
+    private static Path eventWorkdir;
+
     @Test
     void eachResponseStartPrintsOneConfiguredHeaderNotOnePerDelta() {
         final var frontend = frontend(false, false);
         frontend.feedbackLabel(at -> "[" + at + "] model");
         frontend.beginTurn();
-        frontend.onEvent(new AgentEvent.FeedbackStarted("text", 1000, "s1", null, null));
-        frontend.onEvent(new AgentEvent.TextDelta("first", "s1"));
-        frontend.onEvent(new AgentEvent.TextDelta(" tail", "s1"));
-        frontend.onEvent(new AgentEvent.FeedbackStarted("text", 2000, "s1", null, null));
-        frontend.onEvent(new AgentEvent.TextDelta("last", "s1"));
+        frontend.onEvent(new AgentEvent.FeedbackStarted("text", 1000, "s1", null, null, eventWorkdir));
+        frontend.onEvent(new AgentEvent.TextDelta("first", "s1", eventWorkdir));
+        frontend.onEvent(new AgentEvent.TextDelta(" tail", "s1", eventWorkdir));
+        frontend.onEvent(new AgentEvent.FeedbackStarted("text", 2000, "s1", null, null, eventWorkdir));
+        frontend.onEvent(new AgentEvent.TextDelta("last", "s1", eventWorkdir));
         frontend.endTurn();
         final var rendered = out.toString(StandardCharsets.UTF_8);
-        assertEquals(1, rendered.split("\\Q[1000] model\\E", -1).length - 1, rendered);
-        assertEquals(1, rendered.split("\\Q[2000] model\\E", -1).length - 1, rendered);
+        assertEquals(1, FIRST_MODEL_HEADER.split(rendered, -1).length - 1, rendered);
+        assertEquals(1, SECOND_MODEL_HEADER.split(rendered, -1).length - 1, rendered);
         assertTrue(rendered.indexOf("first tail") < rendered.indexOf("[2000] model"), rendered);
     }
 
@@ -74,12 +86,12 @@ class AnsiShellFrontendTest {
     void splitThinkingSeamsAreHiddenButMultilineCodeAndProseSurvive() {
         final var frontend = frontend(true, false);
         frontend.beginTurn();
-        frontend.onEvent(new AgentEvent.ThinkingDelta("@bl", "s1"));
+        frontend.onEvent(new AgentEvent.ThinkingDelta("@bl", "s1", eventWorkdir));
         assertFalse(err.toString().contains("@bl"));
-        frontend.onEvent(new AgentEvent.ThinkingDelta("ocked@\n``literal\n@1", "s1"));
-        frontend.onEvent(new AgentEvent.ThinkingDelta("@\nend``\nuse @2@ literally\n", "s1"));
-        frontend.onEvent(new AgentEvent.TextDelta("~~~\n@3", "s1"));
-        frontend.onEvent(new AgentEvent.TextDelta("@\n~~~\n@4@\n", "s1"));
+        frontend.onEvent(new AgentEvent.ThinkingDelta("ocked@\n``literal\n@1", "s1", eventWorkdir));
+        frontend.onEvent(new AgentEvent.ThinkingDelta("@\nend``\nuse @2@ literally\n", "s1", eventWorkdir));
+        frontend.onEvent(new AgentEvent.TextDelta("~~~\n@3", "s1", eventWorkdir));
+        frontend.onEvent(new AgentEvent.TextDelta("@\n~~~\n@4@\n", "s1", eventWorkdir));
         frontend.endTurn();
         assertFalse(err.toString().contains("@blocked@"));
         assertTrue(err.toString().contains("@1@"));
@@ -156,10 +168,10 @@ class AnsiShellFrontendTest {
     @Test
     void suspensionBuffersEventsAndResumeReplaysThem() {
         final var frontend = frontend(false, true);
-        final var interrupt = new AgentEvent.Status("mid-gate status", "s1");
+        final var interrupt = new AgentEvent.Status("mid-gate status", "s1", eventWorkdir);
 
         frontend.suspendOutput();
-        frontend.onEvent(new AgentEvent.ThinkingDelta("hidden", "s1"));
+        frontend.onEvent(new AgentEvent.ThinkingDelta("hidden", "s1", eventWorkdir));
         frontend.onEvent(interrupt);
         assertEquals("", out.toString());
         assertEquals("", err.toString());
@@ -168,7 +180,7 @@ class AnsiShellFrontendTest {
         assertTrue(out.toString().isEmpty());
         assertTrue(err.toString().contains("mid-gate status"));
 
-        frontend.onEvent(new AgentEvent.Status("after", "s1"));
+        frontend.onEvent(new AgentEvent.Status("after", "s1", eventWorkdir));
         assertTrue(err.toString().contains("after"));
     }
 
@@ -177,13 +189,13 @@ class AnsiShellFrontendTest {
         final var frontend = frontend(false, true, true);
         frontend.beginTurn();
 
-        frontend.onEvent(new AgentEvent.SubagentStarted("do the thing", "s1", "sub-1", "child"));
+        frontend.onEvent(new AgentEvent.SubagentStarted("do the thing", "s1", "sub-1", "child", eventWorkdir));
         assertTrue(
                 err.toString(StandardCharsets.UTF_8).contains("[child] [subagent] started: do the thing"),
                 "started must render a one-line status: " + err);
 
         frontend.onEvent(new AgentEvent.SubagentCompleted(
-                "all done\n- item one\n- item two", true, false, "s1", "sub-1", "child", "gpt-5.5"));
+                "all done\n- item one\n- item two", true, false, "s1", "sub-1", "child", "gpt-5.5", eventWorkdir));
         final var out = err.toString(StandardCharsets.UTF_8);
         assertTrue(
                 out.contains("[child] [subagent] completed (gpt-5.5) — all done"),
@@ -195,13 +207,14 @@ class AnsiShellFrontendTest {
         final var frontend = frontend(false, true, true);
         frontend.beginTurn();
 
-        frontend.onEvent(new AgentEvent.SubagentCompleted("boom", false, false, "s1", "sub-1", "child", "gpt-5.5"));
+        frontend.onEvent(new AgentEvent.SubagentCompleted(
+                "boom", false, false, "s1", "sub-1", "child", "gpt-5.5", eventWorkdir));
         assertTrue(
                 err.toString(StandardCharsets.UTF_8).contains("[child] [subagent] failed (gpt-5.5) — boom"),
                 "failed must render an error line: " + err);
 
-        frontend.onEvent(
-                new AgentEvent.SubagentCompleted("Sub-agent cancelled", false, true, "s1", "sub-2", "other", null));
+        frontend.onEvent(new AgentEvent.SubagentCompleted(
+                "Sub-agent cancelled", false, true, "s1", "sub-2", "other", null, eventWorkdir));
         assertTrue(
                 err.toString(StandardCharsets.UTF_8).contains("[other] [subagent] cancelled — Sub-agent cancelled"),
                 "cancelled must render a dim line: " + err);
@@ -213,7 +226,7 @@ class AnsiShellFrontendTest {
         frontend.beginTurn();
 
         // a thought delta with no trailing newline leaves an open line
-        frontend.onEvent(new AgentEvent.ThinkingDelta("reasoning", "s1"));
+        frontend.onEvent(new AgentEvent.ThinkingDelta("reasoning", "s1", eventWorkdir));
         assertTrue(err.toString(StandardCharsets.UTF_8).contains("reasoning"));
 
         // suspending for an interaction must terminate that line so the stdout card
@@ -224,7 +237,7 @@ class AnsiShellFrontendTest {
                 "open thought line must terminate on suspend: " + err);
 
         // events buffered while suspended stay silent until resume
-        frontend.onEvent(new AgentEvent.ThinkingDelta("hidden", "s1"));
+        frontend.onEvent(new AgentEvent.ThinkingDelta("hidden", "s1", eventWorkdir));
         assertEquals("", out.toString(StandardCharsets.UTF_8));
 
         frontend.resumeOutput();
@@ -265,7 +278,7 @@ class AnsiShellFrontendTest {
         // the freshly drawn prompt once the answer is ready).
         frontend.suspendOutput();
         assertFalse(frontend.spinnerRunning());
-        frontend.onEvent(new AgentEvent.TurnDone("answer", "s1"));
+        frontend.onEvent(new AgentEvent.TurnDone("answer", "s1", eventWorkdir));
         frontend.resumeOutput();
         assertFalse(frontend.spinnerRunning(), "spinner must stay off after a buffered TurnDone");
 
@@ -281,11 +294,11 @@ class AnsiShellFrontendTest {
     void streamsAnswerToStdoutAndCountsTools() {
         final var frontend = frontend(false, false);
 
-        frontend.onEvent(new AgentEvent.TextDelta("hel", "s1"));
-        frontend.onEvent(new AgentEvent.TextDelta("lo", "s1"));
-        frontend.onEvent(new AgentEvent.ToolStarted("read", "{}", "s1"));
-        frontend.onEvent(new AgentEvent.ToolFinished("read", "out", true, "s1"));
-        frontend.onEvent(new AgentEvent.TurnDone("hello", "s1"));
+        frontend.onEvent(new AgentEvent.TextDelta("hel", "s1", eventWorkdir));
+        frontend.onEvent(new AgentEvent.TextDelta("lo", "s1", eventWorkdir));
+        frontend.onEvent(new AgentEvent.ToolStarted("read", "{}", "s1", eventWorkdir));
+        frontend.onEvent(new AgentEvent.ToolFinished("read", "out", true, "s1", eventWorkdir));
+        frontend.onEvent(new AgentEvent.TurnDone("hello", "s1", eventWorkdir));
         frontend.endTurn();
 
         assertEquals("hello\n", out.toString(StandardCharsets.UTF_8));
@@ -296,8 +309,8 @@ class AnsiShellFrontendTest {
     void hiddenThinkingTriggersActivityOnly() {
         final var frontend = frontend(false, false);
 
-        frontend.onEvent(new AgentEvent.ThinkingDelta("reasoning", "s1"));
-        frontend.onEvent(new AgentEvent.UsageUpdated(null, 100, 5.0, "s1"));
+        frontend.onEvent(new AgentEvent.ThinkingDelta("reasoning", "s1", eventWorkdir));
+        frontend.onEvent(new AgentEvent.UsageUpdated(null, 100, 5.0, "s1", eventWorkdir));
 
         assertTrue(err.toString(StandardCharsets.UTF_8).isEmpty());
         assertEquals(100, frontend.stats().lastUsage().estimatedContextTokens());
@@ -354,10 +367,10 @@ class AnsiShellFrontendTest {
 
         frontend.status("live status");
         frontend.transcript("answer line\n");
-        frontend.onEvent(new AgentEvent.ThinkingDelta("reasoning", "s1"));
+        frontend.onEvent(new AgentEvent.ThinkingDelta("reasoning", "s1", eventWorkdir));
         frontend.endTurn();
-        frontend.onEvent(new AgentEvent.ToolStarted("bash", "{}", "s1"));
-        frontend.onEvent(new AgentEvent.ToolFinished("bash", "out", true, "s1"));
+        frontend.onEvent(new AgentEvent.ToolStarted("bash", "{}", "s1", eventWorkdir));
+        frontend.onEvent(new AgentEvent.ToolFinished("bash", "out", true, "s1", eventWorkdir));
 
         assertFalse(seen.isEmpty(), "writes landing while a prompt is live must go through the sink");
         assertEquals("", out.toString(StandardCharsets.UTF_8));
@@ -461,7 +474,7 @@ class AnsiShellFrontendTest {
                 });
 
         frontend.beginTurn();
-        frontend.onEvent(new AgentEvent.TextDelta("the answer\n", "s1"));
+        frontend.onEvent(new AgentEvent.TextDelta("the answer\n", "s1", eventWorkdir));
         frontend.endTurn();
 
         // the REPL is now painting the next prompt
@@ -472,9 +485,9 @@ class AnsiShellFrontendTest {
         final var late = new Thread(
                 () -> {
                     try {
-                        frontend.onEvent(new AgentEvent.TextDelta("late sub-agent delta\n", "s1"));
-                        frontend.onEvent(
-                                new AgentEvent.Notice(AgentEvent.Notice.Level.WARN, "memory extraction failed", "s1"));
+                        frontend.onEvent(new AgentEvent.TextDelta("late sub-agent delta\n", "s1", eventWorkdir));
+                        frontend.onEvent(new AgentEvent.Notice(
+                                AgentEvent.Notice.Level.WARN, "memory extraction failed", "s1", eventWorkdir));
                     } finally {
                         release.countDown();
                     }
@@ -513,12 +526,12 @@ class AnsiShellFrontendTest {
         final var frontend = frontend(true, true, true);
         frontend.beginTurn();
         assertFalse(frontend.spinnerRunning());
-        frontend.onEvent(new AgentEvent.ThinkingDelta("reasoning", "s1"));
+        frontend.onEvent(new AgentEvent.ThinkingDelta("reasoning", "s1", eventWorkdir));
         assertTrue(err.toString().contains("reasoning"));
         assertFalse(frontend.spinnerRunning());
-        frontend.onEvent(new AgentEvent.ToolStarted("bash", "ls", "s1"));
+        frontend.onEvent(new AgentEvent.ToolStarted("bash", "ls", "s1", eventWorkdir));
         assertFalse(frontend.spinnerRunning(), "tool activity must remain append-only");
-        frontend.onEvent(new AgentEvent.ToolFinished("bash", "out", true, "s1"));
+        frontend.onEvent(new AgentEvent.ToolFinished("bash", "out", true, "s1", eventWorkdir));
         assertFalse(frontend.spinnerRunning());
         frontend.endTurn();
     }
@@ -527,7 +540,7 @@ class AnsiShellFrontendTest {
     void shownThinkingScrubsEchoedSeamsFromStderr() {
         final var frontend = frontend(true, true, true);
         frontend.beginTurn();
-        frontend.onEvent(new AgentEvent.ThinkingDelta("pondering\n@535@\nreasoning @24", "s1"));
+        frontend.onEvent(new AgentEvent.ThinkingDelta("pondering\n@535@\nreasoning @24", "s1", eventWorkdir));
         frontend.endTurn();
         final var rendered = err.toString();
         assertTrue(rendered.contains("pondering"), rendered);
@@ -559,13 +572,14 @@ class AnsiShellFrontendTest {
         // ...then a background subagent (emitting on the shared bus) sends its own
         // thinking/tool deltas and finally its completion; none of those must re-arm
         // the spinner now that the turn is over, otherwise it would spin forever
-        frontend.onEvent(new AgentEvent.ThinkingDelta("subagent pondering", null, "sub-1", "researcher"));
+        frontend.onEvent(new AgentEvent.ThinkingDelta("subagent pondering", null, "sub-1", "researcher", eventWorkdir));
         assertFalse(frontend.spinnerRunning(), "late thinking delta must not restart the spinner");
-        frontend.onEvent(new AgentEvent.ToolStarted("bash", "ls", -1L, null, "sub-1", "researcher"));
+        frontend.onEvent(new AgentEvent.ToolStarted("bash", "ls", -1L, null, "sub-1", "researcher", eventWorkdir));
         assertFalse(frontend.spinnerRunning(), "late tool start must not restart the spinner");
-        frontend.onEvent(new AgentEvent.ThinkingDelta("subagent ponder again", null, "sub-1", "researcher"));
+        frontend.onEvent(
+                new AgentEvent.ThinkingDelta("subagent ponder again", null, "sub-1", "researcher", eventWorkdir));
         assertFalse(frontend.spinnerRunning());
-        frontend.onEvent(new AgentEvent.TurnDone("subagent answer", null, "sub-1", "researcher"));
+        frontend.onEvent(new AgentEvent.TurnDone("subagent answer", null, "sub-1", "researcher", eventWorkdir));
         assertFalse(frontend.spinnerRunning());
     }
 
@@ -577,7 +591,7 @@ class AnsiShellFrontendTest {
 
         // the actor completes (main answer streamed, then TurnDone): the spinner must
         // already be gone before endTurn, so no dangling spin is ever visible at the prompt
-        frontend.onEvent(new AgentEvent.TurnDone("answer", "s1"));
+        frontend.onEvent(new AgentEvent.TurnDone("answer", "s1", eventWorkdir));
         assertFalse(frontend.spinnerRunning());
         frontend.endTurn();
         assertFalse(frontend.spinnerRunning());
@@ -591,10 +605,10 @@ class AnsiShellFrontendTest {
 
         // streamed tool output owns the terminal line: the spinner must be gone
         // rather than animating frames between the output fragments
-        frontend.onEvent(new AgentEvent.ToolStream("bash", "streamed line\n", "s1"));
+        frontend.onEvent(new AgentEvent.ToolStream("bash", "streamed line\n", "s1", eventWorkdir));
         assertFalse(frontend.spinnerRunning(), "streamed output must stop the spinner");
         assertTrue(err.toString(StandardCharsets.UTF_8).contains("streamed line"));
-        frontend.onEvent(new AgentEvent.ToolStream("bash", "second fragment", "s1"));
+        frontend.onEvent(new AgentEvent.ToolStream("bash", "second fragment", "s1", eventWorkdir));
         assertFalse(frontend.spinnerRunning(), "spinner restarted between stream fragments");
 
         frontend.endTurn();
@@ -606,7 +620,7 @@ class AnsiShellFrontendTest {
         final var frontend = frontend(CliVerbosity.RAW, true, false);
         frontend.beginTurn();
         assertTrue(frontend.spinnerRunning());
-        frontend.onEvent(new AgentEvent.ToolStream("bash", "streamed line\n", "s1"));
+        frontend.onEvent(new AgentEvent.ToolStream("bash", "streamed line\n", "s1", eventWorkdir));
         assertFalse(frontend.spinnerRunning(), "streamed output must stop the spinner");
         assertTrue(err.toString(StandardCharsets.UTF_8).contains("streamed line\n"));
         frontend.endTurn();
@@ -635,8 +649,8 @@ class AnsiShellFrontendTest {
                 // finish stops then re-arms the spinner (hidden thinking),
                 // probing the teardown window on every single event
                 for (int j = 0; j < 50; j++) {
-                    frontend.onEvent(new AgentEvent.ToolFinished("bash", "done " + j, true, "s1"));
-                    frontend.onEvent(new AgentEvent.ThinkingDelta("late thought " + j, "s1"));
+                    frontend.onEvent(new AgentEvent.ToolFinished("bash", "done " + j, true, "s1", eventWorkdir));
+                    frontend.onEvent(new AgentEvent.ThinkingDelta("late thought " + j, "s1", eventWorkdir));
                 }
             });
             try {
@@ -656,9 +670,9 @@ class AnsiShellFrontendTest {
         frontend.beginTurn();
 
         // a thought delta that does not end with a newline
-        frontend.onEvent(new AgentEvent.ThinkingDelta("reasoning", "s1"));
+        frontend.onEvent(new AgentEvent.ThinkingDelta("reasoning", "s1", eventWorkdir));
         // a following tool line must not be glued onto the thought line
-        frontend.onEvent(new AgentEvent.ToolStarted("bash", "ls", "s1"));
+        frontend.onEvent(new AgentEvent.ToolStarted("bash", "ls", "s1", eventWorkdir));
 
         final var stderr = err.toString(StandardCharsets.UTF_8);
         // the thought delta is ANSI-wrapped (\u001b[38;5;240m...\u001b[0m); the guard must
@@ -676,8 +690,8 @@ class AnsiShellFrontendTest {
         // the parent turn and a spawned sub-agent reason concurrently: their deltas
         // must not be spliced into a single line, and the second voice needs its
         // own 'thinking...' header (the first one must not suppress it)
-        frontend.onEvent(new AgentEvent.ThinkingDelta("parent reasoning", "s1"));
-        frontend.onEvent(new AgentEvent.ThinkingDelta("child reasoning", "s1", "sub-1", "kid"));
+        frontend.onEvent(new AgentEvent.ThinkingDelta("parent reasoning", "s1", eventWorkdir));
+        frontend.onEvent(new AgentEvent.ThinkingDelta("child reasoning", "s1", "sub-1", "kid", eventWorkdir));
 
         final var lines = stripAnsi(err.toString(StandardCharsets.UTF_8)).split("\n", -1);
         assertEquals(4, lines.length, () -> "unexpected stderr: " + String.join(" | ", lines));
@@ -706,7 +720,7 @@ class AnsiShellFrontendTest {
                     return;
                 }
                 for (int j = 0; j < 20; j++) {
-                    frontend.onEvent(new AgentEvent.ThinkingDelta("P" + j + " ", "s1"));
+                    frontend.onEvent(new AgentEvent.ThinkingDelta("P" + j + " ", "s1", eventWorkdir));
                 }
             });
             final var child = Thread.ofVirtual().start(() -> {
@@ -716,7 +730,7 @@ class AnsiShellFrontendTest {
                     return;
                 }
                 for (int j = 0; j < 20; j++) {
-                    frontend.onEvent(new AgentEvent.ThinkingDelta("C" + j + " ", "s1", "sub-1", "kid"));
+                    frontend.onEvent(new AgentEvent.ThinkingDelta("C" + j + " ", "s1", "sub-1", "kid", eventWorkdir));
                 }
             });
             parent.join();
@@ -728,8 +742,8 @@ class AnsiShellFrontendTest {
         assertTrue(lines.length > 2, "the race produced no reasoning to check: " + stderr);
         for (final var line : lines) {
             // P*/C* are the per-actor delta tokens, one line may only carry one voice
-            final var parent = line.matches(".*P\\d+ .*");
-            final var child = line.matches(".*C\\d+ .*");
+            final var parent = PARENT_DELTA.matcher(line).matches();
+            final var child = CHILD_DELTA.matcher(line).matches();
             assertFalse(parent && child, () -> "two thoughts spliced into one line: \"" + line + "\" in: " + stderr);
             // and a round header is never written on top of another voice's thought
             assertFalse(
@@ -739,7 +753,7 @@ class AnsiShellFrontendTest {
     }
 
     private static String stripAnsi(final String text) {
-        return text.replaceAll("\u001b\\[[0-9;]*m", "");
+        return ANSI.matcher(text).replaceAll("");
     }
 
     @Test
@@ -775,10 +789,12 @@ class AnsiShellFrontendTest {
                 41,
                 "s",
                 null,
-                null));
-        frontend.onEvent(new AgentEvent.ToolFinished("edit_file", "edited", true, false, 41, "s", null, null));
+                null,
+                eventWorkdir));
         frontend.onEvent(
-                new AgentEvent.ToolStarted("write_file", "{\"path\":\"b\",\"content\":\"new\"}", 42, "s", null, null));
+                new AgentEvent.ToolFinished("edit_file", "edited", true, false, 41, "s", null, null, eventWorkdir));
+        frontend.onEvent(new AgentEvent.ToolStarted(
+                "write_file", "{\"path\":\"b\",\"content\":\"new\"}", 42, "s", null, null, eventWorkdir));
         final var stderr = err.toString(StandardCharsets.UTF_8);
         assertTrue(stderr.contains("#41 edit_file started"), stderr);
         assertTrue(stderr.contains("requested replacement: a (all matches)"), stderr);
@@ -793,15 +809,16 @@ class AnsiShellFrontendTest {
     @Test
     void interleavedCallsKeepFinalBodiesAndPendingIsNotFailure() {
         final var frontend = frontend(CliVerbosity.VERBOSE, false, false);
-        frontend.onEvent(new AgentEvent.ToolStarted("bash", "{}", 4, "s", null, null));
-        frontend.onEvent(new AgentEvent.ToolStarted("bash", "{}", 5, "s", null, null));
-        frontend.onEvent(new AgentEvent.ToolStream("bash", "  partial", 4, "s", null, null));
-        frontend.onEvent(new AgentEvent.ToolStream("bash", "  \n", 4, "s", null, null));
-        frontend.onEvent(new AgentEvent.ToolFinished("bash", "other body", true, false, 5, "s", null, null));
+        frontend.onEvent(new AgentEvent.ToolStarted("bash", "{}", 4, "s", null, null, eventWorkdir));
+        frontend.onEvent(new AgentEvent.ToolStarted("bash", "{}", 5, "s", null, null, eventWorkdir));
+        frontend.onEvent(new AgentEvent.ToolStream("bash", "  partial", 4, "s", null, null, eventWorkdir));
+        frontend.onEvent(new AgentEvent.ToolStream("bash", "  \n", 4, "s", null, null, eventWorkdir));
         frontend.onEvent(
-                new AgentEvent.ToolFinished("bash", "  partial  \nextra diagnostic", false, false, 4, "s", null, null));
-        frontend.onEvent(
-                new AgentEvent.ToolFinished("check_subagents", "still working", false, true, 6, "s", null, null));
+                new AgentEvent.ToolFinished("bash", "other body", true, false, 5, "s", null, null, eventWorkdir));
+        frontend.onEvent(new AgentEvent.ToolFinished(
+                "bash", "  partial  \nextra diagnostic", false, false, 4, "s", null, null, eventWorkdir));
+        frontend.onEvent(new AgentEvent.ToolFinished(
+                "check_subagents", "still working", false, true, 6, "s", null, null, eventWorkdir));
         final var stderr = err.toString(StandardCharsets.UTF_8);
         assertTrue(stderr.contains("#4 bash output:   partial  "), stderr);
         assertTrue(stderr.contains("other body"), stderr);
@@ -816,10 +833,11 @@ class AnsiShellFrontendTest {
         for (final var visibility : List.of(ToolOutputVisibility.HIDDEN, ToolOutputVisibility.COLLAPSED)) {
             err.reset();
             final var frontend = frontend(false, false, visibility);
-            frontend.onEvent(
-                    new AgentEvent.ToolStarted("bash", "{\"command\":\"secret request\"}", 7, "s", null, null));
-            frontend.onEvent(new AgentEvent.ToolStream("bash", "secret stream\n", 7, "s", null, null));
-            frontend.onEvent(new AgentEvent.ToolFinished("bash", "secret result", true, false, 7, "s", null, null));
+            frontend.onEvent(new AgentEvent.ToolStarted(
+                    "bash", "{\"command\":\"secret request\"}", 7, "s", null, null, eventWorkdir));
+            frontend.onEvent(new AgentEvent.ToolStream("bash", "secret stream\n", 7, "s", null, null, eventWorkdir));
+            frontend.onEvent(new AgentEvent.ToolFinished(
+                    "bash", "secret result", true, false, 7, "s", null, null, eventWorkdir));
             final var stderr = err.toString(StandardCharsets.UTF_8);
             assertFalse(stderr.contains("secret"), stderr);
             if (visibility == ToolOutputVisibility.HIDDEN) {
@@ -835,9 +853,9 @@ class AnsiShellFrontendTest {
         for (final var visibility : ToolOutputVisibility.values()) {
             err.reset();
             final var frontend = frontend(false, false, visibility);
-            frontend.onEvent(
-                    new AgentEvent.ToolStarted("bash", "{\"command\":\"private command\"}", 7, "s", null, null));
-            frontend.onEvent(new AgentEvent.ToolStream("bash", "error body\n", 7, "s", null, null));
+            frontend.onEvent(new AgentEvent.ToolStarted(
+                    "bash", "{\"command\":\"private command\"}", 7, "s", null, null, eventWorkdir));
+            frontend.onEvent(new AgentEvent.ToolStream("bash", "error body\n", 7, "s", null, null, eventWorkdir));
             frontend.onEvent(new AgentEvent.ToolFinished(
                     "bash",
                     "error body\n" + "diagnostic\n".repeat(40) + "last diagnostic",
@@ -846,7 +864,8 @@ class AnsiShellFrontendTest {
                     7,
                     "s",
                     null,
-                    null));
+                    null,
+                    eventWorkdir));
             final var stderr = err.toString(StandardCharsets.UTF_8);
             assertTrue(stderr.contains("#7 bash failed"), stderr);
             assertTrue(stderr.contains("error body"), stderr);
@@ -855,8 +874,8 @@ class AnsiShellFrontendTest {
                 assertFalse(stderr.contains("private command"), stderr);
             }
             err.reset();
-            frontend.onEvent(
-                    new AgentEvent.ToolFinished("bash", "pending body\nExit code: 7", false, true, 8, "s", null, null));
+            frontend.onEvent(new AgentEvent.ToolFinished(
+                    "bash", "pending body\nExit code: 7", false, true, 8, "s", null, null, eventWorkdir));
             final var pending = err.toString(StandardCharsets.UTF_8);
             assertFalse(pending.contains("failed"), pending);
             assertFalse(pending.contains("execution exit code"), pending);
@@ -872,7 +891,8 @@ class AnsiShellFrontendTest {
         for (final var visibility : List.of(ToolOutputVisibility.SHOWN, ToolOutputVisibility.COLLAPSED)) {
             err.reset();
             final var frontend = frontend(false, false, visibility);
-            frontend.onEvent(new AgentEvent.ToolStarted("read", "{\"path\":\"pom.xml\"}", 3, "s", null, null));
+            frontend.onEvent(
+                    new AgentEvent.ToolStarted("read", "{\"path\":\"pom.xml\"}", 3, "s", null, null, eventWorkdir));
             final var stderr = err.toString(StandardCharsets.UTF_8);
             assertTrue(stderr.contains("#3 read started (pom.xml)"), stderr);
             assertFalse(stderr.contains("read(pom.xml)"), stderr);
@@ -883,8 +903,8 @@ class AnsiShellFrontendTest {
     void missingDiffFallsBackToRequestedArguments() {
         final var frontend = frontend(false, false, ToolOutputVisibility.SHOWN);
         for (final var name : List.of("edit_file", "apply_patch")) {
-            frontend.onEvent(new AgentEvent.ToolStarted(name, "{bad", "s"));
-            frontend.onEvent(new AgentEvent.ToolStarted(name, "{\"unexpected\":\"keep me\"}", "s"));
+            frontend.onEvent(new AgentEvent.ToolStarted(name, "{bad", "s", eventWorkdir));
+            frontend.onEvent(new AgentEvent.ToolStarted(name, "{\"unexpected\":\"keep me\"}", "s", eventWorkdir));
         }
         final var stderr = err.toString(StandardCharsets.UTF_8);
         assertTrue(stderr.contains("requested arguments (raw):"), stderr);
@@ -897,8 +917,8 @@ class AnsiShellFrontendTest {
         for (final var visibility : ToolOutputVisibility.values()) {
             err.reset();
             final var frontend = frontend(false, false, visibility);
-            frontend.onEvent(
-                    new AgentEvent.ToolFinished("bash", "output\nExit code: 7", true, false, 4, "s", null, null));
+            frontend.onEvent(new AgentEvent.ToolFinished(
+                    "bash", "output\nExit code: 7", true, false, 4, "s", null, null, eventWorkdir));
             final var stderr = err.toString(StandardCharsets.UTF_8);
             assertTrue(stderr.contains("#4 bash execution exit code: 7"), stderr);
             assertFalse(stderr.contains("failed"), stderr);

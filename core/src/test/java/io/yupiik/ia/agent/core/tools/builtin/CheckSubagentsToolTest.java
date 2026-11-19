@@ -31,12 +31,16 @@ import java.nio.file.Path;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicBoolean;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.api.io.TempDir;
 
 @ExtendWith(TestJsonMapper.class)
 class CheckSubagentsToolTest {
+    @TempDir
+    private static Path testWorkdir;
+
     @TempDir
     Path storageHome;
 
@@ -88,7 +92,7 @@ class CheckSubagentsToolTest {
     void pollReturnsEmptyListWhenNoSubagents(final JsonMapper mapper) {
         final var reg = registry(config(Map.of()));
         final var tool = new CheckSubagentsTool(reg, mapper);
-        final var result = tool.execute(Map.of("action", "poll"));
+        final var result = tool.execute(Map.of("action", "poll"), ToolContext.empty(storageHome));
         assertTrue(result.success(), result.output());
         assertTrue(result.output().contains("\"subagents\":[]"));
     }
@@ -99,7 +103,7 @@ class CheckSubagentsToolTest {
         reg.start("parent", "task1");
         reg.start("parent", "task2");
         final var tool = new CheckSubagentsTool(reg, mapper);
-        final var result = tool.execute(Map.of("action", "poll"));
+        final var result = tool.execute(Map.of("action", "poll"), ToolContext.empty(storageHome));
         assertTrue(result.success(), result.output());
         assertTrue(result.output().contains("running"));
         assertTrue(result.output().contains("task1"));
@@ -112,7 +116,8 @@ class CheckSubagentsToolTest {
         final var state = reg.start("parent", "task").orElseThrow();
         reg.complete(state.id(), SubagentRegistry.SubagentResult.success("done", "full", List.of("artifact")));
         final var tool = new CheckSubagentsTool(reg, mapper);
-        final var result = tool.execute(Map.of("action", "collect", "subagent_id", state.id()));
+        final var result =
+                tool.execute(Map.of("action", "collect", "subagent_id", state.id()), ToolContext.empty(storageHome));
         assertTrue(result.success(), result.output());
         assertTrue(result.output().contains("\"completed\":true"));
         assertTrue(result.output().contains("done"));
@@ -125,7 +130,9 @@ class CheckSubagentsToolTest {
         final var tool = new CheckSubagentsTool(reg, mapper);
         // a still-running sub-agent must NOT surface as a hard error: with a short max_wait_ms the
         // collect returns a neutral "pending" result the model can act on (proceed or retry later).
-        final var result = tool.execute(Map.of("action", "collect", "subagent_id", state.id(), "max_wait_ms", "100"));
+        final var result = tool.execute(
+                Map.of("action", "collect", "subagent_id", state.id(), "max_wait_ms", "100"),
+                ToolContext.empty(storageHome));
         assertFalse(result.success(), result.output());
         assertTrue(result.pending(), "a still-running collect must be pending, not an error: " + result.output());
         assertTrue(result.output().contains("\"status\":\"pending\""));
@@ -138,8 +145,8 @@ class CheckSubagentsToolTest {
         final var tool = new CheckSubagentsTool(reg, mapper);
         // the turn's cancellation probe (not per-call) aborts the blocking collect early and returns
         // a clean "cancelled" result rather than failing or waiting the whole max_wait_ms
-        final var cancelled = new java.util.concurrent.atomic.AtomicBoolean(false);
-        final var context = ToolContext.empty();
+        final var cancelled = new AtomicBoolean(false);
+        final var context = ToolContext.empty(testWorkdir);
         final var ctx = new ToolContext(
                 context.sessionId(),
                 context.subagentId(),
@@ -156,7 +163,8 @@ class CheckSubagentsToolTest {
                 context.projectDir(),
                 context.ordinal(),
                 context.allowedTools(),
-                null);
+                null,
+                context.toolRegistry());
         cancelled.set(true);
         final var result =
                 tool.execute(Map.of("action", "collect", "subagent_id", state.id(), "max_wait_ms", "5000"), ctx);
@@ -169,7 +177,8 @@ class CheckSubagentsToolTest {
     void collectFailsWhenNotFound(final JsonMapper mapper) {
         final var reg = registry(config(Map.of()));
         final var tool = new CheckSubagentsTool(reg, mapper);
-        final var result = tool.execute(Map.of("action", "collect", "subagent_id", "unknown"));
+        final var result =
+                tool.execute(Map.of("action", "collect", "subagent_id", "unknown"), ToolContext.empty(storageHome));
         assertFalse(result.success(), result.output());
         assertTrue(result.output().contains("not found"));
     }
@@ -179,7 +188,8 @@ class CheckSubagentsToolTest {
         final var reg = registry(config(Map.of()));
         final var state = reg.start("parent", "task").orElseThrow();
         final var tool = new CheckSubagentsTool(reg, mapper);
-        final var result = tool.execute(Map.of("action", "cancel", "subagent_id", state.id()));
+        final var result =
+                tool.execute(Map.of("action", "cancel", "subagent_id", state.id()), ToolContext.empty(storageHome));
         assertTrue(result.success(), result.output());
         assertTrue(result.output().contains("\"cancelled\":true"));
         assertTrue(reg.get(state.id()).isEmpty());
@@ -191,7 +201,8 @@ class CheckSubagentsToolTest {
         final var state = reg.start("parent", "task").orElseThrow();
         reg.complete(state.id(), SubagentRegistry.SubagentResult.success("done", "full", List.of()));
         final var tool = new CheckSubagentsTool(reg, mapper);
-        final var result = tool.execute(Map.of("action", "cancel", "subagent_id", state.id()));
+        final var result =
+                tool.execute(Map.of("action", "cancel", "subagent_id", state.id()), ToolContext.empty(storageHome));
         assertTrue(result.success(), result.output());
         assertTrue(result.output().contains("\"cancelled\":false"));
         assertTrue(result.output().contains("already completed"));
@@ -201,7 +212,7 @@ class CheckSubagentsToolTest {
     void executeFailsWhenDisabled(final JsonMapper mapper) {
         final var reg = registry(config(Map.of("yca.subagents.enabled", "false")));
         final var tool = new CheckSubagentsTool(reg, mapper);
-        final var result = tool.execute(Map.of("action", "poll"));
+        final var result = tool.execute(Map.of("action", "poll"), ToolContext.empty(storageHome));
         assertFalse(result.success(), result.output());
         assertTrue(result.output().contains("disabled"));
     }
@@ -210,7 +221,7 @@ class CheckSubagentsToolTest {
     void executeFailsWhenActionMissing(final JsonMapper mapper) {
         final var reg = registry(config(Map.of()));
         final var tool = new CheckSubagentsTool(reg, mapper);
-        final var result = tool.execute(Map.of());
+        final var result = tool.execute(Map.of(), ToolContext.empty(storageHome));
         assertFalse(result.success(), result.output());
         assertTrue(result.output().contains("action is required"));
     }
@@ -219,7 +230,7 @@ class CheckSubagentsToolTest {
     void executeFailsWhenInvalidAction(final JsonMapper mapper) {
         final var reg = registry(config(Map.of()));
         final var tool = new CheckSubagentsTool(reg, mapper);
-        final var result = tool.execute(Map.of("action", "invalid"));
+        final var result = tool.execute(Map.of("action", "invalid"), ToolContext.empty(storageHome));
         assertFalse(result.success(), result.output());
         assertTrue(result.output().contains("Invalid action"));
     }

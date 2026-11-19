@@ -250,7 +250,8 @@ class BackgroundModelRoutingTest {
                 providerManager(cfg),
                 null,
                 "s1",
-                new BackoffSleeper());
+                new BackoffSleeper(),
+                (cfg).resolveWorkingDir());
         // the session (tab 1) runs on 'main'
         final var result = coordinator.compact(
                 longHistory(), true, null, 0, () -> false, new ChatSettings("main", null, null, null));
@@ -274,7 +275,8 @@ class BackgroundModelRoutingTest {
                 providerManager(cfg),
                 null,
                 "s1",
-                new BackoffSleeper());
+                new BackoffSleeper(),
+                (cfg).resolveWorkingDir());
         // session on 'cheap' with an explicit model: the summarizer must reuse it, not the process default
         final var result = coordinator.compact(
                 longHistory(), true, null, 0, () -> false, new ChatSettings("cheap", "deepseek-v4-flash", null, null));
@@ -308,7 +310,8 @@ class BackgroundModelRoutingTest {
                 providerManager(cfg),
                 null,
                 "s1",
-                new BackoffSleeper());
+                new BackoffSleeper(),
+                (cfg).resolveWorkingDir());
         final var result = coordinator.compact(
                 longHistory(), true, null, 0, () -> false, new ChatSettings("main", "main-model", null, null));
         assertEquals(CompactionResult.Mode.SUMMARY, result.mode(), result.error());
@@ -367,7 +370,8 @@ class BackgroundModelRoutingTest {
                 providerManager(explicitCfg),
                 null,
                 "s1",
-                new BackoffSleeper());
+                new BackoffSleeper(),
+                (explicitCfg).resolveWorkingDir());
         final var result = coordinator.compact(
                 longHistory(), true, null, 0, () -> false, new ChatSettings("main", "main-model", null, null));
         assertEquals(CompactionResult.Mode.SUMMARY, result.mode(), result.error());
@@ -413,7 +417,8 @@ class BackgroundModelRoutingTest {
                 providerManager(cfg),
                 null,
                 "s1",
-                new BackoffSleeper());
+                new BackoffSleeper(),
+                (cfg).resolveWorkingDir());
         final var result = coordinator.compact(
                 longHistory(), true, null, 0, () -> false, new ChatSettings("codex", "codex-model", null, null));
         assertEquals(CompactionResult.Mode.SUMMARY, result.mode(), result.error());

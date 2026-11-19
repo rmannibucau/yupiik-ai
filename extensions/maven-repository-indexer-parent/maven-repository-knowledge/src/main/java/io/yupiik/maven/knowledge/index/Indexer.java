@@ -27,10 +27,15 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CancellationException;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Consumer;
 import java.util.function.IntConsumer;
 
@@ -55,6 +60,8 @@ public class Indexer {
     private final KnowledgeLlm llm;
     private final KnowledgeConfig config;
     private final ExecutorService executor;
+    private final ReentrantLock lifecycle = new ReentrantLock();
+    private final AtomicBoolean closed = new AtomicBoolean();
 
     private final Map<Gav, String> expectedFingerprints;
 
@@ -108,13 +115,11 @@ public class Indexer {
         final var results = new CopyOnWriteArrayList<IndexResult>();
         final var toProcess = new ArrayList<Gav>();
         for (final var gav : gavs) {
+            checkOpen();
             final var skip = shouldSkip(gav);
             if (skip != null) {
                 final var result = IndexResult.skipped(gav, skip);
-                results.add(result);
-                if (onResult != null) {
-                    onResult.accept(result);
-                }
+                report(result, results, onResult);
             } else {
                 toProcess.add(gav);
             }
@@ -124,20 +129,20 @@ public class Indexer {
         final var runBudget = config.runContentBudget();
         long consumedChars = 0;
         for (final var window : BatchSizer.windows(toProcess, config)) {
+            checkOpen();
             final var contentByGav = new LinkedHashMap<Gav, ContentAcquired>();
             final var eligible = new ArrayList<Gav>();
             var budgetExhausted = false;
             for (final var gav : window) {
+                checkOpen();
                 if (runBudget > 0 && consumedChars >= runBudget) {
                     budgetExhausted = true;
                     final var result = IndexResult.skipped(gav, "run content budget exceeded");
-                    results.add(result);
-                    if (onResult != null) {
-                        onResult.accept(result);
-                    }
+                    report(result, results, onResult);
                     continue;
                 }
                 final var acquired = acquirer.acquire(gav);
+                checkOpen();
                 if (acquired != null && acquired.content() != null) {
                     consumedChars += acquired.content().length();
                     contentByGav.put(gav, acquired);
@@ -148,14 +153,17 @@ public class Indexer {
             }
             if (!eligible.isEmpty() || !budgetExhausted) {
                 for (final var batch : BatchSizer.batches(eligible, contentByGav, config)) {
+                    admitWork();
                     if (beforeBatch != null) {
                         beforeBatch.accept(results.size());
                     }
+                    checkOpen();
                     runBatch(batch, contentByGav, results, onResult);
                 }
             }
             // evict: content is only held for the current window
         }
+        checkOpen();
         return IndexResult.Results.summarize(results);
     }
 
@@ -189,36 +197,76 @@ public class Indexer {
             final List<IndexResult> results,
             final Consumer<IndexResult> onResult) {
         final var futures = new ArrayList<Future<?>>();
-        for (final var gav : batch) {
-            futures.add(executor.submit(() -> {
-                final Path path;
-                try {
-                    path = generate(gav, contentByGav.get(gav));
-                } catch (final RuntimeException e) {
-                    final var res = IndexResult.skipped(gav, "failed to index: " + e.getMessage());
-                    results.add(res);
-                    if (onResult != null) {
-                        onResult.accept(res);
-                    }
-                    return;
-                }
-                final var expectedFp = expectedFingerprints.get(gav);
-                if (expectedFp != null) {
-                    writer.writeFingerprint(gav, expectedFp);
-                }
-                final var res = IndexResult.indexed(gav, "written " + path);
-                results.add(res);
-                if (onResult != null) {
-                    onResult.accept(res);
-                }
-            }));
-        }
-        for (final var future : futures) {
+        var complete = false;
+        try {
+            lifecycle.lock();
             try {
-                future.get();
-            } catch (final Exception e) {
-                throw new IllegalStateException(e);
+                for (final var gav : batch) {
+                    checkOpen();
+                    futures.add(executor.submit(() -> indexArtifact(gav, contentByGav.get(gav), results, onResult)));
+                }
+            } finally {
+                lifecycle.unlock();
             }
+            for (final var future : futures) {
+                future.get();
+            }
+            complete = true;
+        } catch (final InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException(e);
+        } catch (final ExecutionException e) {
+            throw new IllegalStateException(e);
+        } finally {
+            if (!complete) {
+                close();
+                // shutdownNow removes queued tasks but does not cancel their FutureTask callables.
+                // Also clear callables of tasks dequeued concurrently with close().
+                futures.forEach(future -> future.cancel(true));
+            }
+        }
+    }
+
+    private void indexArtifact(
+            final Gav gav,
+            final ContentAcquired acquired,
+            final List<IndexResult> results,
+            final Consumer<IndexResult> onResult) {
+        // Linearize task admission with close(), including a task dequeued during shutdown.
+        admitWork();
+        final Path path;
+        try {
+            path = generate(gav, acquired);
+        } catch (final CancellationException e) {
+            throw e;
+        } catch (final RuntimeException e) {
+            report(IndexResult.skipped(gav, "failed to index: " + e.getMessage()), results, onResult);
+            return;
+        }
+        checkOpen();
+        final var expectedFp = expectedFingerprints.get(gav);
+        if (expectedFp != null) {
+            writer.writeFingerprint(gav, expectedFp);
+        }
+        report(IndexResult.indexed(gav, "written " + path), results, onResult);
+    }
+
+    private void report(
+            final IndexResult result, final List<IndexResult> results, final Consumer<IndexResult> onResult) {
+        // Delivery admitted before close may finish afterwards; never call user code under lifecycle.
+        admitWork();
+        results.add(result);
+        if (onResult != null) {
+            onResult.accept(result);
+        }
+    }
+
+    private void admitWork() {
+        lifecycle.lock();
+        try {
+            checkOpen();
+        } finally {
+            lifecycle.unlock();
         }
     }
 
@@ -227,23 +275,62 @@ public class Indexer {
      * LLM when {@code useLlm} is enabled. Returns the index file path.
      */
     private Path generate(final Gav gav, final ContentAcquired acquired) {
+        checkOpen();
         final var entryPoints = acquirer.entryPoints(gav);
+        checkOpen();
         final var apiMarkdown = acquirer.api(gav);
+        checkOpen();
         final var moduleConfig = acquirer.moduleConfig(gav);
+        checkOpen();
         final var skills = new ArrayList<KnowledgeFactory.SkillDoc>();
-        if (config.useLlm() && llm.available()) {
-            skills.addAll(LlmRefinement.refine(gav, acquired, entryPoints, apiMarkdown, llm));
+        if (config.useLlm()) {
+            final var available = llm.available();
+            checkOpen();
+            if (available) {
+                skills.addAll(LlmRefinement.refine(gav, acquired, entryPoints, apiMarkdown, llm));
+            }
         }
-        final var path =
-                factory.writeArtifact(gav, acquirer.contentParts(gav), apiMarkdown, moduleConfig, entryPoints, skills);
-        writer.writeCodeGraph(gav, acquirer.codeGraph(gav));
+        checkOpen();
+        final var parts = acquirer.contentParts(gav);
+        checkOpen();
+        final var path = factory.writeArtifact(gav, parts, apiMarkdown, moduleConfig, entryPoints, skills);
+        checkOpen();
+        final var graph = acquirer.codeGraph(gav);
+        checkOpen();
+        writer.writeCodeGraph(gav, graph);
         return path;
     }
 
     /**
-     * Close the internal executor. Call when done.
+     * Request shutdown of the owned executor once, interrupt running work and cancel queued work.
+     * Nonblocking, including when called by an indexing callback on an owned worker.
+     * This is not proof of termination: work ignoring interruption can still run.
+     * Call {@link #awaitTermination(long, TimeUnit)} from the orchestrator to drain it.
      */
     public void close() {
-        executor.shutdownNow();
+        // Never wait for the submission gate or user work on a cancelling/frontend thread.
+        if (!closed.compareAndSet(false, true)) {
+            return;
+        }
+        for (final var queued : executor.shutdownNow()) {
+            if (queued instanceof Future<?> future) {
+                future.cancel(false);
+            }
+        }
+    }
+
+    /**
+     * Wait for actual owned-executor termination after close(), not just cancellation of its futures.
+     * Returns false on timeout; interruption propagates. Does not close borrowed dependencies.
+     * Must not be called from an owned task/callback (it would wait for itself).
+     */
+    public boolean awaitTermination(final long timeout, final TimeUnit unit) throws InterruptedException {
+        return executor.awaitTermination(timeout, unit);
+    }
+
+    private void checkOpen() {
+        if (closed.get() || Thread.currentThread().isInterrupted()) {
+            throw new CancellationException("indexer closed or interrupted");
+        }
     }
 }

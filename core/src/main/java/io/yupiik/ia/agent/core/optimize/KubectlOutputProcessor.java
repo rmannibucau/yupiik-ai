@@ -19,6 +19,7 @@ import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
+import java.util.regex.Pattern;
 import java.util.stream.Stream;
 
 /**
@@ -30,6 +31,7 @@ import java.util.stream.Stream;
  */
 @ApplicationScoped
 public class KubectlOutputProcessor implements OutputProcessor {
+    private static final Pattern WHITESPACE = Pattern.compile("\\s+");
     private static final int MAX_LOG_LINES = 50;
     private final CommandOutputPostProcessor commandOutput;
 
@@ -110,7 +112,7 @@ public class KubectlOutputProcessor implements OutputProcessor {
     }
 
     private static String subCommand(final String command) {
-        final var tokens = command.strip().split("\\s+");
+        final var tokens = WHITESPACE.split(command.strip());
         for (final var t : tokens) {
             if (!t.equals("kubectl") && !t.equals("k") && !t.startsWith("-")) {
                 return t;

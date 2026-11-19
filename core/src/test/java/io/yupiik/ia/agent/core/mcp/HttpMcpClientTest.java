@@ -20,6 +20,8 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import com.sun.net.httpserver.HttpExchange;
+import com.sun.net.httpserver.HttpServer;
 import io.yupiik.fusion.httpclient.core.ExtendedHttpClient;
 import io.yupiik.fusion.httpclient.core.ExtendedHttpClientConfiguration;
 import io.yupiik.fusion.json.JsonMapper;
@@ -43,6 +45,9 @@ class HttpMcpClientTest {
 
     @AfterEach
     void stop() {
+        if (client != null) {
+            client.close();
+        }
         serverState = null;
         if (server != null) {
             server.stop(0);
@@ -50,7 +55,7 @@ class HttpMcpClientTest {
         }
     }
 
-    private com.sun.net.httpserver.HttpServer server;
+    private HttpServer server;
     private HttpMcpClient client;
     private Object serverState;
 
@@ -80,7 +85,7 @@ class HttpMcpClientTest {
     }
 
     private void start(final boolean sse) throws IOException, InterruptedException {
-        server = com.sun.net.httpserver.HttpServer.create(new InetSocketAddress("localhost", 0), 0);
+        server = HttpServer.create(new InetSocketAddress("localhost", 0), 0);
         server.createContext("/mcp", exchange -> {
             final var body = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
             final var contentType = sse ? "text/event-stream" : "application/json";
@@ -90,7 +95,7 @@ class HttpMcpClientTest {
                         200,
                         wrap(
                                 sse,
-                                "{\"result\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{\"tools\":{\"listChanged\":true}},\"serverInfo\":{\"name\":\"test\",\"version\":\"1\"}},\"id\":1}"),
+                                "{\"jsonrpc\":\"2.0\",\"result\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{\"tools\":{\"listChanged\":true}},\"serverInfo\":{\"name\":\"test\",\"version\":\"1\"}},\"id\":1}"),
                         contentType);
             } else if (body.contains("\"method\":\"notifications/initialized\"")) {
                 exchange.getResponseHeaders().set("content-type", "application/json");
@@ -102,7 +107,7 @@ class HttpMcpClientTest {
                         200,
                         wrap(
                                 sse,
-                                "{\"result\":{\"tools\":[{\"name\":\"find_docs\",\"description\":\"find docs\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"q\":{\"type\":\"string\"}}}}]},\"id\":2}"),
+                                "{\"jsonrpc\":\"2.0\",\"result\":{\"tools\":[{\"name\":\"find_docs\",\"description\":\"find docs\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"q\":{\"type\":\"string\"}}}}]},\"id\":2}"),
                         contentType);
             } else if (body.contains("\"method\":\"tools/call\"")) {
                 respond(
@@ -110,7 +115,7 @@ class HttpMcpClientTest {
                         200,
                         wrap(
                                 sse,
-                                "{\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"hello from server\"}]},\"id\":3}"),
+                                "{\"jsonrpc\":\"2.0\",\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"hello from server\"}]},\"id\":3}"),
                         contentType);
             } else {
                 respond(
@@ -156,13 +161,13 @@ class HttpMcpClientTest {
 
     @Test
     void serverErrorIsReported() throws Exception {
-        server = com.sun.net.httpserver.HttpServer.create(new InetSocketAddress("localhost", 0), 0);
+        server = HttpServer.create(new InetSocketAddress("localhost", 0), 0);
         server.createContext("/mcp", exchange -> {
             exchange.getRequestBody().readAllBytes();
             respond(exchange, 500, "boom", "text/plain");
         });
         server.start();
-        final var failing = new HttpMcpClient(
+        client = new HttpMcpClient(
                 "test",
                 "http://localhost:" + server.getAddress().getPort() + "/mcp",
                 "key",
@@ -170,21 +175,21 @@ class HttpMcpClientTest {
                 10,
                 mapper,
                 httpClient);
-        final var error = assertThrows(McpHttpException.class, failing::initialize);
+        final var error = assertThrows(McpHttpException.class, client::initialize);
         assertEquals(500, error.statusCode());
         assertTrue(error.getMessage().contains("500"));
     }
 
     @Test
     void httpErrorExposesStatusAndRetryAfter() throws Exception {
-        server = com.sun.net.httpserver.HttpServer.create(new InetSocketAddress("localhost", 0), 0);
+        server = HttpServer.create(new InetSocketAddress("localhost", 0), 0);
         server.createContext("/mcp", exchange -> {
             exchange.getRequestBody().readAllBytes();
             exchange.getResponseHeaders().set("retry-after", "120");
             respond(exchange, 429, "{\"error\":\"rate limited\"}", "application/json");
         });
         server.start();
-        final var failing = new HttpMcpClient(
+        client = new HttpMcpClient(
                 "test",
                 "http://localhost:" + server.getAddress().getPort() + "/mcp",
                 "key",
@@ -192,21 +197,21 @@ class HttpMcpClientTest {
                 10,
                 mapper,
                 httpClient);
-        final var error = assertThrows(McpHttpException.class, failing::initialize);
+        final var error = assertThrows(McpHttpException.class, client::initialize);
         assertEquals(429, error.statusCode());
-        assertEquals("{\"error\":\"rate limited\"}", error.body());
+        assertEquals("[redacted]", error.body());
         assertEquals(120_000L, error.retryAfterMillis().longValue());
     }
 
     @Test
     void httpErrorWithoutRetryAfterHasNoHint() throws Exception {
-        server = com.sun.net.httpserver.HttpServer.create(new InetSocketAddress("localhost", 0), 0);
+        server = HttpServer.create(new InetSocketAddress("localhost", 0), 0);
         server.createContext("/mcp", exchange -> {
             exchange.getRequestBody().readAllBytes();
             respond(exchange, 404, "gone", "text/plain");
         });
         server.start();
-        final var failing = new HttpMcpClient(
+        client = new HttpMcpClient(
                 "test",
                 "http://localhost:" + server.getAddress().getPort() + "/mcp",
                 "key",
@@ -214,14 +219,14 @@ class HttpMcpClientTest {
                 10,
                 mapper,
                 httpClient);
-        final var error = assertThrows(McpHttpException.class, failing::initialize);
+        final var error = assertThrows(McpHttpException.class, client::initialize);
         assertEquals(404, error.statusCode());
         assertNull(error.retryAfterMillis());
     }
 
     @Test
     void negotiatesOlderProtocolVersionWhenNewestRejected() throws Exception {
-        server = com.sun.net.httpserver.HttpServer.create(new InetSocketAddress("localhost", 0), 0);
+        server = HttpServer.create(new InetSocketAddress("localhost", 0), 0);
         server.createContext("/mcp", exchange -> {
             final var body = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
             final var contentType = "application/json";
@@ -233,7 +238,7 @@ class HttpMcpClientTest {
                 respond(
                         exchange,
                         200,
-                        "{\"result\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"serverInfo\":{\"name\":\"t\",\"version\":\"1\"}},\"id\":1}",
+                        "{\"jsonrpc\":\"2.0\",\"result\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"serverInfo\":{\"name\":\"t\",\"version\":\"1\"}},\"id\":3}",
                         contentType);
             } else {
                 respond(
@@ -244,7 +249,7 @@ class HttpMcpClientTest {
             }
         });
         server.start();
-        final var negotiating = new HttpMcpClient(
+        client = new HttpMcpClient(
                 "test",
                 "http://localhost:" + server.getAddress().getPort() + "/mcp",
                 "key",
@@ -252,7 +257,7 @@ class HttpMcpClientTest {
                 10,
                 mapper,
                 httpClient);
-        negotiating.initialize();
+        client.initialize();
     }
 
     private static String wrap(final boolean sse, final String json) {
@@ -260,10 +265,7 @@ class HttpMcpClientTest {
     }
 
     private static void respond(
-            final com.sun.net.httpserver.HttpExchange exchange,
-            final int status,
-            final String body,
-            final String contentType) {
+            final HttpExchange exchange, final int status, final String body, final String contentType) {
         try {
             exchange.getRequestBody().readAllBytes();
             final var bytes = body.getBytes(StandardCharsets.UTF_8);

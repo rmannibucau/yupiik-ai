@@ -23,6 +23,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
@@ -84,6 +85,7 @@ public class BashOverride {
 
     /** @return the rewritten (capped) output, or empty when the command must run in real bash. */
     public Optional<String> tryRewrite(final String command, final Path projectDir) {
+        Objects.requireNonNull(projectDir, "workdir");
         if (!config.enabled() || command == null || command.isBlank()) {
             return Optional.empty();
         }
@@ -92,9 +94,7 @@ public class BashOverride {
             return Optional.empty();
         }
         final var out = new StringBuilder();
-        Path cwd = projectDir == null
-                ? Path.of(".").toAbsolutePath().normalize()
-                : projectDir.toAbsolutePath().normalize();
+        var cwd = projectDir;
 
         // Resolve every segment up-front. A `cd` makes the chain stateful (cwd advances) so it forces the
         // sequential path; otherwise all segments are independent read-only commands and can be run in parallel.

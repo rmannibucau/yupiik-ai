@@ -15,13 +15,14 @@
  */
 package io.yupiik.ia.agent.core.tools;
 
+import java.nio.file.Path;
 import java.util.Map;
+import java.util.Objects;
 
 public interface EmbeddedTool {
-
     String name();
 
-    String description();
+    String description(Path workdir);
 
     ToolCategory category();
 
@@ -31,25 +32,11 @@ public interface EmbeddedTool {
         return false;
     }
 
-    /**
-     * Whether the tool is currently usable. Unusable tools are hidden from the model
-     * (wire tool list and description) but still executable with an explicit error,
-     * so a misconfiguration surfaces clearly instead of silently vanishing.
-     */
-    default boolean usable() {
+    /** Projects availability for the explicitly supplied session root, without shared mutable state. */
+    default boolean usable(final Path workdir) {
+        Objects.requireNonNull(workdir, "workdir");
         return true;
     }
 
-    ToolResult execute(Map<String, Object> args);
-
-    /**
-     * Context-aware execution: the default implementation delegates to
-     * {@link #execute(Map)} so stateless tools need no change. Tools that touch
-     * session-scoped services (questions, todos) override this method and read
-     * them from the explicitly passed {@link ToolContext} - never from a
-     * thread-local, so concurrent sessions cannot cross-talk.
-     */
-    default ToolResult execute(final Map<String, Object> args, final ToolContext context) {
-        return execute(args);
-    }
+    ToolResult execute(Map<String, Object> args, ToolContext context);
 }

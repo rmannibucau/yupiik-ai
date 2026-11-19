@@ -23,10 +23,12 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Supplier;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -42,7 +44,7 @@ class JdkLocatorTest {
     private static JdkLocator locatorWith(
             final JdkLocator.Settings settings, final Path roots, final Map<String, Integer> nameToFeature)
             throws Exception {
-        final var launchers = new java.util.LinkedHashMap<Path, Integer>();
+        final var launchers = new LinkedHashMap<Path, Integer>();
         for (final var entry : nameToFeature.entrySet()) {
             launchers.put(launcher(roots.resolve(entry.getKey()), entry.getValue()), entry.getValue());
         }
@@ -89,24 +91,23 @@ class JdkLocatorTest {
         Files.writeString(home.resolve("release"), "JAVA_VERSION=\"25\"\n");
         final var probes = new AtomicInteger();
         final var settings = new JdkLocator.Settings(null, null, project);
-        final java.util.function.Supplier<JdkLocator> factory =
-                () -> new JdkLocator(ParserClassSet::resourceStream, settings) {
-                    @Override
-                    protected Candidate probe(final Path java) {
-                        if (java.toAbsolutePath()
-                                .normalize()
-                                .equals(launcherPath.toAbsolutePath().normalize())) {
-                            probes.incrementAndGet();
-                            return new Candidate(java, 69);
-                        }
-                        return null;
-                    }
+        final Supplier<JdkLocator> factory = () -> new JdkLocator(ParserClassSet::resourceStream, settings) {
+            @Override
+            protected Candidate probe(final Path java) {
+                if (java.toAbsolutePath()
+                        .normalize()
+                        .equals(launcherPath.toAbsolutePath().normalize())) {
+                    probes.incrementAndGet();
+                    return new Candidate(java, 69);
+                }
+                return null;
+            }
 
-                    @Override
-                    protected List<Path> commonRoots() {
-                        return List.of(roots);
-                    }
-                };
+            @Override
+            protected List<Path> commonRoots() {
+                return List.of(roots);
+            }
+        };
 
         assertNotNull(factory.get().locateJarJdk());
         assertNotNull(factory.get().locateJarJdk());
@@ -267,6 +268,34 @@ class JdkLocatorTest {
         Files.writeString(project2.resolve(".java-version"), "21.0.5\n");
         assertEquals(
                 Optional.of(21), new JdkLocator(null, new JdkLocator.Settings(null, null, project2)).projectFeature());
+    }
+
+    @Test
+    void sdkmanSplitsUnicodeLineBreaksAndDoesNotShareMatcherState() throws Exception {
+        final var project = Files.createDirectory(tempDir.resolve("unicode-rc"));
+        final var rc = project.resolve(".sdkmanrc");
+        Files.writeString(rc, "java = java.home\r\n# comment\u0085java = 1.8.0_392-tem\u2028");
+        final var locator = new JdkLocator(null, new JdkLocator.Settings(null, null, project));
+        assertEquals(Optional.of(8), locator.projectFeature());
+        Files.writeString(rc, "# comment\u2029java = 21.0.5-tem\r\n");
+        assertEquals(Optional.of(21), locator.projectFeature());
+    }
+
+    @Test
+    void compilerTagsKeepLiteralDotsAndReleasePrecedence() throws Exception {
+        final var project = Files.createDirectory(tempDir.resolve("compiler-tags"));
+        final var pom = project.resolve("pom.xml");
+        Files.writeString(
+                pom,
+                "<project><mavenXcompilerXrelease>99</mavenXcompilerXrelease>"
+                        + "<maven.compiler.source>19</maven.compiler.source></project>");
+        final var locator = new JdkLocator(null, new JdkLocator.Settings(null, null, project));
+        assertEquals(Optional.of(19), locator.projectFeature());
+        Files.writeString(
+                pom,
+                "<project><plugin><artifactId>maven-compiler-plugin</artifactId>\n"
+                        + "<configuration>\n<source>17</source>\n<release>23</release>\n</configuration>\n</plugin></project>");
+        assertEquals(Optional.of(23), locator.projectFeature());
     }
 
     @Test

@@ -25,6 +25,7 @@ import io.yupiik.ia.agent.core.shell.ShellOutcome;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
+import java.util.regex.Pattern;
 
 /**
  * Codex subscription login commands: {@code /codex login <provider> [--device] [--enterprise]
@@ -40,6 +41,7 @@ import java.util.concurrent.CompletableFuture;
  */
 @ApplicationScoped
 public class CodexLoginCommands implements SlashCommandSet {
+    private static final Pattern WHITESPACE = Pattern.compile("\\s+");
 
     private final CodexLoginService loginService;
 
@@ -75,7 +77,7 @@ public class CodexLoginCommands implements SlashCommandSet {
     }
 
     private ShellOutcome runLogin(final String arg, final ShellEnv env) {
-        final var parts = arg.isEmpty() ? List.<String>of() : List.of(arg.split("\\s+"));
+        final var parts = arg.isEmpty() ? List.<String>of() : List.of(WHITESPACE.split(arg));
         final var tokens = new ArrayList<String>();
         for (final var p : parts) {
             if (!p.isBlank()) {

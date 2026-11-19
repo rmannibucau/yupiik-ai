@@ -34,6 +34,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 
 /**
@@ -77,10 +78,10 @@ public class CodeResolveTool implements EmbeddedTool {
     }
 
     /** Whether any structural data source is usable for the current configuration/project. */
-    public boolean usable() {
-        final boolean graph = codeGraph != null && codeGraph.enabled();
-        final boolean know = knowledge != null && knowledge.knowledgeEnabled();
-        return graph || know;
+    @Override
+    public boolean usable(final Path root) {
+        Objects.requireNonNull(root, "workdir");
+        return graphLive() || knowledgeLive(root);
     }
 
     /** Whether the graph source is live (affects description and whether a graph branch runs). */
@@ -96,8 +97,8 @@ public class CodeResolveTool implements EmbeddedTool {
     }
 
     /** Whether the knowledge source is live. */
-    private boolean knowledgeLive() {
-        return knowledge != null && knowledge.knowledgeEnabled();
+    private boolean knowledgeLive(final Path root) {
+        return knowledge != null && knowledge.knowledgeEnabled(root);
     }
 
     @Override
@@ -106,9 +107,14 @@ public class CodeResolveTool implements EmbeddedTool {
     }
 
     @Override
-    public String description() {
+    public String description(final Path root) {
+        Objects.requireNonNull(root, "workdir");
+        return describeSources(root);
+    }
+
+    private String describeSources(final Path root) {
         final boolean graph = graphLive();
-        final boolean know = knowledgeLive();
+        final boolean know = knowledgeLive(root);
         final var bases = new ArrayList<String>();
         if (graph) {
             bases.add("local code graph (implementors, extensions, callers, callees, usages with file:line)");
@@ -158,24 +164,20 @@ public class CodeResolveTool implements EmbeddedTool {
     }
 
     @Override
-    public ToolResult execute(final Map<String, Object> args) {
-        return execute(args, ToolContext.empty());
-    }
-
-    @Override
     public ToolResult execute(final Map<String, Object> args, final ToolContext ctx) {
+        final var root = ctx.projectDir();
         final var op = arg(args, "op");
         if (op != null && !op.isBlank() && "list".equalsIgnoreCase(op)) {
-            return list();
+            return list(root);
         }
-        return resolve(args, ctx == null ? null : ctx.projectDir());
+        return resolve(args, root);
     }
 
-    private ToolResult list() {
-        if (!usable()) {
+    private ToolResult list(final Path root) {
+        if (!usable(root)) {
             return ToolResult.ok("No structural data source is active (no code graph and no Maven knowledge).");
         }
-        final var gavs = knowledge == null ? List.of() : knowledge.indexedArtifacts();
+        final var gavs = knowledge == null ? List.<String>of() : knowledge.indexedArtifacts(root);
         if (gavs.isEmpty()) {
             return ToolResult.ok("No Maven artifact knowledge is indexed yet. Run a first prompt to index project "
                     + "dependencies, or verify the project has a build file with resolvable dependencies.");
@@ -204,11 +206,11 @@ public class CodeResolveTool implements EmbeddedTool {
         if (graphLive()) {
             graphHits = appendGraph(sb, symbol, relation, edgeTypes, depth, max, root);
         }
-        if (knowledgeLive()
+        if (knowledgeLive(root)
                 && (alwaysSuggestKnowledge() || graphHits == 0 || (artifact != null && !artifact.isBlank()))) {
-            appendKnowledge(sb, symbol, artifact, graphHits);
+            appendKnowledge(sb, symbol, artifact, graphHits, root);
         }
-        if (graphHits == 0 && knowledgeLive() && (artifact == null || artifact.isBlank())) {
+        if (graphHits == 0 && knowledgeLive(root) && (artifact == null || artifact.isBlank())) {
             sb.append('\n')
                     .append("The symbol was not found locally. Use op=list to see which indexed dependencies have "
                             + "knowledge, and maven_knowledge_content to read one.");
@@ -347,12 +349,16 @@ public class CodeResolveTool implements EmbeddedTool {
      * package/fqn containment against the indexed artifacts' knowledge index entry points.
      */
     private void appendKnowledge(
-            final StringBuilder sb, final String symbol, final String artifactHint, final int graphHits) {
-        if (!knowledgeLive()) {
+            final StringBuilder sb,
+            final String symbol,
+            final String artifactHint,
+            final int graphHits,
+            final Path root) {
+        if (!knowledgeLive(root)) {
             return;
         }
         final var want = symbol.trim();
-        final var fast = knowledge.codeGraphProvider(want, artifactHint);
+        final var fast = knowledge.codeGraphProvider(root, want, artifactHint);
         if (fast != null) {
             sb.append("artifact knowledge: ")
                     .append(symbol)
@@ -363,7 +369,7 @@ public class CodeResolveTool implements EmbeddedTool {
                     .append(").\n");
             return;
         }
-        final var gavs = knowledge.indexedArtifacts();
+        final var gavs = knowledge.indexedArtifacts(root);
         if (gavs.isEmpty()) {
             return;
         }
@@ -374,7 +380,7 @@ public class CodeResolveTool implements EmbeddedTool {
             if (artifactHint != null && !artifactHint.isBlank() && !gav.contains(artifactHint)) {
                 continue;
             }
-            final var index = knowledge.knowledge(gav, "index");
+            final var index = knowledge.knowledge(root, gav, "index");
             if (index != null && index.contains(want)) {
                 match = gav;
             }

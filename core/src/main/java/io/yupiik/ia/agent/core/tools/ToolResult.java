@@ -15,6 +15,8 @@
  */
 package io.yupiik.ia.agent.core.tools;
 
+import java.util.List;
+
 /**
  * Outcome of a tool call. Initially a plain success/failure boolean, it now carries an explicit
  * tri-state so a tool can report "still working, not an error" (e.g. {@code check_subagents}
@@ -23,8 +25,20 @@ package io.yupiik.ia.agent.core.tools;
  * renders it muted rather than red. The {@code success()} accessor is kept for backward-compat and
  * returns {@code false} for PENDING, so existing call sites that only distinguish {success, error}
  * keep working and treat PENDING as "not done yet".
+ *
+ * <p>File mutations are ephemeral, authorized UI data captured at completed mutation boundaries.
+ * They are not model-readable output and must not be appended to conversation history. An error
+ * can carry mutations when an earlier operation in a multi-file patch completed successfully.</p>
  */
-public record ToolResult(Status status, String output) {
+public record ToolResult(Status status, String output, List<FileMutation> fileMutations) {
+
+    public ToolResult {
+        fileMutations = List.copyOf(fileMutations);
+    }
+
+    public ToolResult(final Status status, final String output) {
+        this(status, output, List.of());
+    }
 
     public enum Status {
         OK,

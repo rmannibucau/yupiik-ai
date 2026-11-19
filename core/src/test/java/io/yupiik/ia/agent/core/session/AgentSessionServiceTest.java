@@ -42,6 +42,7 @@ import io.yupiik.ia.agent.core.llm.Message;
 import io.yupiik.ia.agent.core.llm.ToolCall;
 import io.yupiik.ia.agent.core.llm.ToolCall.FunctionCall;
 import io.yupiik.ia.agent.core.mcp.McpManager;
+import io.yupiik.ia.agent.core.memory.MemoryCompactor;
 import io.yupiik.ia.agent.core.memory.MemoryStore;
 import io.yupiik.ia.agent.core.permissions.PermissionService;
 import io.yupiik.ia.agent.core.shell.SessionRuntime;
@@ -51,6 +52,7 @@ import io.yupiik.ia.agent.core.todo.TodoItem;
 import io.yupiik.ia.agent.core.todo.TodoStore;
 import io.yupiik.ia.agent.core.tools.EmbeddedTool;
 import io.yupiik.ia.agent.core.tools.ToolCategory;
+import io.yupiik.ia.agent.core.tools.ToolContext;
 import io.yupiik.ia.agent.core.tools.ToolResult;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -65,6 +67,8 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 class AgentSessionServiceTest {
+    @TempDir
+    private static Path testWorkdir;
 
     @Test
     void toolsListsAndGroupsByServer() {
@@ -80,7 +84,7 @@ class AgentSessionServiceTest {
             }
         });
 
-        final var listing = service.tools("");
+        final var listing = service.tools("", testWorkdir);
 
         assertTrue(listing.anyTool());
         assertEquals(3, listing.matches());
@@ -108,9 +112,9 @@ class AgentSessionServiceTest {
             }
         });
 
-        assertEquals(1, service.tools("fs read").matches());
-        assertEquals(0, service.tools("nomatch").matches());
-        final var filtered = service.tools("write");
+        assertEquals(1, service.tools("fs read", testWorkdir).matches());
+        assertEquals(0, service.tools("nomatch", testWorkdir).matches());
+        final var filtered = service.tools("write", testWorkdir);
         assertEquals(1, filtered.servers().get(0).tools().size());
         assertEquals("write_file", filtered.servers().get(0).tools().get(0).name());
     }
@@ -124,14 +128,14 @@ class AgentSessionServiceTest {
             }
         });
 
-        final var listing = service.tools("");
+        final var listing = service.tools("", testWorkdir);
         assertFalse(listing.anyTool());
         assertTrue(listing.servers().isEmpty());
     }
 
     @Test
     void permissionsParseModesNoneAndInvalid() {
-        final var permissions = new PermissionService(cfg());
+        final var permissions = new PermissionService(cfg(), (cfg()).resolveWorkingDir());
         final var service = service(permissions);
 
         assertEquals(PermissionMode.ASK, service.setPermissions("none", runtime(permissions)));
@@ -145,7 +149,7 @@ class AgentSessionServiceTest {
 
     @Test
     void setPermissionsUpdatesService() {
-        final var permissions = new PermissionService(cfg());
+        final var permissions = new PermissionService(cfg(), (cfg()).resolveWorkingDir());
         final var service = service(permissions);
 
         assertEquals(PermissionMode.YOLO, service.setPermissions("yolo", runtime(permissions)));
@@ -156,7 +160,7 @@ class AgentSessionServiceTest {
 
     @Test
     void setPermissionsRoutesPermissionModes() {
-        final var permissions = new PermissionService(cfg());
+        final var permissions = new PermissionService(cfg(), (cfg()).resolveWorkingDir());
         final var service = service(permissions);
 
         assertEquals(PermissionMode.YOLO, service.setPermissions("yolo", runtime(permissions)));
@@ -172,7 +176,7 @@ class AgentSessionServiceTest {
 
     @Test
     void permissionsInfoExposesStateAndSessionGrants() {
-        final var permissions = new PermissionService(cfg());
+        final var permissions = new PermissionService(cfg(), (cfg()).resolveWorkingDir());
         permissions.setMode(AgentMode.BUILD);
         permissions.setPermissionMode(PermissionMode.ASK);
         permissions.grantSession("bash", Map.of("command", "mvn install"));
@@ -187,7 +191,7 @@ class AgentSessionServiceTest {
 
     @Test
     void setModeClearsSessionGrantsWhenBackToPlan() {
-        final var permissions = new PermissionService(cfg());
+        final var permissions = new PermissionService(cfg(), (cfg()).resolveWorkingDir());
         final var service = service(permissions);
         permissions.setMode(AgentMode.BUILD);
         permissions.grantSession("bash", Map.of("command", "mvn install"));
@@ -206,7 +210,7 @@ class AgentSessionServiceTest {
 
     @Test
     void setModeKeepsSessionGrantsWhenStayingInBuild() {
-        final var permissions = new PermissionService(cfg());
+        final var permissions = new PermissionService(cfg(), (cfg()).resolveWorkingDir());
         final var service = service(permissions);
         permissions.setMode(AgentMode.BUILD);
         permissions.grantSession("bash", Map.of("command", "mvn install"));
@@ -218,7 +222,7 @@ class AgentSessionServiceTest {
 
     @Test
     void setModeClearsPermissionModeOverrideWhenBackToPlan() {
-        final var permissions = new PermissionService(cfg());
+        final var permissions = new PermissionService(cfg(), (cfg()).resolveWorkingDir());
         final var service = service(permissions);
         final var runtime = runtime(permissions);
         service.setPermissions("yolo", runtime);
@@ -234,7 +238,7 @@ class AgentSessionServiceTest {
 
     @Test
     void setModeKeepsPermissionModeOverrideWhenStayingInBuild() {
-        final var permissions = new PermissionService(cfg());
+        final var permissions = new PermissionService(cfg(), (cfg()).resolveWorkingDir());
         final var service = service(permissions);
         final var runtime = runtime(permissions);
         permissions.setMode(AgentMode.BUILD); // a true build -> build switch, not plan -> build
@@ -247,7 +251,7 @@ class AgentSessionServiceTest {
 
     @Test
     void setModeDefaultsApprovalToAutoEditWhenEnteringBuild() {
-        final var permissions = new PermissionService(cfg());
+        final var permissions = new PermissionService(cfg(), (cfg()).resolveWorkingDir());
         final var service = service(permissions);
         final var runtime = runtime(permissions);
         assertEquals(PermissionMode.ASK, permissions.permissionMode());
@@ -260,7 +264,7 @@ class AgentSessionServiceTest {
 
     @Test
     void setModeOverwritesExplicitOverrideWhenEnteringBuildFromPlan() {
-        final var permissions = new PermissionService(cfg());
+        final var permissions = new PermissionService(cfg(), (cfg()).resolveWorkingDir());
         final var service = service(permissions);
         final var runtime = runtime(permissions);
         service.setPermissions("yolo", runtime);
@@ -369,7 +373,7 @@ class AgentSessionServiceTest {
 
     @Test
     void exportPlanErrorsOutsidePlanMode() {
-        final var permissions = new PermissionService(cfg());
+        final var permissions = new PermissionService(cfg(), (cfg()).resolveWorkingDir());
         permissions.setMode(AgentMode.BUILD);
         final var service = service(permissions);
 
@@ -381,7 +385,7 @@ class AgentSessionServiceTest {
 
     @Test
     void exportPlanErrorsWhenNoPlanYet() {
-        final var permissions = new PermissionService(cfg());
+        final var permissions = new PermissionService(cfg(), (cfg()).resolveWorkingDir());
         permissions.setMode(AgentMode.PLAN);
         final var seeder = new PlanTodoSeeder() {
             @Override
@@ -399,7 +403,7 @@ class AgentSessionServiceTest {
 
     @Test
     void exportPlanWritesPathInPlanMode(@TempDir final Path dir) throws Exception {
-        final var permissions = new PermissionService(cfg());
+        final var permissions = new PermissionService(cfg(), (cfg()).resolveWorkingDir());
         permissions.setMode(AgentMode.PLAN);
         final var seeder = new PlanTodoSeeder() {
             @Override
@@ -454,13 +458,15 @@ class AgentSessionServiceTest {
         };
         final var service = service(fileService, cfg(dir.toString(), null));
 
-        final var unchanged = service.reloadPlan("s1", planPath, "same content", runtime(new PermissionService(cfg())));
+        final var unchanged = service.reloadPlan(
+                "s1", planPath, "same content", runtime(new PermissionService(cfg(), (cfg()).resolveWorkingDir())));
         assertFalse(unchanged.changed());
         assertNull(unchanged.error());
         assertEquals("no changes in the plan (nothing to reload)", unchanged.message());
 
         Files.writeString(planPath, "edited content");
-        final var changed = service.reloadPlan("s1", planPath, "same content", runtime(new PermissionService(cfg())));
+        final var changed = service.reloadPlan(
+                "s1", planPath, "same content", runtime(new PermissionService(cfg(), (cfg()).resolveWorkingDir())));
         assertTrue(changed.changed());
         assertNull(changed.error());
         assertEquals("plan reloaded with 1 tasks", changed.message());
@@ -471,7 +477,10 @@ class AgentSessionServiceTest {
         final var service = service(new PlanFileService(null), cfg());
 
         final var reload = service.reloadPlan(
-                "s1", Path.of("/no/such/plan.md"), "original", runtime(new PermissionService(cfg())));
+                "s1",
+                Path.of("/no/such/plan.md"),
+                "original",
+                runtime(new PermissionService(cfg(), (cfg()).resolveWorkingDir())));
 
         assertNotNull(reload.error());
         assertTrue(reload.error().contains("plan file not found"));
@@ -492,7 +501,7 @@ class AgentSessionServiceTest {
         final var service =
                 new AgentSessionService(null, null, null, null, memoryStore, null, null, null, config, null);
 
-        final var memory = service.memory();
+        final var memory = service.memory(config.resolveWorkingDir());
 
         assertEquals("global notes", memory.global());
         assertEquals("project notes", memory.project());
@@ -506,6 +515,116 @@ class AgentSessionServiceTest {
                 memory.projectPath());
         assertTrue(memory.globalExists());
         assertTrue(memory.projectExists());
+    }
+
+    @Test
+    void memoryAndStatsUseSelectedRoot(
+            @TempDir final Path storageHome, @TempDir final Path configuredRoot, @TempDir final Path sessionRoot)
+            throws Exception {
+        final var config = TestConfigs.codingAgent(Map.of(
+                "yca.storageHome", storageHome.toString(),
+                "yca.workingDir", configuredRoot.toString()));
+        final var store = new MemoryStore(config);
+        Files.createDirectories(store.globalFile().getParent());
+        Files.writeString(store.globalFile(), "- shared\n");
+        final var configuredFile = MemoryStore.projectFile(configuredRoot);
+        final var sessionFile = MemoryStore.projectFile(sessionRoot);
+        Files.createDirectories(configuredFile.getParent());
+        Files.createDirectories(sessionFile.getParent());
+        Files.writeString(configuredFile, "- configured\n");
+        Files.writeString(sessionFile, "- session one\n- session two\n");
+        Files.writeString(configuredFile.resolveSibling("compaction.txt"), "timestamp=11\nbefore=100\nafter=30\n");
+        Files.writeString(sessionFile.resolveSibling("compaction.txt"), "timestamp=22\nbefore=200\nafter=40\n");
+        final var compactor = new MemoryCompactor(null, config, store, null, null);
+        final var service =
+                new AgentSessionService(null, null, null, null, store, null, null, null, config, null, compactor);
+
+        for (final var root : List.of(configuredRoot, sessionRoot)) {
+            final var memory = service.memory(root);
+            final var stats = service.memoryStats(root);
+            assertEquals(Files.readString(MemoryStore.projectFile(root)), memory.project());
+            assertEquals(MemoryStore.projectFile(root).toString(), memory.projectPath());
+            assertTrue(memory.projectExists());
+            assertEquals("- shared\n", memory.global());
+            assertEquals(store.globalFile().toString(), memory.globalPath());
+            assertTrue(memory.globalExists());
+            assertEquals(memory.global().length(), stats.globalChars());
+            assertEquals(1, stats.globalBullets());
+            assertEquals(memory.project().length(), stats.projectChars());
+            assertEquals(root.equals(configuredRoot) ? 1 : 2, stats.projectBullets());
+            assertEquals(
+                    root.equals(configuredRoot) ? 11 : 22,
+                    stats.lastCompaction().timestamp());
+        }
+        assertEquals(service.memory(configuredRoot), service.memory(config.resolveWorkingDir()));
+        assertThrows(NullPointerException.class, () -> service.memory(null));
+        assertEquals(1, service.memoryStats(config.resolveWorkingDir()).projectBullets());
+        assertThrows(NullPointerException.class, () -> service.memoryStats(null));
+        assertEquals(11, service.memoryStats(configuredRoot).lastCompaction().timestamp());
+        final var missing = service.memory(sessionRoot.resolve("missing"));
+        assertEquals("", missing.project());
+        assertFalse(missing.projectExists());
+    }
+
+    @Test
+    void memoryReadsExplicitRootWithoutConfiguredStoreFallback(@TempDir final Path root) throws Exception {
+        final var file = MemoryStore.projectFile(root);
+        Files.createDirectories(file.getParent());
+        Files.writeString(file, "- explicit\n");
+        final var config = TestConfigs.codingAgent(Map.of(
+                "yca.storageHome", root.resolve("storage").toString(),
+                "yca.workingDir", root.resolve("configured").toString()));
+        final var service = new AgentSessionService(
+                null, null, null, null, new MemoryStore(config), null, null, null, config, null);
+        assertEquals("- explicit\n", service.memory(root).project());
+        assertEquals(file.toString(), service.memory(root).projectPath());
+        assertTrue(service.memory(root).projectExists());
+        assertEquals(1, service.memoryStats(root).projectBullets());
+    }
+
+    @Test
+    void manualCompactionForwardsExplicitRoot(@TempDir final Path root) {
+        final var targets = new ArrayList<Path>();
+        final var compactor = new MemoryCompactor() {
+            @Override
+            public String compactNow(final Path target) {
+                targets.add(target);
+                return "selected root";
+            }
+        };
+        final var service =
+                new AgentSessionService(null, null, null, null, null, null, null, null, null, null, compactor);
+        assertEquals("selected root", service.compactMemory(root));
+        assertEquals(List.of(root), targets);
+        assertThrows(NullPointerException.class, () -> service.compactMemory(null));
+        final var unavailable =
+                new AgentSessionService(null, null, null, null, null, null, null, null, null, null, null);
+        assertEquals("memory compaction is not available", unavailable.compactMemory(root));
+    }
+
+    @Test
+    void nullRootRetainsServiceOverrides() {
+        final var content = new AgentSessionService.MemoryContent("global", "project", "g", "p", true, true);
+        final var stats = new AgentSessionService.MemoryStats(6, 0, 7, 0, -1, null);
+        final var service = new AgentSessionService(null, null, null, null, null, null, null, null, null, null, null) {
+            @Override
+            public MemoryContent memory(final Path root) {
+                return content;
+            }
+
+            @Override
+            public MemoryStats memoryStats(final Path root) {
+                return stats;
+            }
+
+            @Override
+            public String compactMemory(final Path root) {
+                return "override";
+            }
+        };
+        assertEquals(content, service.memory(null));
+        assertEquals(stats, service.memoryStats(null));
+        assertEquals("override", service.compactMemory(null));
     }
 
     @Test
@@ -524,7 +643,8 @@ class AgentSessionServiceTest {
         };
         final var service = service(store);
 
-        final var dump = service.context("s1", runtime(new PermissionService(cfg()), null, promptBuilder()));
+        final var dump = service.context(
+                "s1", runtime(new PermissionService(cfg(), (cfg()).resolveWorkingDir()), null, promptBuilder()));
 
         assertEquals(3, dump.messages().size());
         assertNull(dump.messages().get(0).toolName());
@@ -546,7 +666,8 @@ class AgentSessionServiceTest {
         };
         final var service = service(store);
 
-        final var dump = service.context("s1", runtime(new PermissionService(cfg()), null, promptBuilder()));
+        final var dump = service.context(
+                "s1", runtime(new PermissionService(cfg(), (cfg()).resolveWorkingDir()), null, promptBuilder()));
 
         assertEquals("grep", dump.messages().get(1).toolName());
     }
@@ -561,7 +682,8 @@ class AgentSessionServiceTest {
         };
         final var service = service(store);
 
-        final var result = service.compact("s1", runtime(new PermissionService(cfg()), null, null));
+        final var result =
+                service.compact("s1", runtime(new PermissionService(cfg(), (cfg()).resolveWorkingDir()), null, null));
         assertNotNull(result);
         assertFalse(result.applied());
         assertEquals("nothing to compact", result.message());
@@ -593,19 +715,20 @@ class AgentSessionServiceTest {
         };
         final var service = service(store);
         final var runtime = new SessionRuntime(
-                new AgentLoop() {
+                new AgentLoop(testWorkdir) {
                     @Override
                     public ChatSettings chatSettings() {
                         return ChatSettings.EMPTY;
                     }
                 },
-                new PermissionService(cfg()),
+                new PermissionService(cfg(), (cfg()).resolveWorkingDir()),
                 null,
                 null,
                 null,
                 null,
                 contextManager,
-                promptBuilder());
+                promptBuilder(),
+                testWorkdir);
         final var result = service.compact("s1", true, true, 7, runtime);
         assertTrue(result.applied());
         assertEquals(1, captured.size());
@@ -681,13 +804,13 @@ class AgentSessionServiceTest {
     void resyncGraphPropagatesFailure() {
         final var graph = new StructuralCodeGraph() {
             @Override
-            public String resync() {
+            public String resync(final Path root) {
                 throw new IllegalStateException("boom");
             }
         };
         final var service = service(graph);
 
-        assertThrows(RuntimeException.class, service::resyncGraph);
+        assertThrows(RuntimeException.class, () -> service.resyncGraph(testWorkdir));
     }
 
     private static AgentSessionService service(final PermissionService permissions) {
@@ -726,16 +849,16 @@ class AgentSessionServiceTest {
     }
 
     private static SessionRuntime runtime(final PermissionService permissions) {
-        return new SessionRuntime(null, permissions, null, null, null, null, null, null);
+        return new SessionRuntime(null, permissions, null, null, null, null, null, null, testWorkdir);
     }
 
     private static SessionRuntime runtime(
             final PermissionService permissions, final TodoStore todos, final SystemPromptBuilder promptBuilder) {
-        return new SessionRuntime(null, permissions, null, null, todos, null, null, promptBuilder);
+        return new SessionRuntime(null, permissions, null, null, todos, null, null, promptBuilder, testWorkdir);
     }
 
     private static SystemPromptBuilder promptBuilder() {
-        return new SystemPromptBuilder() {
+        return new SystemPromptBuilder(testWorkdir) {
             @Override
             public String build() {
                 return "<system>";
@@ -788,7 +911,7 @@ class AgentSessionServiceTest {
             }
 
             @Override
-            public String description() {
+            public String description(final Path workdir) {
                 return description;
             }
 
@@ -803,7 +926,7 @@ class AgentSessionServiceTest {
             }
 
             @Override
-            public ToolResult execute(final Map<String, Object> args) {
+            public ToolResult execute(final Map<String, Object> args, final ToolContext context) {
                 return ToolResult.ok(null);
             }
         };

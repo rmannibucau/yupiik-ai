@@ -32,6 +32,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.TreeMap;
+import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletionException;
 import java.util.function.Consumer;
 import java.util.function.Predicate;
@@ -58,6 +59,7 @@ import java.util.regex.Pattern;
  * so the flow works against the real ChatGPT/Codex backend.</p>
  */
 public class CodexOAuthClient {
+    private static final Pattern EXP_CLAIM = Pattern.compile("\"exp\"\\s*:\\s*([0-9]+)");
 
     private static final Logger LOGGER = Logger.getLogger(CodexOAuthClient.class.getName());
 
@@ -162,9 +164,7 @@ public class CodexOAuthClient {
     public CodexTokenStore poll(final DeviceCodeChallenge challenge, final Predicate<Boolean> cancelled) {
         final var deadline = System.currentTimeMillis() + 15 * 60_000;
         while (System.currentTimeMillis() < deadline) {
-            if (cancelled != null && cancelled.test(Boolean.TRUE)) {
-                throw new IllegalStateException("Device-code authorization cancelled");
-            }
+            checkCancelled(cancelled);
             final String body;
             try {
                 body = postJson(
@@ -173,6 +173,7 @@ public class CodexOAuthClient {
                                 Map.of("device_auth_id", challenge.deviceAuthId(), "user_code", challenge.userCode())),
                         "application/json");
             } catch (final IllegalStateException e) {
+                checkCancelled(cancelled);
                 // The device token endpoint answers a pending authorization with a non-2xx the Codex
                 // CLI treats as "still pending" (403/404). Only those are tolerated; anything else
                 // (revoked device grants, policy blocks, transport) aborts the poll.
@@ -184,18 +185,26 @@ public class CodexOAuthClient {
                 }
                 throw e;
             }
+            checkCancelled(cancelled);
             final var map = parse(body);
             final var code = string(map, "authorization_code");
             if (code != null) {
                 // the issuer hands back an authorization code plus its PKCE verifier; exchange it for tokens
                 final var tokens =
                         exchangeWithVerifier(code, string(map, "code_verifier"), issuer() + "/deviceauth/callback");
+                checkCancelled(cancelled);
                 return toStore(tokens);
             }
             // authorization still pending (or a transient non-authorization body): wait and retry
             sleep(challenge.interval());
         }
         throw new IllegalStateException("Device-code authorization timed out");
+    }
+
+    static void checkCancelled(final Predicate<Boolean> cancelled) {
+        if (Thread.currentThread().isInterrupted() || (cancelled != null && cancelled.test(Boolean.TRUE))) {
+            throw new CancellationException("Codex authorization cancelled");
+        }
     }
 
     private void sleep(final int interval) {
@@ -384,10 +393,10 @@ public class CodexOAuthClient {
             }
             final byte[] decoded = Base64.getUrlDecoder().decode(parts[1]);
             final var json = new String(decoded, UTF_8);
-            final var exp = Pattern.compile("\"exp\"\\s*:\\s*([0-9]+)").matcher(json);
+            final var exp = EXP_CLAIM.matcher(json);
             return exp.find() ? Long.parseLong(exp.group(1)) * 1000 : null;
         } catch (final RuntimeException e) {
-            LOGGER.fine(() -> "Cannot decode access token exp claim: " + e.getMessage());
+            LOGGER.fine("Cannot decode access token exp claim");
             return null;
         }
     }
@@ -467,7 +476,7 @@ public class CodexOAuthClient {
             final String email = payload.email() != null ? payload.email() : payload.preferredUsername();
             return new IdTokenClaims(accountIdResolved, userId, email, plan, fedramp);
         } catch (final RuntimeException e) {
-            LOGGER.fine(() -> "Cannot decode id_token claims: " + e.getMessage());
+            LOGGER.fine("Cannot decode id_token claims");
             return new IdTokenClaims(null, null, null, null, false);
         }
     }

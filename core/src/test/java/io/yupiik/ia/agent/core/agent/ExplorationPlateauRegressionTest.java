@@ -75,6 +75,9 @@ import org.junit.jupiter.api.io.TempDir;
 @ExtendWith(TestJsonMapper.class)
 class ExplorationPlateauRegressionTest {
     @TempDir
+    private static Path testWorkdir;
+
+    @TempDir
     Path home;
 
     private JsonMapper mapper;
@@ -334,7 +337,7 @@ class ExplorationPlateauRegressionTest {
             }
 
             @Override
-            public String description() {
+            public String description(final Path workdir) {
                 return "complete the work";
             }
 
@@ -349,7 +352,7 @@ class ExplorationPlateauRegressionTest {
             }
 
             @Override
-            public ToolResult execute(final Map<String, Object> args) {
+            public ToolResult execute(final Map<String, Object> args, final ToolContext context) {
                 fixture.todos.items = List.of(new TodoItem("finish the work", "completed"));
                 return ToolResult.ok("todo completed");
             }
@@ -435,7 +438,7 @@ class ExplorationPlateauRegressionTest {
             }
 
             @Override
-            public String description() {
+            public String description(final Path workdir) {
                 return "scripted " + name;
             }
 
@@ -455,7 +458,7 @@ class ExplorationPlateauRegressionTest {
             }
 
             @Override
-            public ToolResult execute(final Map<String, Object> args) {
+            public ToolResult execute(final Map<String, Object> args, final ToolContext context) {
                 return result;
             }
         };
@@ -507,15 +510,15 @@ class ExplorationPlateauRegressionTest {
             tools.addAll(extraTools);
             final var registry = new ToolRegistry(null) {
                 @Override
-                public List<Tool> toWireTools() {
-                    return toWireTools(tool -> true);
+                public List<Tool> toWireTools(final Path workdir) {
+                    return toWireTools(workdir, tool -> true);
                 }
 
                 @Override
-                public List<Tool> toWireTools(final Predicate<EmbeddedTool> filter) {
+                public List<Tool> toWireTools(final Path workdir, final Predicate<EmbeddedTool> filter) {
                     return tools.stream()
                             .filter(filter)
-                            .map(tool -> Tool.function(tool.name(), tool.description(), tool.schema()))
+                            .map(tool -> Tool.function(tool.name(), tool.description(home), tool.schema()))
                             .toList();
                 }
 
@@ -534,7 +537,7 @@ class ExplorationPlateauRegressionTest {
                     return tool.execute(args, context);
                 }
             };
-            final var permissions = new PermissionService(config);
+            final var permissions = new PermissionService(config, (config).resolveWorkingDir());
             permissions.setMode(AgentMode.BUILD);
             final var loop = new AgentLoop(
                     client,
@@ -578,13 +581,13 @@ class ExplorationPlateauRegressionTest {
                         @Override
                         public void append(final String id, final SessionEntry entry) {}
                     },
-                    new SystemPromptBuilder() {
+                    new SystemPromptBuilder(testWorkdir) {
                         @Override
                         public String build(final String prompt, final AgentConfiguration agent) {
                             return "system prompt";
                         }
                     },
-                    new MemoryExtractor() {
+                    new MemoryExtractor(testWorkdir) {
                         @Override
                         public void asyncExtractNow(final List<Message> messages) {}
 
@@ -607,7 +610,7 @@ class ExplorationPlateauRegressionTest {
                     mapper,
                     new StructuralCodeGraph() {
                         @Override
-                        public void ensureReadyAsync() {}
+                        public void ensureReadyAsync(final Path root) {}
                     },
                     new ProviderManager(config, mapper),
                     null,
@@ -615,7 +618,8 @@ class ExplorationPlateauRegressionTest {
                     null,
                     todos,
                     null,
-                    null);
+                    null,
+                    (config).resolveWorkingDir());
             return loop.run("inspect the source and complete the work", null, "plateau-regression", null, () -> false);
         }
 

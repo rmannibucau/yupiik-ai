@@ -33,6 +33,8 @@ import java.util.regex.Pattern;
 import org.junit.jupiter.api.Test;
 
 class SpinnerTest {
+    private static final Pattern ELAPSED = Pattern.compile("thinking\\.\\.\\. \\(\\d+\\.\\ds\\)");
+
     @Test
     void inertWithoutTty() {
         final var stream = new RecordingStream();
@@ -203,15 +205,14 @@ class SpinnerTest {
         final var spinner = new Spinner(new Symbols(true), stream.promptOutput(), true, new ReentrantLock(), 25);
         spinner.start("thinking...");
         // the counter only kicks in from 1s: poll real frames until it does
-        final var elapsed = Pattern.compile("thinking\\.\\.\\. \\(\\d+\\.\\ds\\)");
         final var deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
         String text = "";
-        while (!elapsed.matcher(text).find() && System.nanoTime() < deadline) {
+        while (!ELAPSED.matcher(text).find() && System.nanoTime() < deadline) {
             assertTrue(stream.awaitFrame(1, TimeUnit.SECONDS), "spinner stopped rendering frames");
             stream.nextFrame();
             text = stream.text();
         }
-        assertTrue(elapsed.matcher(text).find(), "no single parenthesised elapsed time: " + text);
+        assertTrue(ELAPSED.matcher(text).find(), "no single parenthesised elapsed time: " + text);
         assertFalse(text.contains("(0s)"), "the label baked a stale time in: " + text);
         spinner.stop();
     }

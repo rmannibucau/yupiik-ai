@@ -33,6 +33,7 @@ import java.util.stream.Stream;
  */
 @ApplicationScoped
 public class GhOutputProcessor implements OutputProcessor {
+    private static final Pattern WHITESPACE = Pattern.compile("\\s+");
     private static final Pattern ISSUE_LIST_ROW = Pattern.compile("^#?\\d+\\s+.*");
     private static final Pattern REPEATED_WHITESPACE = Pattern.compile("\\s{2,}");
     private static final Pattern RUN_STATUS_SYMBOL = Pattern.compile("^(✓|✗|X|\\*|\\?)\\s+.*");
@@ -165,7 +166,7 @@ public class GhOutputProcessor implements OutputProcessor {
     }
 
     private static String subCommand(final String command) {
-        final var tokens = command.strip().split("\\s+");
+        final var tokens = WHITESPACE.split(command.strip());
         for (final var t : tokens) {
             if (!t.equals("gh") && !t.startsWith("-")) {
                 return t;

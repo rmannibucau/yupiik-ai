@@ -22,15 +22,23 @@ import io.yupiik.ia.agent.core.agent.SubagentRegistry;
 import io.yupiik.ia.agent.core.cli.slash.SlashCommandSpec;
 import io.yupiik.ia.agent.core.cli.slash.SlashGroup;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration$FusionConfigurationFactory;
+import io.yupiik.ia.agent.core.configuration.CodingAgentConfigurations;
+import io.yupiik.ia.agent.core.context.BackoffSleeper;
+import io.yupiik.ia.agent.core.shell.SessionRuntimeFactory;
 import io.yupiik.ia.agent.core.shell.ShellEnv;
 import io.yupiik.ia.agent.core.shell.ShellRegistered;
 import io.yupiik.ia.agent.core.shell.ShellSession;
+import io.yupiik.ia.agent.core.shell.ShellUnregistered;
 import io.yupiik.ia.agent.core.shell.slash.ArgCompletion;
 import io.yupiik.ia.agent.core.shell.slash.SlashCommand;
 import io.yupiik.ia.agent.core.shell.slash.SlashCommandSet;
 import io.yupiik.ia.agent.core.shell.slash.SlashRegistry;
+import io.yupiik.ia.agent.core.wiring.PrecisionDurationMarkerProvider;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import java.lang.reflect.Proxy;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.time.Clock;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -40,14 +48,21 @@ import org.jline.reader.CompletingParsedLine;
 import org.jline.reader.ParsedLine;
 import org.jline.reader.Parser;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 class SlashCommandCompleterTest {
+    @TempDir
+    Path home;
 
     private static SlashRegistry registry() {
         final SlashCommandSet set = () -> List.of(
                 SlashCommand.of(
                         new SlashCommandSpec("/subagents", "[id|name]", "subagents", SlashGroup.SESSION),
                         ArgCompletion.wholeArgument("subagent", ArgCompletion.Env::subagents),
+                        (arg, env) -> null),
+                SlashCommand.of(
+                        new SlashCommandSpec("/context", null, "context cmd", SlashGroup.CONFIG),
+                        ArgCompletion.PATH,
                         (arg, env) -> null),
                 SlashCommand.of(
                         new SlashCommandSpec("/model", null, "model cmd", SlashGroup.CONFIG),
@@ -113,6 +128,77 @@ class SlashCommandCompleterTest {
         final var candidates = new ArrayList<Candidate>();
         completer.complete(null, line("hello", 5), candidates);
         assertTrue(candidates.isEmpty(), candidates.toString());
+    }
+
+    @Test
+    void pathCompletionTracksRegisteredRuntimeRootsAndIgnoresAnOldUnregister() throws Exception {
+        final var a = Files.createDirectories(home.resolve("a"));
+        final var b = Files.createDirectories(home.resolve("b"));
+        Files.writeString(a.resolve("entry-a"), "a");
+        Files.writeString(b.resolve("entry-b"), "b");
+        final var config = CodingAgentConfigurations.builder()
+                .baseUrl("http://localhost:0")
+                .storageHome(home.resolve("storage").toString())
+                .custom(Map.of("yca.workingDir", home.toString()))
+                .build();
+        final var factory = new SessionRuntimeFactory(
+                null,
+                null,
+                null,
+                config,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                Clock.systemUTC(),
+                new PrecisionDurationMarkerProvider(),
+                new BackoffSleeper(),
+                null,
+                null,
+                null,
+                null,
+                null,
+                null);
+        final var completer = new SlashCommandCompleter(registry(), null, null, null, null, null);
+        final var candidates = new ArrayList<Candidate>();
+        final var aRuntime = factory.create("a", a);
+        try {
+            final var bRuntime = factory.create("b", b);
+            try {
+                final var aEnv = new ShellEnv(
+                        null, null, new ShellSession().sessionId("a").runtime(aRuntime), null);
+                final var bEnv = new ShellEnv(
+                        null, null, new ShellSession().sessionId("b").runtime(bRuntime), null);
+                for (final var env : List.of(aEnv, bEnv, aEnv)) {
+                    completer.onRegistered(new ShellRegistered(env));
+                    completer.complete(null, line("/context entry", 14), candidates);
+                    assertEquals(
+                            List.of("entry-" + env.session().sessionId()),
+                            candidates.stream().map(Candidate::value).toList());
+                    candidates.clear();
+                }
+                completer.onUnregistered(new ShellUnregistered(bEnv));
+                completer.complete(null, line("/context entry", 14), candidates);
+                assertEquals(
+                        List.of("entry-a"),
+                        candidates.stream().map(Candidate::value).toList());
+                candidates.clear();
+                completer.onUnregistered(new ShellUnregistered(aEnv));
+                completer.complete(null, line("/context entry", 14), candidates);
+                assertTrue(candidates.isEmpty());
+            } finally {
+                bRuntime.close();
+            }
+        } finally {
+            aRuntime.close();
+        }
     }
 
     @Test

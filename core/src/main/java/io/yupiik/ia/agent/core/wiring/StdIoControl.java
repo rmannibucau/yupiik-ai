@@ -17,15 +17,19 @@ package io.yupiik.ia.agent.core.wiring;
 
 import io.yupiik.fusion.framework.api.container.configuration.ConfigurationRegistration;
 import io.yupiik.fusion.framework.api.lifecycle.Stop;
+import io.yupiik.fusion.framework.api.main.Args;
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.fusion.framework.build.api.event.OnEvent;
 import io.yupiik.fusion.framework.build.api.order.Order;
 import io.yupiik.fusion.framework.build.api.scanning.Bean;
+import java.util.List;
+import java.util.Optional;
 
 /**
  * Owns the {@link HackStdIo} lifecycle: installs the terminal takeover once the
  * configuration - hence the {@code yca.logging.auto} switch - is readable, and
  * restores the original streams when the container closes.
+ * ACP owns protocol stdout instead, so its container's command arguments disable this takeover.
  * <p>
  * This is a plain discovered bean (like {@code YcaConfigurationProducer}), not
  * a {@code FusionModule}: the fusion processor owns the
@@ -51,6 +55,16 @@ public class StdIoControl {
     static final int INSTALL_PRIORITY = Integer.MAX_VALUE - 1;
 
     private final HackStdIo hack = new HackStdIo();
+    private final Optional<Args> args;
+
+    /** Bean proxy constructor; the active instance uses the injection constructor. */
+    protected StdIoControl() {
+        this.args = Optional.empty();
+    }
+
+    public StdIoControl(final Optional<Args> args) {
+        this.args = args;
+    }
 
     /** The single terminal-stream control shared by every consumer. */
     @Bean
@@ -60,6 +74,10 @@ public class StdIoControl {
     }
 
     public void install(@OnEvent @Order(INSTALL_PRIORITY) final ConfigurationRegistration registration) {
+        final var arguments = args.map(Args::args).orElseGet(List::of);
+        if (!arguments.isEmpty() && "acp".equals(arguments.getFirst())) {
+            return;
+        }
         final var auto = registration
                 .configuration()
                 .get("yca.logging.auto")

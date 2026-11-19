@@ -24,7 +24,11 @@ import io.yupiik.maven.knowledge.process.ProcessService;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Assumptions;
@@ -32,6 +36,20 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 class MvnProjectDepsTest {
+    @Test
+    void parsePreservesUnicodeLineBreaksAndAsciiScopeWhitespace() {
+        for (final var separator : List.of("\n", "\r", "\r\n", "\u000b", "\f", "\u0085", "\u2028", "\u2029")) {
+            final var output = separator + "[INFO] com.ex:compiled:jar:1:compile\t-- module example"
+                    + separator + "[INFO] com.ex:provided:jar:1:provided  -- module example"
+                    + separator + separator;
+            assertEquals(
+                    List.of(Gav.of("com.ex", "provided", "1"), Gav.of("com.ex", "compiled", "1")),
+                    MvnProjectDeps.parse(output),
+                    separator);
+        }
+        assertEquals(List.of(), MvnProjectDeps.parse(""));
+        assertEquals(List.of(), MvnProjectDeps.parse("\r\n\n"));
+    }
 
     @Test
     void parseOrdersProvidedThenCompileThenTestThenOther() {
@@ -114,16 +132,14 @@ class MvnProjectDepsTest {
         Assertions.assertNotEquals(firstHash, secondHash);
         assertEquals(firstHash, MvnProjectDeps.fingerprint(first));
         assertEquals(secondHash, MvnProjectDeps.fingerprint(second));
-        try (final var executor = java.util.concurrent.Executors.newVirtualThreadPerTaskExecutor()) {
-            final var tasks = new java.util.ArrayList<java.util.concurrent.Future<String>>();
+        try (final var executor = Executors.newVirtualThreadPerTaskExecutor()) {
+            final var tasks = new ArrayList<Future<String>>();
             for (int i = 0; i < 20; i++) {
                 final var project = i % 2 == 0 ? first : second;
                 tasks.add(executor.submit(() -> MvnProjectDeps.fingerprint(project)));
             }
             for (int i = 0; i < tasks.size(); i++) {
-                assertEquals(
-                        i % 2 == 0 ? firstHash : secondHash,
-                        tasks.get(i).get(5, java.util.concurrent.TimeUnit.SECONDS));
+                assertEquals(i % 2 == 0 ? firstHash : secondHash, tasks.get(i).get(5, TimeUnit.SECONDS));
             }
         }
     }

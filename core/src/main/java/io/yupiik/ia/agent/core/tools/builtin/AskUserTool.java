@@ -23,6 +23,7 @@ import io.yupiik.ia.agent.core.tools.Schemas;
 import io.yupiik.ia.agent.core.tools.ToolCategory;
 import io.yupiik.ia.agent.core.tools.ToolContext;
 import io.yupiik.ia.agent.core.tools.ToolResult;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -45,7 +46,7 @@ public class AskUserTool implements EmbeddedTool {
     }
 
     @Override
-    public String description() {
+    public String description(final Path workdir) {
         return "Ask the user for a decision, preference or missing input. "
                 + "Supports single-choice, multiple-choice and free-text answers.";
     }
@@ -74,11 +75,6 @@ public class AskUserTool implements EmbeddedTool {
                 "id",
                 "prompt");
         return Schemas.object(Map.of("questions", Schemas.arrayOf("The questions to ask.", question)), "questions");
-    }
-
-    @Override
-    public ToolResult execute(final Map<String, Object> args) {
-        return ToolResult.error("ask_user requires an active session context.");
     }
 
     /**

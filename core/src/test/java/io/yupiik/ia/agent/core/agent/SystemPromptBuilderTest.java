@@ -15,16 +15,20 @@
  */
 package io.yupiik.ia.agent.core.agent;
 
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.configuration.AgentMode;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration$FusionConfigurationFactory;
+import io.yupiik.ia.agent.core.llm.ChatSettings;
 import io.yupiik.ia.agent.core.memory.MemoryStore;
 import io.yupiik.ia.agent.core.permissions.PermissionService;
+import io.yupiik.ia.agent.core.session.SessionMetadata;
 import io.yupiik.ia.agent.core.skills.SkillLocator;
 import io.yupiik.ia.agent.core.todo.TodoItem;
 import io.yupiik.ia.agent.core.todo.TodoStore;
@@ -85,7 +89,13 @@ class SystemPromptBuilderTest {
                 null,
                 null,
                 null,
-                null);
+                null,
+                (config(Map.of(
+                                "yca.home", fakeHome.toString(),
+                                "yca.storageHome", storageAgents.getParent().toString(),
+                                "yca.workingDir", nested.toString(),
+                                "yca.skills.enabled", "true")))
+                        .resolveWorkingDir());
         final var prompt = builder.build();
         assertTrue(prompt.contains("nested rule"));
         assertFalse(
@@ -100,14 +110,14 @@ class SystemPromptBuilderTest {
     @Test
     void skillsLocatorIncludesAgentsGlobalDir() {
         final var cfg = config(Map.of());
-        final var dirs = SkillLocator.skillDirectories(cfg);
+        final var dirs = SkillLocator.skillDirectories(cfg, cfg.resolveWorkingDir());
         assertTrue(
                 dirs.contains(Path.of(cfg.resolveHome(), ".agents", "skills")),
                 "~/.agents/skills should be a global skill directory: " + dirs);
     }
 
     @Test
-    void skillsAreNotInjectedInThePromptButExposedViaTheSkillToolCatalog() throws Exception {
+    void skillBodiesAreNotInjectedButTheirCatalogIsInTheSessionPrompt() throws Exception {
         final var skill = storageHome.resolve("skills").resolve("my-skill").resolve("SKILL.md");
         Files.createDirectories(skill.getParent());
         Files.writeString(skill, "---\nname: custom-name\ndescription: a skill\n---\nUse the skill body here.");
@@ -115,7 +125,8 @@ class SystemPromptBuilderTest {
                 "yca.storageHome", storageHome.toString(),
                 "yca.workingDir", project.toString(),
                 "yca.skills.enabled", "true"));
-        final var builder = new SystemPromptBuilder(cfg, null, null, null, null, null, null, null, null);
+        final var builder =
+                new SystemPromptBuilder(cfg, null, null, null, null, null, null, null, null, (cfg).resolveWorkingDir());
         final var prompt = builder.build();
         assertFalse(
                 prompt.contains("<skill name=\"custom-name\">"),
@@ -123,7 +134,8 @@ class SystemPromptBuilderTest {
         assertFalse(
                 prompt.contains("Use the skill body here."),
                 "skill bodies should never be inlined; they load on demand via the skill tool");
-        final var catalog = SkillLocator.availableSkillsCatalog(cfg);
+        final var catalog = SkillLocator.availableSkillsCatalog(cfg, cfg.resolveWorkingDir());
+        assertTrue(prompt.contains(catalog), "metadata must be available in this session's prompt");
         assertTrue(catalog.contains("<skill><name>custom-name</name>"), "catalog should list the skill: " + catalog);
         assertTrue(
                 catalog.contains("<description>a skill</description>"),
@@ -131,7 +143,7 @@ class SystemPromptBuilderTest {
     }
 
     @Test
-    void skillsAreNotInjectedInThePromptForProjectSkillsEither() throws Exception {
+    void projectSkillBodiesAreNotInjectedEither() throws Exception {
         final var skill = project.resolve(".opencode")
                 .resolve("skills")
                 .resolve("proj-skill")
@@ -142,13 +154,15 @@ class SystemPromptBuilderTest {
                 "yca.storageHome", storageHome.toString(),
                 "yca.workingDir", project.toString(),
                 "yca.skills.enabled", "true"));
-        final var builder = new SystemPromptBuilder(cfg, null, null, null, null, null, null, null, null);
+        final var builder =
+                new SystemPromptBuilder(cfg, null, null, null, null, null, null, null, null, (cfg).resolveWorkingDir());
         final var prompt = builder.build();
         assertFalse(
                 prompt.contains("<skill name=\"proj-skill\">"),
                 "no skill block should be inlined in the system prompt");
         assertTrue(
-                SkillLocator.availableSkillsCatalog(cfg).contains("<skill><name>proj-skill</name>"),
+                SkillLocator.availableSkillsCatalog(cfg, cfg.resolveWorkingDir())
+                        .contains("<skill><name>proj-skill</name>"),
                 "the skill tool catalog should still list project skills");
     }
 
@@ -161,9 +175,55 @@ class SystemPromptBuilderTest {
                 "yca.storageHome", storageHome.toString(),
                 "yca.workingDir", project.toString(),
                 "yca.skills.enabled", "false"));
-        final var builder = new SystemPromptBuilder(cfg, null, null, null, null, null, null, null, null);
+        final var builder =
+                new SystemPromptBuilder(cfg, null, null, null, null, null, null, null, null, (cfg).resolveWorkingDir());
         final var prompt = builder.build();
         assertFalse(prompt.contains("<skill name=\"my-skill\">"));
+        assertFalse(prompt.contains("<available_skills>"));
+    }
+
+    @Test
+    void skillsAndInstructionsAreIsolatedAndCatalogsStayFrozenForEachSession() throws Exception {
+        final var first = Files.createDirectories(project.resolve("first"));
+        final var second = Files.createDirectories(project.resolve("second"));
+        for (final var root : List.of(first, second)) {
+            final var name = root.getFileName().toString();
+            Files.writeString(root.resolve("AGENTS.md"), name + "-instructions");
+            final var skill = root.resolve(".yca/skills/" + name + "/SKILL.md");
+            Files.createDirectories(skill.getParent());
+            Files.writeString(skill, "---\nname: " + name + "\ndescription: " + name + "-metadata\n---\nsecret-body");
+        }
+        final var cfg = config(Map.of(
+                "yca.home", storageHome.resolve("home").toString(),
+                "yca.storageHome", storageHome.toString(),
+                "yca.workingDir", first.toString(),
+                "yca.skills.enabled", "true"));
+        final var a = new SystemPromptBuilder(cfg, null, null, null, null, null, null, null, null, first);
+        final var b = new SystemPromptBuilder(cfg, null, null, null, null, null, null, null, null, second);
+
+        final var promptA = a.build();
+        final var promptB = b.build();
+        assertTrue(promptA.contains("first-instructions") && promptA.contains("first-metadata"), promptA);
+        assertFalse(promptA.contains("second-instructions") || promptA.contains("second-metadata"), promptA);
+        assertTrue(promptB.contains("second-instructions") && promptB.contains("second-metadata"), promptB);
+        assertFalse(promptB.contains("first-instructions") || promptB.contains("first-metadata"), promptB);
+        assertFalse(promptA.contains("secret-body") || promptB.contains("secret-body"));
+        Files.writeString(first.resolve(".yca/skills/first/SKILL.md"), "description changed mid-session");
+        assertEquals(promptA, a.build(), "metadata changes must not rewrite the session's stable prefix");
+        assertEquals(promptB, b.build());
+    }
+
+    @Test
+    void explicitSessionRootOverridesConfiguredWorkingAndProjectDirectories() {
+        final var working = project.resolve("launch");
+        final var target = project.resolve("target");
+        final var cfg = config(Map.of("yca.workingDir", working.toString(), "yca.projectDir", target.toString()));
+        final var builder = new SystemPromptBuilder(cfg, null, null, null, null, null, null, null, null, target);
+
+        final var prompt = builder.build();
+
+        assertTrue(prompt.contains("- Working directory: " + target + "\n"), prompt);
+        assertFalse(prompt.contains("- Working directory: " + working + "\n"), prompt);
     }
 
     @Test
@@ -173,7 +233,8 @@ class SystemPromptBuilderTest {
                 "yca.workingDir", project.toString()));
         final var todos = new TodoStore(cfg, mapper);
         todos.replace(List.of(new TodoItem("step one", "pending")));
-        final var builder = new SystemPromptBuilder(cfg, null, todos, null, null, null, null, null, null);
+        final var builder = new SystemPromptBuilder(
+                cfg, null, todos, null, null, null, null, null, null, (cfg).resolveWorkingDir());
         final var prompt = builder.build();
         assertFalse(prompt.contains("Current todo list"), "todos must not be part of the system prompt anymore");
         assertFalse(prompt.contains("Date: "), "the date must not be part of the system prompt anymore");
@@ -191,8 +252,9 @@ class SystemPromptBuilderTest {
                 "yca.storageHome", storageHome.toString(),
                 "yca.workingDir", project.toString()));
         final var memory = new MemoryStore(cfg);
-        memory.append(true, List.of("- a durable global fact"));
-        final var builder = new SystemPromptBuilder(cfg, memory, null, null, null, null, null, null, null);
+        memory.append(true, List.of("- a durable global fact"), cfg.resolveWorkingDir());
+        final var builder = new SystemPromptBuilder(
+                cfg, memory, null, null, null, null, null, null, null, (cfg).resolveWorkingDir());
         final var prompt = builder.build();
         assertTrue(
                 prompt.contains("<memory>") && prompt.contains("a durable global fact"),
@@ -212,8 +274,9 @@ class SystemPromptBuilderTest {
                 "yca.storageHome", storageHome.toString(),
                 "yca.workingDir", project.toString()));
         final var memory = new MemoryStore(cfg);
-        memory.append(true, List.of("- fact one", "- fact one", "- fact two"));
-        final var builder = new SystemPromptBuilder(cfg, memory, null, null, null, null, null, null, null);
+        memory.append(true, List.of("- fact one", "- fact one", "- fact two"), cfg.resolveWorkingDir());
+        final var builder = new SystemPromptBuilder(
+                cfg, memory, null, null, null, null, null, null, null, (cfg).resolveWorkingDir());
         final var prompt = builder.build();
         final var section = prompt.substring(prompt.indexOf("<memory>"), prompt.indexOf("</memory>"));
         assertEquals(1, occurrences(section, "- fact one"), "duplicated bullets must be deduplicated: " + section);
@@ -226,11 +289,12 @@ class SystemPromptBuilderTest {
                 "yca.storageHome", storageHome.toString(),
                 "yca.workingDir", project.toString()));
         final var memory = new MemoryStore(cfg);
-        memory.append(true, List.of("- a durable global fact"));
-        final var builder = new SystemPromptBuilder(cfg, memory, null, null, null, null, null, null, null);
+        memory.append(true, List.of("- a durable global fact"), cfg.resolveWorkingDir());
+        final var builder = new SystemPromptBuilder(
+                cfg, memory, null, null, null, null, null, null, null, (cfg).resolveWorkingDir());
         final var first = builder.build();
         // a mid-session memory_write mutates MEMORY.md but must not rewrite the frozen prompt snapshot
-        memory.append(true, List.of("- a fact added mid-session"));
+        memory.append(true, List.of("- a fact added mid-session"), cfg.resolveWorkingDir());
         final var second = builder.build();
         assertEquals(
                 memorySection(first),
@@ -264,9 +328,10 @@ class SystemPromptBuilderTest {
     @Test
     void sessionStateReportsTheCurrentMode() throws Exception {
         final var cfg = config(Map.of("yca.mode", "plan"));
-        final var permissions = new PermissionService(cfg);
+        final var permissions = new PermissionService(cfg, (cfg).resolveWorkingDir());
         permissions.setMode(AgentMode.PLAN);
-        final var builder = new SystemPromptBuilder(cfg, null, null, permissions, null, null, null, null, null);
+        final var builder = new SystemPromptBuilder(
+                cfg, null, null, permissions, null, null, null, null, null, (cfg).resolveWorkingDir());
         assertTrue(
                 builder.sessionState(null).contains("Mode: PLAN"), "plan mode must be reported in the volatile tail");
 
@@ -286,9 +351,10 @@ class SystemPromptBuilderTest {
                 "yca.storageHome", storageHome.toString(),
                 "yca.workingDir", project.toString(),
                 "yca.mode", "plan"));
-        final var permissions = new PermissionService(cfg);
+        final var permissions = new PermissionService(cfg, (cfg).resolveWorkingDir());
         permissions.setMode(AgentMode.PLAN);
-        final var builder = new SystemPromptBuilder(cfg, null, null, permissions, null, null, null, null, null);
+        final var builder = new SystemPromptBuilder(
+                cfg, null, null, permissions, null, null, null, null, null, (cfg).resolveWorkingDir());
         final var state = builder.sessionState(null);
         assertTrue(
                 state.contains(
@@ -302,10 +368,19 @@ class SystemPromptBuilderTest {
     @Test
     void planModeStatesReadOnlyAndPlanDelivery() throws Exception {
         final var cfg = config(Map.of("yca.mode", "plan"));
-        final var permissions = new PermissionService(cfg);
+        final var permissions = new PermissionService(cfg, (cfg).resolveWorkingDir());
         permissions.setMode(AgentMode.PLAN);
-        final var builder =
-                new SystemPromptBuilder(cfg, null, null, permissions, new AgentProvider(cfg), null, null, null, null);
+        final var builder = new SystemPromptBuilder(
+                cfg,
+                null,
+                null,
+                permissions,
+                new AgentProvider(cfg),
+                null,
+                null,
+                null,
+                null,
+                (cfg).resolveWorkingDir());
         final var prompt = builder.build("add a retry to the LLM client and fix its error handling");
         assertTrue(prompt.contains("Mode: PLAN"));
         assertTrue(prompt.contains("Repository mutations are forbidden by default"));
@@ -329,10 +404,19 @@ class SystemPromptBuilderTest {
     @Test
     void planModeAnswersInformationalQuestionsDirectly() throws Exception {
         final var cfg = config(Map.of("yca.mode", "plan"));
-        final var permissions = new PermissionService(cfg);
+        final var permissions = new PermissionService(cfg, (cfg).resolveWorkingDir());
         permissions.setMode(AgentMode.PLAN);
-        final var builder =
-                new SystemPromptBuilder(cfg, null, null, permissions, new AgentProvider(cfg), null, null, null, null);
+        final var builder = new SystemPromptBuilder(
+                cfg,
+                null,
+                null,
+                permissions,
+                new AgentProvider(cfg),
+                null,
+                null,
+                null,
+                null,
+                (cfg).resolveWorkingDir());
         final var prompt = builder.build("Explain what this project is about: purpose, architecture and how to start");
         assertTrue(prompt.contains("Mode: PLAN"));
         assertTrue(
@@ -345,7 +429,7 @@ class SystemPromptBuilderTest {
     }
 
     @Test
-    void separateProjectDirScopesContextAndPersona() throws Exception {
+    void explicitProjectRootScopesContextAndPersona() throws Exception {
         Files.writeString(project.resolve("README.md"), "# unrelated framework README\ndashboard internals");
         Files.writeString(project.resolve("AGENTS.md"), "# unrelated framework rule\nframework-specific rule");
         final var target = Files.createDirectory(project.getParent().resolve(project.getFileName() + "-scaffold"));
@@ -362,12 +446,12 @@ class SystemPromptBuilderTest {
                 null,
                 null,
                 null,
-                null);
+                null,
+                target);
         final var prompt = builder.build();
         assertTrue(
-                prompt.contains(
-                        "Target project directory: " + target.toAbsolutePath().normalize()),
-                "persona should name the separate target project dir");
+                prompt.contains("Working directory: " + target.toAbsolutePath().normalize()),
+                "persona should name the explicit target project root");
         assertFalse(
                 prompt.contains("dashboard internals"),
                 "unrelated workingDir README must not leak when projectDir points elsewhere");
@@ -390,7 +474,12 @@ class SystemPromptBuilderTest {
                 null,
                 null,
                 null,
-                null);
+                null,
+                (config(Map.of(
+                                "yca.storageHome", storageHome.toString(),
+                                "yca.workingDir", project.toString(),
+                                "yca.skills.enabled", "true")))
+                        .resolveWorkingDir());
         final var prompt =
                 builder.build("generate in ~/projects/foo a frontend landing page for the yupiik fusion project");
         assertTrue(
@@ -416,7 +505,12 @@ class SystemPromptBuilderTest {
                 null,
                 null,
                 null,
-                null);
+                null,
+                (config(Map.of(
+                                "yca.storageHome", storageHome.toString(),
+                                "yca.workingDir", project.toString(),
+                                "yca.skills.enabled", "true")))
+                        .resolveWorkingDir());
         final var prompt = builder.build("explain how the retry logic works");
         assertFalse(
                 prompt.contains("owner docs"),
@@ -465,10 +559,19 @@ class SystemPromptBuilderTest {
                 "yca.provider.providers.length", "1",
                 "yca.provider.providers.0.baseUrl", "https://mystery.example/v1",
                 "yca.provider.providers.0.model", "m"));
-        final var permissions = new PermissionService(cfg);
+        final var permissions = new PermissionService(cfg, (cfg).resolveWorkingDir());
         permissions.setMode(AgentMode.PLAN);
         final var builder = new SystemPromptBuilder(
-                cfg, null, null, permissions, new AgentProvider(cfg), providerManager(cfg), todoResolver(), null, null);
+                cfg,
+                null,
+                null,
+                permissions,
+                new AgentProvider(cfg),
+                providerManager(cfg),
+                todoResolver(),
+                null,
+                null,
+                (cfg).resolveWorkingDir());
         final var prompt = builder.build();
         assertTrue(
                 prompt.contains("Task Management (plan mode)"),
@@ -680,10 +783,19 @@ class SystemPromptBuilderTest {
                 "yca.storageHome", storageHome.toString(),
                 "yca.workingDir", project.toString(),
                 "yca.mode", "plan"));
-        final var permissions = new PermissionService(cfg);
+        final var permissions = new PermissionService(cfg, (cfg).resolveWorkingDir());
         permissions.setMode(AgentMode.PLAN);
         final var builder = new SystemPromptBuilder(
-                cfg, null, null, permissions, new AgentProvider(cfg), providerManager(cfg), null, null, null);
+                cfg,
+                null,
+                null,
+                permissions,
+                new AgentProvider(cfg),
+                providerManager(cfg),
+                null,
+                null,
+                null,
+                (cfg).resolveWorkingDir());
         final var prompt = builder.build();
         assertTrue(
                 prompt.contains("only if its exact name appears in the `tools` field"),
@@ -697,10 +809,19 @@ class SystemPromptBuilderTest {
                 "yca.storageHome", storageHome.toString(),
                 "yca.workingDir", project.toString(),
                 "yca.mode", "plan"));
-        final var svc = new PermissionService(cfg);
+        final var svc = new PermissionService(cfg, (cfg).resolveWorkingDir());
         svc.setMode(AgentMode.PLAN);
         final var prompt = new SystemPromptBuilder(
-                        cfg, null, null, svc, new AgentProvider(cfg), providerManager(cfg), todoResolver(), null, null)
+                        cfg,
+                        null,
+                        null,
+                        svc,
+                        new AgentProvider(cfg),
+                        providerManager(cfg),
+                        todoResolver(),
+                        null,
+                        null,
+                        (cfg).resolveWorkingDir())
                 .build();
         assertTrue(
                 prompt.contains("read-only command families"),
@@ -720,10 +841,19 @@ class SystemPromptBuilderTest {
                 "plan",
                 "yca.permissions.bash.readOnlyPromptHints",
                 "only git status and git diff are safe"));
-        final var svc = new PermissionService(cfg);
+        final var svc = new PermissionService(cfg, (cfg).resolveWorkingDir());
         svc.setMode(AgentMode.PLAN);
         final var prompt = new SystemPromptBuilder(
-                        cfg, null, null, svc, new AgentProvider(cfg), providerManager(cfg), todoResolver(), null, null)
+                        cfg,
+                        null,
+                        null,
+                        svc,
+                        new AgentProvider(cfg),
+                        providerManager(cfg),
+                        todoResolver(),
+                        null,
+                        null,
+                        (cfg).resolveWorkingDir())
                 .build();
         assertTrue(prompt.contains("only git status and git diff are safe"));
         assertFalse(prompt.contains("such as git add"), "a custom value must replace the default sentence");
@@ -740,10 +870,19 @@ class SystemPromptBuilderTest {
                 "plan",
                 "yca.permissions.bash.readOnlyPromptHints",
                 ""));
-        final var svc = new PermissionService(cfg);
+        final var svc = new PermissionService(cfg, (cfg).resolveWorkingDir());
         svc.setMode(AgentMode.PLAN);
         final var prompt = new SystemPromptBuilder(
-                        cfg, null, null, svc, new AgentProvider(cfg), providerManager(cfg), todoResolver(), null, null)
+                        cfg,
+                        null,
+                        null,
+                        svc,
+                        new AgentProvider(cfg),
+                        providerManager(cfg),
+                        todoResolver(),
+                        null,
+                        null,
+                        (cfg).resolveWorkingDir())
                 .build();
         assertFalse(
                 prompt.contains("read-only command families"),
@@ -833,6 +972,85 @@ class SystemPromptBuilderTest {
                 "the leading preamble should be trimmed, keeping only the tail");
     }
 
+    @Test
+    void sessionContextValidationUsesCandidateCapsAndSessionDefaultsWithoutInstallingRejectedSelections()
+            throws Exception {
+        Files.writeString(project.resolve("AGENTS.md"), "workspace-retained");
+        final var hints = "policy-start-" + "h".repeat(10_000) + "-policy-end";
+        final var overrides = new HashMap<String, String>();
+        overrides.put("yca.storageHome", storageHome.toString());
+        overrides.put("yca.workingDir", project.toString());
+        overrides.put("yca.skills.enabled", "false");
+        overrides.put("yca.llm.systemPromptMaxChars", "24000");
+        overrides.put("yca.permissions.bash.readOnlyPromptHints", hints);
+        overrides.put("yca.provider.providers.length", "2");
+        overrides.put("yca.provider.providers.0.id", "process");
+        overrides.put("yca.provider.providers.0.baseUrl", "https://process.example.invalid/v1");
+        overrides.put("yca.provider.providers.0.model", "large");
+        overrides.put("yca.provider.providers.0.prompt.todo", "process-guidance-" + "p".repeat(18_000));
+        overrides.put("yca.provider.providers.1.id", "session");
+        overrides.put("yca.provider.providers.1.baseUrl", "https://session.example.invalid/v1");
+        overrides.put("yca.provider.providers.1.model", "large");
+        overrides.put("yca.provider.providers.1.prompt.todo", "session-guidance");
+        overrides.put("yca.provider.providers.1.models.length", "2");
+        overrides.put("yca.provider.providers.1.models.0.model", "large");
+        overrides.put("yca.provider.providers.1.models.0.behavior.systemPromptMaxChars", "24000");
+        overrides.put("yca.provider.providers.1.models.1.model", "small");
+        overrides.put("yca.provider.providers.1.models.1.behavior.systemPromptMaxChars", "6000");
+        final var cfg = config(overrides);
+        final var manager = providerManager(cfg);
+        final var processProvider = manager.current();
+        final var accepted = new ChatSettings("session", "large", null, null);
+        final var small = accepted.withModel("small");
+        final var process = new ChatSettings("process", "large", null, null);
+        assertEquals("process", processProvider.id());
+        for (final var instructionMode : List.of("append", "override")) {
+            final var permissions = new PermissionService(cfg, project);
+            permissions.setMode(AgentMode.BUILD);
+            final var builder = new SystemPromptBuilder(
+                    cfg, null, null, permissions, null, manager, todoResolver(), null, null, project);
+            final var instructions = new SessionMetadata.Instructions(instructionMode, List.of("accepted-client"));
+            if ("append".equals(instructionMode)) {
+                // Huge defaults for another provider are real retained text, not a fixed setup allowance.
+                builder.attach(process);
+                assertThrows(
+                        IllegalArgumentException.class, () -> builder.configureSessionContext(List.of(), instructions));
+            }
+            builder.attach(accepted);
+            builder.configureSessionContext(List.of(), instructions);
+            final var before = builder.build("explain the code");
+            assertTrue(before.contains("accepted-client"));
+            assertTrue(before.contains("workspace-retained"));
+            assertEquals("append".equals(instructionMode), before.contains("session-guidance"));
+            assertFalse(before.contains("process-guidance"));
+            final var failure = assertThrows(IllegalArgumentException.class, () -> builder.validateChatSettings(small));
+            assertTrue(failure.getMessage().contains("Selected model cannot accommodate"));
+            if ("append".equals(instructionMode)) {
+                assertThrows(IllegalArgumentException.class, () -> builder.validateChatSettings(process));
+            } else {
+                assertDoesNotThrow(
+                        () -> builder.validateChatSettings(process), "override must not reserve omitted defaults");
+            }
+            assertDoesNotThrow(() -> builder.validateChatSettings(accepted));
+            assertEquals(24_000, builder.resolvedSystemPromptCap());
+            assertEquals(
+                    before,
+                    builder.build("explain the code"),
+                    "validation must not change accepted settings or context");
+            permissions.setMode(AgentMode.PLAN);
+            for (final var request : List.of("explain the code", "fix the code")) {
+                final var rendered = builder.build(request);
+                assertTrue(rendered.length() <= builder.resolvedSystemPromptCap());
+                assertTrue(rendered.contains("accepted-client"));
+                assertTrue(rendered.contains(hints));
+                assertEquals("append".equals(instructionMode), rendered.contains("session-guidance"));
+                assertFalse(rendered.contains("process-guidance"));
+            }
+            assertEquals(project, builder.effectiveWorkdir());
+            assertEquals(processProvider, manager.current(), "session validation must not select a global provider");
+        }
+    }
+
     private static TodoPromptResolver todoResolver() {
         return new TodoPromptResolver();
     }
@@ -844,7 +1062,16 @@ class SystemPromptBuilderTest {
     private SystemPromptBuilder builder(
             final CodingAgentConfiguration cfg, final TodoPromptResolver resolver, final ProviderManager manager) {
         return new SystemPromptBuilder(
-                cfg, null, null, new PermissionService(cfg), new AgentProvider(cfg), manager, resolver, null, null);
+                cfg,
+                null,
+                null,
+                new PermissionService(cfg, (cfg).resolveWorkingDir()),
+                new AgentProvider(cfg),
+                manager,
+                resolver,
+                null,
+                null,
+                (cfg).resolveWorkingDir());
     }
 
     /**

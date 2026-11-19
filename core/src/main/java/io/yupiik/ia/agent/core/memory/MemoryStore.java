@@ -42,6 +42,7 @@ import java.util.regex.Pattern;
 
 @ApplicationScoped
 public class MemoryStore {
+    private static final Pattern WHITESPACE = Pattern.compile("\\s+");
     /** The header line of {@link #HEADER}: filtered out of the prompt sections (it is not a fact). */
     public static final String HEADER_LINE = "Durable facts, decisions and preferences. One bullet per line.";
 
@@ -54,12 +55,6 @@ public class MemoryStore {
      * external edit (which bypasses {@link #append}) also invalidates it. Lets the agent loop detect
      * a mid-turn {@code memory_write} without re-hashing the files at every LLM round.
      */
-    private volatile int contentVersion = -1;
-
-    private volatile long globalMtime = Long.MIN_VALUE;
-    private volatile long globalSize = Long.MIN_VALUE;
-    private volatile long projectMtime = Long.MIN_VALUE;
-    private volatile long projectSize = Long.MIN_VALUE;
 
     /**
      * Tokenized memory corpus cache (access-order LRU, so unchanged content costs one {@code get}
@@ -88,36 +83,8 @@ public class MemoryStore {
      * the files change (detected through last-modified/size, so in-store writes and external edits
      * both invalidate it). A never-written store is stable across calls.
      */
-    public int version() {
-        var v = contentVersion;
-        if (v >= 0 && (configuration == null || !stampsChanged())) {
-            return v;
-        }
-        synchronized (this) {
-            v = contentVersion;
-            if (v < 0 || (configuration != null && stampsChanged())) {
-                v = Objects.hash(readGlobal(), readProject());
-                contentVersion = v;
-                if (configuration != null) {
-                    snapshotStamps();
-                }
-            }
-            return v;
-        }
-    }
-
-    private boolean stampsChanged() {
-        return globalMtime != mtime(globalFile())
-                || globalSize != size(globalFile())
-                || projectMtime != mtime(projectFile())
-                || projectSize != size(projectFile());
-    }
-
-    private void snapshotStamps() {
-        globalMtime = mtime(globalFile());
-        globalSize = size(globalFile());
-        projectMtime = mtime(projectFile());
-        projectSize = size(projectFile());
+    public int version(final Path root) {
+        return Objects.hash(readGlobal(), readProject(root));
     }
 
     private static long mtime(final Path file) {
@@ -140,34 +107,21 @@ public class MemoryStore {
         return Path.of(configuration.resolveStorageHome(), "memory", "MEMORY.md");
     }
 
-    public Path projectFile() {
-        return configuration
-                .resolveWorkingDir()
+    /** Project memory file for a specific session working directory (per-session root). */
+    public static Path projectFile(final Path root) {
+        return Objects.requireNonNull(root, "workdir")
                 .resolve(".yca")
                 .resolve("memory")
                 .resolve("MEMORY.md");
-    }
-
-    /** Project memory file for a specific session working directory (per-session root). */
-    public static Path projectFile(final Path root) {
-        return root.resolve(".yca").resolve("memory").resolve("MEMORY.md");
     }
 
     public String readGlobal() {
         return read(globalFile());
     }
 
-    public String readProject() {
-        return read(projectFile());
-    }
-
     /** Reads the project memory under the given session root, or an empty string. */
     public String readProject(final Path root) {
-        return root == null ? readProject() : read(projectFile(root));
-    }
-
-    public String promptSection() {
-        return promptSection(null);
+        return read(projectFile(root));
     }
 
     /**
@@ -182,29 +136,11 @@ public class MemoryStore {
      * @param prompt the user prompt used to rank relevance; may be null
      * @return the memory section, or empty when no memory is stored
      */
-    public String promptSection(final String prompt) {
-        return promptSection(
-                prompt,
-                Math.max(500, configuration == null ? 0 : configuration.memory().maxChars()));
-    }
-
     /**
      * Builds the {@code <memory>} section with an explicit character budget.
      * {@code budget <= 0} (memory auto-disabled, eg. when the resolved ratio budget
      * is too small) returns an empty section without reading the files.
      */
-    public String promptSection(final String prompt, final int budget) {
-        if (configuration == null || !configuration.memory().enabled() || budget < 500) {
-            return "";
-        }
-        final var global = readGlobal();
-        final var project = readProject();
-        if (global.isBlank() && project.isBlank()) {
-            return "";
-        }
-        return buildMemorySection(global, project, prompt, budget);
-    }
-
     /**
      * Root-aware variant for a session working on a specific project directory: the project memory
      * is read from {@code projectRoot/.yca/memory/MEMORY.md} instead of the process-wide working dir,
@@ -222,11 +158,12 @@ public class MemoryStore {
      */
     public String promptSection(
             final String prompt, final int budget, final Path projectRoot, final List<String> currentPaths) {
+        Objects.requireNonNull(projectRoot, "workdir");
         if (configuration == null || !configuration.memory().enabled() || budget < 500) {
             return "";
         }
         final var global = readGlobal();
-        final var project = projectRoot == null ? readProject() : readProject(projectRoot);
+        final var project = readProject(projectRoot);
         if (global.isBlank() && project.isBlank()) {
             return "";
         }
@@ -530,7 +467,7 @@ public class MemoryStore {
             return null; // must have at least an empty topic then the text
         }
         final var rawTopic = text.substring(third + 1, fourth).strip();
-        final var topic = rawTopic.isBlank() ? List.<String>of() : List.of(rawTopic.split("\\s+"));
+        final var topic = rawTopic.isBlank() ? List.<String>of() : List.of(WHITESPACE.split(rawTopic));
         final var factText = text.substring(fourth + 1).strip();
         if (factText.isEmpty()) {
             return null; // an envelope needs real text
@@ -747,11 +684,13 @@ public class MemoryStore {
      * file mid-session never rewrites the memory shown in the current prompt - it is durable for
      * the <em>next</em> session (or a resume) which rebuilds the snapshot.
      */
-    public synchronized List<String> append(final boolean global, final List<String> facts) {
+    /** Writes project facts under the session root; null retains the configured default. Global storage is unchanged. */
+    public synchronized List<String> append(final boolean global, final List<String> facts, final Path root) {
+        Objects.requireNonNull(root, "workdir");
         if (facts == null || facts.isEmpty()) {
             return List.of();
         }
-        final var file = global ? globalFile() : projectFile();
+        final var file = global ? globalFile() : projectFile(root);
         try {
             Files.createDirectories(file.getParent());
             final var existing = new LinkedHashSet<String>(existingLines(file));
@@ -891,13 +830,16 @@ public class MemoryStore {
     }
 
     /** Stores a free-text memory block (eg. a compressed conversation snippet), split into bullet lines. */
-    public synchronized List<String> appendText(final boolean global, final String text) {
+    /** Root-aware free-text write, with the same normalization and bounds as {@link #appendText(boolean, String)}. */
+    public synchronized List<String> appendText(final boolean global, final String text, final Path root) {
+        Objects.requireNonNull(root, "workdir");
         if (text == null || text.isBlank()) {
             return List.of();
         }
         return append(
                 global,
-                text.lines().map(String::strip).filter(l -> !l.isEmpty()).toList());
+                text.lines().map(String::strip).filter(l -> !l.isEmpty()).toList(),
+                root);
     }
 
     /**
@@ -949,9 +891,11 @@ public class MemoryStore {
      *
      * @return the number of bytes written, or -1 when the rewrite was rejected
      */
-    public synchronized long replace(final boolean global, final List<String> bullets) {
+    /** Root-aware atomic replacement, including a backup beside the selected memory file. */
+    public synchronized long replace(final boolean global, final List<String> bullets, final Path root) {
+        Objects.requireNonNull(root, "workdir");
         try {
-            final var file = global ? globalFile() : projectFile();
+            final var file = global ? globalFile() : projectFile(root);
             Files.createDirectories(file.getParent());
             if (Files.exists(file)) {
                 Files.copy(file, file.resolveSibling(file.getFileName() + ".bak"), StandardCopyOption.REPLACE_EXISTING);

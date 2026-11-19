@@ -34,7 +34,6 @@ import io.yupiik.ia.agent.core.llm.ChatCompletionRequest;
 import io.yupiik.ia.agent.core.llm.ChatSettings;
 import io.yupiik.ia.agent.core.llm.Message;
 import io.yupiik.ia.agent.core.llm.PauseEvent;
-import io.yupiik.ia.agent.core.llm.Tool;
 import io.yupiik.ia.agent.core.llm.ToolCall;
 import io.yupiik.ia.agent.core.llm.Usage;
 import io.yupiik.ia.agent.core.session.SessionEntry;
@@ -59,6 +58,7 @@ import java.nio.file.Path;
 import java.time.Clock;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Deque;
 import java.util.HashMap;
 import java.util.List;
@@ -81,6 +81,9 @@ import org.junit.jupiter.api.io.TempDir;
 
 @ExtendWith(TestJsonMapper.class)
 class SubagentIntegrationTest {
+    @TempDir
+    private static Path testWorkdir;
+
     private static final ExecutorService EXECUTOR = Executors.newVirtualThreadPerTaskExecutor();
 
     @TempDir
@@ -237,8 +240,8 @@ class SubagentIntegrationTest {
     private ToolRegistry barrierRegistry(final CyclicBarrier barrier, final String... names) {
         return new ToolRegistry(null) {
             @Override
-            public List<Tool> toWireTools() {
-                return List.of();
+            public List<EmbeddedTool> tools() {
+                return Arrays.stream(names).map(this::tool).toList();
             }
 
             @Override
@@ -253,7 +256,7 @@ class SubagentIntegrationTest {
                     }
 
                     @Override
-                    public String description() {
+                    public String description(final Path workdir) {
                         return "test tool";
                     }
 
@@ -273,7 +276,7 @@ class SubagentIntegrationTest {
                     }
 
                     @Override
-                    public ToolResult execute(final Map<String, Object> args) {
+                    public ToolResult execute(final Map<String, Object> args, final ToolContext context) {
                         try {
                             barrier.await(250, TimeUnit.MILLISECONDS);
                         } catch (final Exception e) {
@@ -289,8 +292,8 @@ class SubagentIntegrationTest {
     private ToolRegistry cancellableToolRegistry(final CountDownLatch releaseLatch, final String... names) {
         return new ToolRegistry(null) {
             @Override
-            public List<Tool> toWireTools() {
-                return List.of();
+            public List<EmbeddedTool> tools() {
+                return Arrays.stream(names).map(this::tool).toList();
             }
 
             @Override
@@ -305,7 +308,7 @@ class SubagentIntegrationTest {
                     }
 
                     @Override
-                    public String description() {
+                    public String description(final Path workdir) {
                         return "test tool";
                     }
 
@@ -325,7 +328,7 @@ class SubagentIntegrationTest {
                     }
 
                     @Override
-                    public ToolResult execute(final Map<String, Object> args) {
+                    public ToolResult execute(final Map<String, Object> args, final ToolContext context) {
                         try {
                             releaseLatch.await(10, TimeUnit.SECONDS);
                         } catch (final InterruptedException e) {
@@ -344,7 +347,7 @@ class SubagentIntegrationTest {
     private ToolRegistry emptyToolRegistry() {
         return new ToolRegistry(null) {
             @Override
-            public List<Tool> toWireTools() {
+            public List<EmbeddedTool> tools() {
                 return List.of();
             }
 
@@ -544,7 +547,7 @@ class SubagentIntegrationTest {
                 mapper,
                 new StructuralCodeGraph() {
                     @Override
-                    public void ensureReadyAsync() {}
+                    public void ensureReadyAsync(final Path root) {}
                 },
                 new ProviderManager(cfg, mapper) {
                     @Override
@@ -585,7 +588,13 @@ class SubagentIntegrationTest {
                 rejectingExecutor);
 
         final var rejected = reg.start("parent", "rejected task").orElseThrow();
-        runner.runAsync(rejected, noopStore(), noopSnapshotStore(), noopTodoStore(), () -> false);
+        runner.runAsync(
+                rejected,
+                noopStore(),
+                noopSnapshotStore(),
+                noopTodoStore(),
+                ToolContext.empty(testWorkdir),
+                () -> false);
         rejected.awaitResult();
         assertEquals(
                 SubagentRegistry.SubagentResult.Status.FAILED, rejected.result().status());
@@ -650,7 +659,7 @@ class SubagentIntegrationTest {
                         () -> false,
                         ChatSettings.EMPTY.withProviderId("other").withModel("redirect"),
                         null,
-                        null);
+                        testWorkdir);
                 runner.runAsync(state, noopStore(), noopSnapshotStore(), noopTodoStore(), switchedContext, () -> false);
                 assertEquals(null, captured.get(), "queued children make no inference requests");
                 release.countDown();
@@ -678,10 +687,12 @@ class SubagentIntegrationTest {
         final var checkTool = new CheckSubagentsTool(reg, mapper);
 
         final var state = reg.start("parent", "task").orElseThrow();
-        runner.runAsync(state, noopStore(), noopSnapshotStore(), noopTodoStore(), () -> false);
+        runner.runAsync(
+                state, noopStore(), noopSnapshotStore(), noopTodoStore(), ToolContext.empty(testWorkdir), () -> false);
         runner.awaitCompletion(state);
 
-        final var collect = checkTool.execute(Map.of("action", "collect", "subagent_id", state.id()));
+        final var collect = checkTool.execute(
+                Map.of("action", "collect", "subagent_id", state.id()), ToolContext.empty(testWorkdir));
         assertTrue(collect.success(), collect.output());
         assertTrue(collect.output().contains("subagent result"));
         assertTrue(collect.output().contains("\"completed\":true"));
@@ -713,8 +724,10 @@ class SubagentIntegrationTest {
 
         final var s1 = reg.start("parent", "t1").orElseThrow();
         final var s2 = reg.start("parent", "t2").orElseThrow();
-        runner1.runAsync(s1, noopStore(), noopSnapshotStore(), noopTodoStore(), () -> false);
-        runner2.runAsync(s2, noopStore(), noopSnapshotStore(), noopTodoStore(), () -> false);
+        runner1.runAsync(
+                s1, noopStore(), noopSnapshotStore(), noopTodoStore(), ToolContext.empty(testWorkdir), () -> false);
+        runner2.runAsync(
+                s2, noopStore(), noopSnapshotStore(), noopTodoStore(), ToolContext.empty(testWorkdir), () -> false);
 
         // Wait for both tools to execute concurrently (barrier)
         assertTrue(barrier.await(3, TimeUnit.SECONDS) >= 0, "both tools should execute concurrently");
@@ -723,8 +736,10 @@ class SubagentIntegrationTest {
         runner2.awaitCompletion(s2);
 
         final var checkTool = new CheckSubagentsTool(reg, mapper);
-        final var c1 = checkTool.execute(Map.of("action", "collect", "subagent_id", s1.id()));
-        final var c2 = checkTool.execute(Map.of("action", "collect", "subagent_id", s2.id()));
+        final var c1 =
+                checkTool.execute(Map.of("action", "collect", "subagent_id", s1.id()), ToolContext.empty(testWorkdir));
+        final var c2 =
+                checkTool.execute(Map.of("action", "collect", "subagent_id", s2.id()), ToolContext.empty(testWorkdir));
         assertTrue(c1.success(), c1.output());
         assertTrue(c2.success(), c2.output());
     }
@@ -759,11 +774,13 @@ class SubagentIntegrationTest {
         final var checkTool = new CheckSubagentsTool(reg, mapper);
 
         final var state = reg.start("parent", "long task").orElseThrow();
-        runner.runAsync(state, noopStore(), noopSnapshotStore(), noopTodoStore(), () -> false);
+        runner.runAsync(
+                state, noopStore(), noopSnapshotStore(), noopTodoStore(), ToolContext.empty(testWorkdir), () -> false);
         runner.awaitStart();
 
         // Tool is now waiting on releaseLatch - cancel it
-        final var cancel = checkTool.execute(Map.of("action", "cancel", "subagent_id", state.id()));
+        final var cancel = checkTool.execute(
+                Map.of("action", "cancel", "subagent_id", state.id()), ToolContext.empty(testWorkdir));
         assertTrue(cancel.success(), cancel.output());
         assertTrue(cancel.output().contains("\"cancelled\":true"));
 
@@ -786,10 +803,12 @@ class SubagentIntegrationTest {
         final var checkTool = new CheckSubagentsTool(reg, mapper);
 
         final var state = reg.start("parent", "failing task").orElseThrow();
-        runner.runAsync(state, noopStore(), noopSnapshotStore(), noopTodoStore(), () -> false);
+        runner.runAsync(
+                state, noopStore(), noopSnapshotStore(), noopTodoStore(), ToolContext.empty(testWorkdir), () -> false);
         runner.awaitCompletion(state);
 
-        final var collect = checkTool.execute(Map.of("action", "collect", "subagent_id", state.id()));
+        final var collect = checkTool.execute(
+                Map.of("action", "collect", "subagent_id", state.id()), ToolContext.empty(testWorkdir));
         assertFalse(collect.success(), collect.output());
         assertTrue(collect.output().contains("error"));
     }
@@ -811,7 +830,13 @@ class SubagentIntegrationTest {
 
         final var cancelled = new AtomicBoolean(false);
         final var state = reg.start("parent", "task").orElseThrow();
-        runner.runAsync(state, noopStore(), noopSnapshotStore(), noopTodoStore(), cancelled::get);
+        runner.runAsync(
+                state,
+                noopStore(),
+                noopSnapshotStore(),
+                noopTodoStore(),
+                ToolContext.empty(testWorkdir),
+                cancelled::get);
         runner.awaitStart();
 
         // Tool is waiting on releaseLatch - parent cancels
@@ -827,7 +852,8 @@ class SubagentIntegrationTest {
         state.awaitResult();
 
         // Sub-agent should have been cancelled
-        final var collect = checkTool.execute(Map.of("action", "collect", "subagent_id", state.id()));
+        final var collect = checkTool.execute(
+                Map.of("action", "collect", "subagent_id", state.id()), ToolContext.empty(testWorkdir));
         assertFalse(collect.success(), collect.output());
 
         // ... and reported as a cancellation, not as a failure: a cancelled child must never
@@ -845,8 +871,8 @@ class SubagentIntegrationTest {
         final var reg = newRegistry(cfg, 4);
         final var toolReg = new ToolRegistry(null) {
             @Override
-            public List<Tool> toWireTools() {
-                return List.of();
+            public List<EmbeddedTool> tools() {
+                return List.of(tool("read"));
             }
 
             @Override
@@ -859,7 +885,7 @@ class SubagentIntegrationTest {
                         }
 
                         @Override
-                        public String description() {
+                        public String description(final Path workdir) {
                             return "read";
                         }
 
@@ -879,7 +905,7 @@ class SubagentIntegrationTest {
                         }
 
                         @Override
-                        public ToolResult execute(final Map<String, Object> args) {
+                        public ToolResult execute(final Map<String, Object> args, final ToolContext context) {
                             return ToolResult.ok("file content");
                         }
                     };
@@ -897,10 +923,12 @@ class SubagentIntegrationTest {
         final var checkTool = new CheckSubagentsTool(reg, mapper);
 
         final var state = reg.start("parent", "read something").orElseThrow();
-        runner.runAsync(state, noopStore(), noopSnapshotStore(), noopTodoStore(), () -> false);
+        runner.runAsync(
+                state, noopStore(), noopSnapshotStore(), noopTodoStore(), ToolContext.empty(testWorkdir), () -> false);
         runner.awaitCompletion(state);
 
-        final var collect = checkTool.execute(Map.of("action", "collect", "subagent_id", state.id()));
+        final var collect = checkTool.execute(
+                Map.of("action", "collect", "subagent_id", state.id()), ToolContext.empty(testWorkdir));
         assertTrue(collect.success(), collect.output());
     }
 
@@ -915,11 +943,13 @@ class SubagentIntegrationTest {
         final var checkTool = new CheckSubagentsTool(reg, mapper);
 
         final var state = reg.start("parent", "task").orElseThrow();
-        runner.runAsync(state, noopStore(), noopSnapshotStore(), noopTodoStore(), () -> false);
+        runner.runAsync(
+                state, noopStore(), noopSnapshotStore(), noopTodoStore(), ToolContext.empty(testWorkdir), () -> false);
         runner.awaitCompletion(state);
 
         // Collect directly without polling first
-        final var collect = checkTool.execute(Map.of("action", "collect", "subagent_id", state.id()));
+        final var collect = checkTool.execute(
+                Map.of("action", "collect", "subagent_id", state.id()), ToolContext.empty(testWorkdir));
         assertTrue(collect.success(), collect.output());
         assertTrue(collect.output().contains("direct collect"));
     }

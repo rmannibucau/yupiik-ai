@@ -82,6 +82,7 @@ import java.net.http.HttpResponse;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.nio.file.Path;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.time.Clock;
 import java.time.Duration;
@@ -97,6 +98,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.SSLParameters;
 import javax.net.ssl.SSLSession;
+import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.api.parallel.Isolated;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -110,6 +112,9 @@ import org.junit.jupiter.params.provider.ValueSource;
  */
 @Isolated // RunCommand installs a process-wide SIGINT handler and writes to the CLI streams.
 class HeadlessFeedbackIntegrationTest {
+    @TempDir
+    private static Path testWorkdir;
+
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
     @SuppressWarnings("try") // The resource restores the process-wide SIGINT handler after RunCommand.
@@ -151,7 +156,7 @@ class HeadlessFeedbackIntegrationTest {
                     configuration, mapper, providers, clock, http, new ToolCallArgumentsRepairer(mapper))) {
                 final var store = new InMemorySessionStore(clock);
                 final var sessionId = store.create();
-                final var permissions = new PermissionService(configuration);
+                final var permissions = new PermissionService(configuration, (configuration).resolveWorkingDir());
                 final var feedback = new UserFeedbackService();
                 // RunCommand must replace this stale session gate with its injected headless gate.
                 feedback.setGate(questions -> {
@@ -179,10 +184,10 @@ class HeadlessFeedbackIntegrationTest {
                 };
                 final var agents = new AgentProvider(configuration);
                 final var prompt = new SystemPromptBuilder(
-                        configuration, null, todos, permissions, agents, providers, null, null, null);
-                prompt.workdir(home);
+                        configuration, null, todos, permissions, agents, providers, null, null, null, home);
+
                 final var context = new ContextManager(configuration, usage, null);
-                final var mcp = new McpManager(configuration, mapper, List.of(new AskUserTool(mapper)), http, null);
+                final var mcp = new McpManager(configuration, mapper, List.of(new AskUserTool(mapper)), null, null);
                 try {
                     final var loop = new AgentLoop(
                             chat,
@@ -209,7 +214,8 @@ class HeadlessFeedbackIntegrationTest {
                                     sessionId,
                                     null,
                                     null,
-                                    null),
+                                    null,
+                                    (configuration).resolveWorkingDir()),
                             status,
                             emitter,
                             mapper,
@@ -229,13 +235,20 @@ class HeadlessFeedbackIntegrationTest {
                             null,
                             null,
                             null,
-                            null);
-                    final var runtime =
-                            new SessionRuntime(loop, permissions, feedback, usage, todos, status, context, prompt);
+                            null,
+                            (configuration).resolveWorkingDir());
+                    final var runtime = new SessionRuntime(
+                            loop, permissions, feedback, usage, todos, status, context, prompt, home);
                     final var factory = new SessionRuntimeFactory() {
                         @Override
-                        public SessionRuntime create(final String id) {
+                        public Path resolveWorkdir(final Path explicitWorkdir, final String resumedSessionId) {
+                            return explicitWorkdir == null ? home : explicitWorkdir;
+                        }
+
+                        @Override
+                        public SessionRuntime create(final String id, final Path workdir) {
                             assertEquals(sessionId, id);
+                            assertEquals(home, workdir);
                             return runtime;
                         }
                     };

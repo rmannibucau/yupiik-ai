@@ -58,6 +58,24 @@ class SlashRegistryTest {
     }
 
     @Test
+    void dispatchPreservesRemainderEmptyArgumentsAndAsciiWhitespaceSemantics() {
+        final var registry = registry();
+        for (final var input : List.of("/alpha", "/alpha ", "/alpha\t\r\n")) {
+            final var outcome =
+                    registry.dispatch(input, env()).toCompletableFuture().join();
+            assertEquals("alpha:", ((ShellOutcome.Status) outcome).message());
+        }
+        final var outcome = registry.dispatch("/ALPHA\t one  two\nthree \t", env())
+                .toCompletableFuture()
+                .join();
+        assertEquals("alpha:one  two\nthree", ((ShellOutcome.Status) outcome).message());
+        final var unicode = registry.dispatch("/alpha\u2003one", env())
+                .toCompletableFuture()
+                .join();
+        assertEquals("unknown command /alpha\u2003one - type /help", ((ShellOutcome.Status) unicode).message());
+    }
+
+    @Test
     void unknownCommandGivesStatus() {
         final var outcome =
                 registry().dispatch("/nope", env()).toCompletableFuture().join();

@@ -43,7 +43,52 @@ describe('backend slash completion adapter', () => {
     rpc.mockResolvedValue([suggestion]);
     render('/m'); render('/mo'); render('/model old');
     await tick();
-    expect(rpc).toHaveBeenCalledExactlyOnceWith('slash.complete', { text: '/model old', cursor: 10 });
+    expect(rpc).toHaveBeenCalledExactlyOnceWith('slash.complete', { id: 'a', text: '/model old', cursor: 10 });
     expect(current).toEqual(suggestion);
+  });
+  it('sends the session id on every A/B/A request and ignores the first A response', async () => {
+    let resolveFirst!: (value: SlashSuggestion[]) => void;
+    rpc.mockReturnValueOnce(new Promise((done) => { resolveFirst = done; }));
+    rpc.mockResolvedValueOnce([{ ...suggestion, items: ['b-model'] }]);
+    rpc.mockResolvedValueOnce([{ ...suggestion, items: ['a-model'] }]);
+    render('/model old', 'a'); await tick();
+    render('/model old', 'b'); await tick();
+    expect(current.items).toEqual(['b-model']);
+    render('/model old', 'a'); await tick();
+    await act(async () => resolveFirst([suggestion]));
+    expect(current.items).toEqual(['a-model']);
+    expect(rpc.mock.calls).toEqual(['a', 'b', 'a'].map((id) => [
+      'slash.complete', { id, text: '/model old', cursor: 10 },
+    ]));
+  });
+  it('does not request completions without a session', async () => {
+    act(() => root.render(<Harness text="/model " session="" />));
+    await tick();
+    expect(rpc).not.toHaveBeenCalled();
+    expect(current).toEqual(NO_SUGGESTION);
+  });
+  it('keeps concurrently mounted file and model completions scoped to their sessions', async () => {
+    let resolveFiles!: (value: SlashSuggestion[]) => void;
+    let resolveModels!: (value: SlashSuggestion[]) => void;
+    rpc.mockImplementation((_method: string, params: { id: string }) => new Promise((done) => {
+      if (params.id === 'a') { resolveFiles = done; } else { resolveModels = done; }
+    }));
+    const values: Record<string, SlashSuggestion> = {};
+    function Session({ id, text }: { id: string; text: string }) {
+      values[id] = useSlashCompletion(text, text.length, id);
+      return null;
+    }
+    act(() => root.render(<><Session id="a" text="/context entry" /><Session id="b" text="/model " /></>));
+    await tick();
+    expect(rpc.mock.calls).toEqual([
+      ['slash.complete', { id: 'a', text: '/context entry', cursor: 14 }],
+      ['slash.complete', { id: 'b', text: '/model ', cursor: 7 }],
+    ]);
+    const files = { ...suggestion, items: ['entry-a'], label: 'Paths' };
+    const models = { ...suggestion, items: ['b-model'] };
+    await act(async () => resolveModels([models]));
+    expect(values).toEqual({ a: NO_SUGGESTION, b: models });
+    await act(async () => resolveFiles([files]));
+    expect(values).toEqual({ a: files, b: models });
   });
 });

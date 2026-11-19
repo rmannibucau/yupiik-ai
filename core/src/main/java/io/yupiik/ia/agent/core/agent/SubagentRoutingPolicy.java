@@ -122,9 +122,8 @@ public final class SubagentRoutingPolicy {
             }
         }
         // Bare sub-agent names never search another provider's catalog.
-        final var pinned = reference.startsWith("$")
-                ? reference
-                : "$" + parent.settings().providerId() + "/" + reference;
+        final var pinned =
+                reference.startsWith("$") ? reference : "$" + parent.settings().providerId() + "/" + reference;
         final var effective = resolver.resolve(context.settings(), null, pinned, null);
         if (effective.resolved() == null
                 || effective.resolved().provider() == null
@@ -196,7 +195,10 @@ public final class SubagentRoutingPolicy {
     public boolean admit(final EffectiveAgentModel effective, final boolean explicit) {
         if (context.isCancelled()
                 || !hardAllowed(effective)
-                || !explicit && !parent.settings().providerId().equals(effective.settings().providerId())) {
+                || !explicit
+                        && !parent.settings()
+                                .providerId()
+                                .equals(effective.settings().providerId())) {
             return false;
         }
         return available(effective)

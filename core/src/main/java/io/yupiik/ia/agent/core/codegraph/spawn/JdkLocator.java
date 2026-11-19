@@ -67,6 +67,22 @@ import java.util.regex.Pattern;
 public class JdkLocator {
 
     private static final Logger LOGGER = Logger.getLogger(JdkLocator.class.getName());
+    private static final Pattern LINE_BREAK = Pattern.compile("\\R");
+    private static final Pattern SDKMAN_JAVA = Pattern.compile("java\\s*=\\s*(.+)$");
+    private static final Pattern COMPILER_PLUGIN = Pattern.compile(
+            "<artifactId>\\s*maven-compiler-plugin\\s*</artifactId>(.*?)(?:</plugin>|$)", Pattern.DOTALL);
+    private static final Pattern PLUGIN_CONFIGURATION =
+            Pattern.compile("<configuration>(.*?)</configuration>", Pattern.DOTALL);
+    private static final Pattern COMPILER_PROPERTY =
+            Pattern.compile("<\\s*maven\\.compiler\\.(?:release|source)\\s*>\\s*([0-9]+)\\s*<");
+    private static final Pattern RELEASE = Pattern.compile("<\\s*release\\s*>\\s*([0-9]+)\\s*<");
+    private static final Pattern SOURCE = Pattern.compile("<\\s*source\\s*>\\s*([0-9]+)\\s*<");
+    private static final Pattern JAVA_VERSION = Pattern.compile("(?:1\\.)?([0-9]+)");
+    private static final Pattern INTEGER = Pattern.compile("[0-9]+");
+    private static final Pattern TOOLCHAIN = Pattern.compile("<toolchain>(.*?)</toolchain>", Pattern.DOTALL);
+    private static final Pattern TOOLCHAIN_TYPE = Pattern.compile("<type>(.*?)</type>", Pattern.DOTALL);
+    private static final Pattern TOOLCHAIN_VERSION = Pattern.compile("<version>(.*?)</version>", Pattern.DOTALL);
+    private static final Pattern TOOLCHAIN_HOME = Pattern.compile("<jdkHome>(.*?)</jdkHome>", Pattern.DOTALL);
 
     private final Function<String, InputStream> classResource;
     private final Settings settings;
@@ -328,8 +344,8 @@ public class JdkLocator {
             }
             final var sdkman = dir.resolve(".sdkmanrc");
             if (Files.isRegularFile(sdkman)) {
-                for (final var line : readAll(sdkman).split("\\R")) {
-                    final var m = Pattern.compile("java\\s*=\\s*(.+)$").matcher(line.trim());
+                for (final var line : LINE_BREAK.split(readAll(sdkman))) {
+                    final var m = SDKMAN_JAVA.matcher(line.trim());
                     if (m.find()) {
                         final var value = m.group(1).trim();
                         if (!value.startsWith("java.")) { // a plain number or 25.0.4-tem is a numeric level
@@ -358,7 +374,7 @@ public class JdkLocator {
             }
             final var content = readAll(pom);
             // top-level compiler property, e.g. <maven.compiler.release>25</...>
-            final var property = tagValue(content, "maven\\.compiler\\.(?:release|source)");
+            final var property = tagValue(content, COMPILER_PROPERTY);
             if (property.isPresent()) {
                 return property;
             }
@@ -366,11 +382,11 @@ public class JdkLocator {
             final var block = pluginBlock(content);
             if (block.isPresent()) {
                 final var plugin = block.get();
-                final var release = tagValue(plugin, "release");
+                final var release = tagValue(plugin, RELEASE);
                 if (release.isPresent()) {
                     return release;
                 }
-                final var source = tagValue(plugin, "source");
+                final var source = tagValue(plugin, SOURCE);
                 if (source.isPresent()) {
                     return source;
                 }
@@ -380,21 +396,17 @@ public class JdkLocator {
     }
 
     private static Optional<String> pluginBlock(final String content) {
-        final var m = Pattern.compile(
-                        "<artifactId>\\s*maven-compiler-plugin\\s*</artifactId>(.*?)(?:</plugin>|$)", Pattern.DOTALL)
-                .matcher(content);
+        final var m = COMPILER_PLUGIN.matcher(content);
         if (!m.find()) {
             return Optional.empty();
         }
         final var rest = m.group(1);
-        final var cfg = Pattern.compile("<configuration>(.*?)</configuration>", Pattern.DOTALL)
-                .matcher(rest);
+        final var cfg = PLUGIN_CONFIGURATION.matcher(rest);
         return cfg.find() ? Optional.ofNullable(cfg.group(1)) : Optional.empty();
     }
 
-    private static Optional<Integer> tagValue(final String content, final String tagRegex) {
-        final var m =
-                Pattern.compile("<\\s*" + tagRegex + "\\s*>\\s*([0-9]+)\\s*<").matcher(content);
+    private static Optional<Integer> tagValue(final String content, final Pattern tag) {
+        final var m = tag.matcher(content);
         return m.find() ? Optional.of(Integer.parseInt(m.group(1))) : Optional.empty();
     }
 
@@ -402,7 +414,7 @@ public class JdkLocator {
         if (raw == null) {
             return Optional.empty();
         }
-        final var m = Pattern.compile("(?:1\\.)?([0-9]+)").matcher(raw.strip());
+        final var m = JAVA_VERSION.matcher(raw.strip());
         return m.find() ? Optional.of(Integer.parseInt(m.group(1))) : Optional.empty();
     }
 
@@ -480,11 +492,11 @@ public class JdkLocator {
     /** The probe prints compiler presence ({@code 1}) then {@code java.class.version} (e.g. {@code 69.0} on JDK 25).
      * Returns the class-file major of the JVM, or {@code -1} when there is no usable compiler. */
     private static int parseClassFileMajor(final String output) {
-        final var lines = output.split("\\R");
+        final var lines = LINE_BREAK.split(output);
         if (lines.length < 2 || !"1".equals(lines[0].strip())) {
             return -1;
         }
-        final var m = Pattern.compile("[0-9]+").matcher(lines[1]);
+        final var m = INTEGER.matcher(lines[1]);
         return m.find() ? Integer.parseInt(m.group()) : -1;
     }
 
@@ -652,16 +664,15 @@ public class JdkLocator {
     public record Toolchain(Path path, int classFileMajor) {}
 
     private static void parseToolchains(final String xml, final List<Toolchain> out) {
-        final var toolchain =
-                Pattern.compile("<toolchain>(.*?)</toolchain>", Pattern.DOTALL).matcher(xml);
+        final var toolchain = TOOLCHAIN.matcher(xml);
         while (toolchain.find()) {
             final var block = toolchain.group(1);
-            final var type = first(rawGroup(block, "type"));
+            final var type = first(rawGroup(block, TOOLCHAIN_TYPE));
             if (!"jdk".equalsIgnoreCase(type)) {
                 continue;
             }
-            final var version = first(rawGroup(block, "version"));
-            final var home = first(rawGroup(block, "jdkHome"));
+            final var version = first(rawGroup(block, TOOLCHAIN_VERSION));
+            final var home = first(rawGroup(block, TOOLCHAIN_HOME));
             if (version == null || home == null) {
                 continue;
             }
@@ -673,9 +684,8 @@ public class JdkLocator {
         }
     }
 
-    private static String rawGroup(final String xml, final String tag) {
-        final var m = Pattern.compile("<" + tag + ">(.*?)</" + tag + ">", Pattern.DOTALL)
-                .matcher(xml);
+    private static String rawGroup(final String xml, final Pattern tag) {
+        final var m = tag.matcher(xml);
         return m.find() ? m.group(1).trim() : null;
     }
 

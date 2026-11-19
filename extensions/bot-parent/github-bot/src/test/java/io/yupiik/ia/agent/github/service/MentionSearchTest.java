@@ -45,7 +45,6 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Function;
 import java.util.function.ToIntFunction;
-import java.util.regex.Pattern;
 import java.util.stream.IntStream;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -586,7 +585,9 @@ class MentionSearchTest {
     }
 
     private static long occurrences(final String value, final String token) {
-        return value.split(Pattern.quote(token), -1).length - 1;
+        return token.isEmpty()
+                ? value.length()
+                : (value.length() - value.replace(token, "").length()) / token.length();
     }
 
     private static Map<String, Object> node(final String repo) {

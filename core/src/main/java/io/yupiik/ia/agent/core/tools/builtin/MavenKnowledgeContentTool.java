@@ -21,7 +21,9 @@ import io.yupiik.ia.agent.core.tools.EmbeddedTool;
 import io.yupiik.ia.agent.core.tools.Schemas;
 import io.yupiik.ia.agent.core.tools.ToolArgs;
 import io.yupiik.ia.agent.core.tools.ToolCategory;
+import io.yupiik.ia.agent.core.tools.ToolContext;
 import io.yupiik.ia.agent.core.tools.ToolResult;
+import java.nio.file.Path;
 import java.util.Map;
 
 /**
@@ -48,7 +50,7 @@ public class MavenKnowledgeContentTool implements EmbeddedTool {
     }
 
     @Override
-    public String description() {
+    public String description(final Path workdir) {
         return "Read the generated knowledge of a local Maven artifact on demand. With only a "
                 + "groupId:artifactId:version coordinate returns the artifact's knowledge index; pass a file short name "
                 + "(e.g. api, sources-0, javadoc-<class>, doc) to read the referenced sibling listed in that index.";
@@ -71,14 +73,14 @@ public class MavenKnowledgeContentTool implements EmbeddedTool {
     }
 
     @Override
-    public ToolResult execute(final Map<String, Object> args) {
+    public ToolResult execute(final Map<String, Object> args, final ToolContext context) {
         final var gav = ToolArgs.arg(args, "gav");
         if (gav == null) {
             return ToolResult.error("gav is required (groupId:artifactId:version)");
         }
         final var file = ToolArgs.arg(args, "file");
         try {
-            return ToolResult.ok(service.knowledge(gav, file));
+            return ToolResult.ok(service.knowledge(context.projectDir(), gav, file));
         } catch (final RuntimeException e) {
             return ToolResult.error("maven knowledge content failed: " + e.getMessage());
         }

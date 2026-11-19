@@ -74,6 +74,8 @@ import org.junit.jupiter.api.io.TempDir;
 @ExtendWith(TestJsonMapper.class)
 @Timeout(30)
 class CompactionGateTest {
+    @TempDir
+    private static Path testWorkdir;
 
     private static final int TRIGGER = 5_000;
     private static final int USABLE = 128_000;
@@ -472,13 +474,13 @@ class CompactionGateTest {
                 client,
                 new ToolRegistry(null) {
                     @Override
-                    public List<Tool> toWireTools() {
+                    public List<Tool> toWireTools(final Path workdir) {
                         return List.of();
                     }
                 },
                 new ToolExecutionService() {},
                 config,
-                new PermissionService(config),
+                new PermissionService(config, (config).resolveWorkingDir()),
                 usage,
                 null,
                 manager,
@@ -487,7 +489,7 @@ class CompactionGateTest {
                     @Override
                     public void append(final String id, final SessionEntry entry) {}
                 },
-                new SystemPromptBuilder() {
+                new SystemPromptBuilder(testWorkdir) {
                     @Override
                     public String build(final String prompt, final AgentConfiguration agent) {
                         return "system prompt";
@@ -499,7 +501,7 @@ class CompactionGateTest {
                 mapper,
                 new StructuralCodeGraph() {
                     @Override
-                    public void ensureReadyAsync() {}
+                    public void ensureReadyAsync(final Path root) {}
                 },
                 providers,
                 null,
@@ -516,7 +518,8 @@ class CompactionGateTest {
                 null,
                 null,
                 null,
-                null);
+                null,
+                (config).resolveWorkingDir());
         // the gate's per-pass backoff is a real Thread.sleep (capped at 5s), which would stall the
         // suite for ~9s across these cases; the tests assert the gate's cadence/outcome through the
         // recovery-call counts and escalation events, never the wall-clock delay, so a no-op sleeper

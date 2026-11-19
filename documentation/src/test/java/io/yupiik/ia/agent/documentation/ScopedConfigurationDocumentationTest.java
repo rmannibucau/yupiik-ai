@@ -40,6 +40,10 @@ import org.w3c.dom.Node;
 import org.w3c.dom.NodeList;
 
 class ScopedConfigurationDocumentationTest {
+    private static final Pattern ENV_SEPARATOR = Pattern.compile("[^A-Za-z0-9]");
+    private static final Pattern CONFIGURATION_FILE = Pattern.compile("configuration-.+\\.adoc");
+    private static final Pattern INCLUDE =
+            Pattern.compile("(?m)^include::(content/_partials/generated/configuration-[^\\[\\r\\n]+\\.adoc)\\[");
     private static final Pattern ENTRY = Pattern.compile("(?m)^`([^`\\r\\n]+)` \\(env: `([^`\\r\\n]+)`\\)::$");
     private static final List<String> FULL_MODULES = List.of("core", "tui", "web", "github-bot");
     private final Path base = Path.of("").toAbsolutePath().normalize();
@@ -90,8 +94,9 @@ class ScopedConfigurationDocumentationTest {
                 final var key = key(entry);
                 assertFalse(key.isBlank(), label);
                 assertTrue(matches(key, prefixes), "Out-of-scope key: " + key);
-                final var env = key.replace("$index", "INDEX")
-                        .replaceAll("[^A-Za-z0-9]", "_")
+                final var env = ENV_SEPARATOR
+                        .matcher(key.replace("$index", "INDEX"))
+                        .replaceAll("_")
                         .toUpperCase(Locale.ROOT);
                 assertTrue(
                         entry.startsWith('`' + key + "` (env: `" + env + "`)::\n"), "Missing environment name: " + key);
@@ -114,19 +119,21 @@ class ScopedConfigurationDocumentationTest {
                         Path.of(action.get("output")).toAbsolutePath().normalize();
                 assertTrue(occupied.add(output), "Output collision (including implicit references): " + output);
                 assertEquals(generated, output.getParent(), output.toString());
-                assertTrue(output.getFileName().toString().matches("configuration-.+\\.adoc"), output.toString());
+                assertTrue(
+                        CONFIGURATION_FILE
+                                .matcher(output.getFileName().toString())
+                                .matches(),
+                        output.toString());
                 outputs.add(output);
             }
         }
         assertFalse(outputs.isEmpty());
         final var includes = new HashSet<Path>();
-        final var include =
-                Pattern.compile("(?m)^include::(content/_partials/generated/configuration-[^\\[\\r\\n]+\\.adoc)\\[");
         try (final var pages = Files.walk(source.resolve("content"))) {
             for (final var page : pages.filter(it -> it.toString().endsWith(".adoc"))
                     .filter(it -> !it.startsWith(generated))
                     .toList()) {
-                include.matcher(Files.readString(page))
+                INCLUDE.matcher(Files.readString(page))
                         .results()
                         .map(it -> source.resolve(it.group(1)).normalize())
                         .forEach(includes::add);

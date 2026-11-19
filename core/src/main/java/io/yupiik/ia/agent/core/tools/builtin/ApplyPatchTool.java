@@ -21,14 +21,17 @@ import static java.nio.charset.StandardCharsets.UTF_8;
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.tools.EmbeddedTool;
+import io.yupiik.ia.agent.core.tools.FileMutation;
 import io.yupiik.ia.agent.core.tools.Schemas;
 import io.yupiik.ia.agent.core.tools.ToolCategory;
 import io.yupiik.ia.agent.core.tools.ToolContainment;
 import io.yupiik.ia.agent.core.tools.ToolContext;
 import io.yupiik.ia.agent.core.tools.ToolResult;
 import java.io.IOException;
+import java.nio.file.FileAlreadyExistsException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -60,6 +63,8 @@ import java.util.regex.Pattern;
  */
 @ApplicationScoped
 public class ApplyPatchTool implements EmbeddedTool {
+    private static final Pattern HEREDOC =
+            Pattern.compile("^(?:cat\\s+)?<<['\"]?(\\w+)['\"]?\\s*\\n([\\s\\S]*?)\\n\\1\\s*$");
     private static final Pattern HUNK_COORDINATES = Pattern.compile("^[0-9\\s,+\\-]+$");
 
     private static final String DEV_NULL = "/dev/null";
@@ -93,7 +98,7 @@ public class ApplyPatchTool implements EmbeddedTool {
     }
 
     @Override
-    public String description() {
+    public String description(final Path workdir) {
         return "Apply a patch to the project files. Two dialects are accepted. "
                 + "(1) Unified diff: every patch opens with a `--- a/<file>` line, then a `+++ b/<file>` line, "
                 + "then one or more `@@ -old,count +new,count @@` hunk blocks "
@@ -119,11 +124,6 @@ public class ApplyPatchTool implements EmbeddedTool {
     }
 
     @Override
-    public ToolResult execute(final Map<String, Object> args) {
-        return execute(args, ToolContext.empty());
-    }
-
-    @Override
     public ToolResult execute(final Map<String, Object> args, final ToolContext context) {
         final var patch = arg(args, "patch");
         if (patch == null || patch.isBlank()) {
@@ -132,34 +132,36 @@ public class ApplyPatchTool implements EmbeddedTool {
         // honour a per-session working directory when the running session set one; the process
         // default applies otherwise. This is how a session on project B applies patches to B, not
         // to the directory the web/TUI process was launched from.
-        final var base = context != null && context.projectDir() != null
-                ? context.projectDir()
-                : configuration.resolveProjectDir();
+        final var base = context.projectDir();
+        final var capture = new FileMutationCapture();
         try {
             final List<Change> changes = parse(patch);
             // Phase 1: validate and compute every change without touching the disk, so a failure
             // anywhere (context mismatch, missing file, escaping path) aborts the whole patch.
             final var ops = new ArrayList<PendingOp>();
             for (final var change : changes) {
-                ops.add(compute(base, change));
+                ops.add(compute(base, change, capture));
             }
             final var applied = new ArrayList<String>();
             final var created = new ArrayList<String>();
             final var deleted = new ArrayList<String>();
             // Phase 2: apply every validated change.
             for (final var op : ops) {
-                op.apply(applied, created, deleted);
+                op.apply(applied, created, deleted, capture);
             }
             final var sb = new StringBuilder();
             appendSummary(sb, "Applied", applied);
             appendSummary(sb, "Created", created);
             appendSummary(sb, "Deleted", deleted);
-            return ToolResult.ok(
-                    sb.isEmpty() ? "Patch applied successfully." : sb.toString().strip());
+            return new ToolResult(
+                    ToolResult.Status.OK,
+                    sb.isEmpty() ? "Patch applied successfully." : sb.toString().strip(),
+                    capture.mutations());
         } catch (final PatchException e) {
-            return ToolResult.error(e.getMessage());
+            return new ToolResult(ToolResult.Status.ERROR, e.getMessage(), capture.mutations());
         } catch (final Exception e) {
-            return ToolResult.error("Cannot apply patch: " + e.getMessage());
+            return new ToolResult(
+                    ToolResult.Status.ERROR, "Cannot apply patch: " + e.getMessage(), capture.mutations());
         }
     }
 
@@ -187,8 +189,7 @@ public class ApplyPatchTool implements EmbeddedTool {
 
     /** Strips a leading {@code cat <<'EOF' ... EOF} (or bare {@code <<EOF ... EOF}) heredoc wrapper. */
     private static String stripHeredoc(final String input) {
-        final var m = Pattern.compile("^(?:cat\\s+)?<<['\"]?(\\w+)['\"]?\\s*\\n([\\s\\S]*?)\\n\\1\\s*$")
-                .matcher(input);
+        final var m = HEREDOC.matcher(input);
         return m.matches() ? m.group(2) : input;
     }
 
@@ -355,22 +356,23 @@ public class ApplyPatchTool implements EmbeddedTool {
         return candidate;
     }
 
-    private static PendingOp compute(final Path base, final Change change) throws PatchException {
+    private static PendingOp compute(final Path base, final Change change, final FileMutationCapture capture)
+            throws PatchException {
         if (change.delete) {
             return new DeleteOp(resolve(base, change.path));
         }
         final var path = resolve(base, change.path);
         if (change.create) {
             final var out = applyHunks(new ArrayList<>(), change.hunks);
-            return new WriteOp(path, new PendingContent(out, false), true);
+            return new WriteOp(path, new PendingContent(out, false), true, null);
         }
-        final TextLines current = read(resolve(base, change.path));
+        final TextLines current = read(path, capture);
         final var out = applyHunks(new ArrayList<>(current.lines), change.hunks);
         if (change.movePath != null) {
             return new MoveOp(
-                    resolve(base, change.path), resolve(base, change.movePath), new PendingContent(out, current.bom));
+                    path, resolve(base, change.movePath), new PendingContent(out, current.bom), current.before);
         }
-        return new WriteOp(path, new PendingContent(out, current.bom), false);
+        return new WriteOp(path, new PendingContent(out, current.bom), false, current.before);
     }
 
     private static List<String> applyHunks(final List<String> lines, final List<Hunk> hunks) throws PatchException {
@@ -558,7 +560,7 @@ public class ApplyPatchTool implements EmbeddedTool {
     // IO: BOM-preserving read/write and trailing-newline policy
     // ---------------------------------------------------------------------
 
-    private static TextLines read(final Path path) throws PatchException {
+    private static TextLines read(final Path path, final FileMutationCapture capture) throws PatchException {
         final byte[] bytes;
         try {
             bytes = Files.readAllBytes(path);
@@ -581,22 +583,47 @@ public class ApplyPatchTool implements EmbeddedTool {
         }
         final var lines = new ArrayList<String>(end);
         lines.addAll(Arrays.asList(parts).subList(0, end));
-        return new TextLines(lines, bom);
+        return new TextLines(lines, bom, capture.before(path, bytes));
     }
 
     private interface PendingOp {
-        void apply(final List<String> applied, final List<String> created, final List<String> deleted);
+        void apply(
+                final List<String> applied,
+                final List<String> created,
+                final List<String> deleted,
+                final FileMutationCapture capture);
     }
 
-    private record WriteOp(Path path, PendingContent content, boolean create) implements PendingOp {
-
+    private record WriteOp(Path path, PendingContent content, boolean create, FileMutationCapture.Before before)
+            implements PendingOp {
         @Override
-        public void apply(final List<String> applied, final List<String> created, final List<String> deleted) {
+        public void apply(
+                final List<String> applied,
+                final List<String> created,
+                final List<String> deleted,
+                final FileMutationCapture capture) {
             try {
                 if (path.getParent() != null) {
                     Files.createDirectories(path.getParent());
                 }
-                Files.write(path, toBytes(content));
+                final var bytes = toBytes(content);
+                var newFile = false;
+                if (create) {
+                    try {
+                        Files.write(path, bytes, StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE);
+                        newFile = true;
+                    } catch (final FileAlreadyExistsException existing) {
+                        Files.write(path, bytes);
+                    }
+                } else {
+                    Files.write(path, bytes);
+                }
+                final var after = capture.text(bytes);
+                if (newFile) {
+                    capture.completed(path, FileMutation.Kind.CREATE, null, after);
+                } else if (!capture.unchanged(path, before, after)) {
+                    capture.changed(path, FileMutation.Kind.UPDATE, before, after);
+                }
             } catch (final IOException e) {
                 throw new PatchException("Cannot write file '" + path + "': " + e.getMessage());
             }
@@ -609,11 +636,16 @@ public class ApplyPatchTool implements EmbeddedTool {
     }
 
     private record DeleteOp(Path path) implements PendingOp {
-
         @Override
-        public void apply(final List<String> applied, final List<String> created, final List<String> deleted) {
+        public void apply(
+                final List<String> applied,
+                final List<String> created,
+                final List<String> deleted,
+                final FileMutationCapture capture) {
             try {
                 if (Files.deleteIfExists(path)) {
+                    // This operation never read the file: deletion permission is not an extra read grant.
+                    capture.completed(path, FileMutation.Kind.DELETE, null, null);
                     deleted.add(path.toString());
                 }
             } catch (final IOException e) {
@@ -622,16 +654,35 @@ public class ApplyPatchTool implements EmbeddedTool {
         }
     }
 
-    private record MoveOp(Path source, Path target, PendingContent content) implements PendingOp {
-
+    private record MoveOp(Path source, Path target, PendingContent content, FileMutationCapture.Before before)
+            implements PendingOp {
         @Override
-        public void apply(final List<String> applied, final List<String> created, final List<String> deleted) {
+        public void apply(
+                final List<String> applied,
+                final List<String> created,
+                final List<String> deleted,
+                final FileMutationCapture capture) {
             try {
                 if (target.getParent() != null) {
                     Files.createDirectories(target.getParent());
                 }
-                Files.write(target, toBytes(content));
-                Files.deleteIfExists(source);
+                final var bytes = toBytes(content);
+                var newFile = false;
+                try {
+                    Files.write(target, bytes, StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE);
+                    newFile = true;
+                } catch (final FileAlreadyExistsException existing) {
+                    Files.write(target, bytes);
+                }
+                // Record the target before attempting deletion: a failed move can still write its target.
+                capture.completed(
+                        target,
+                        newFile ? FileMutation.Kind.CREATE : FileMutation.Kind.UPDATE,
+                        null,
+                        newFile ? capture.text(bytes) : null);
+                if (Files.deleteIfExists(source)) {
+                    capture.changed(source, FileMutation.Kind.DELETE, before, "");
+                }
             } catch (final IOException e) {
                 throw new PatchException("Cannot move file '" + source + "' to '" + target + "': " + e.getMessage());
             }
@@ -665,7 +716,7 @@ public class ApplyPatchTool implements EmbeddedTool {
         return out;
     }
 
-    private record TextLines(List<String> lines, boolean bom) {}
+    private record TextLines(List<String> lines, boolean bom, FileMutationCapture.Before before) {}
 
     private record PendingContent(List<String> lines, boolean bom) {}
 

@@ -29,7 +29,9 @@ import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.fusion.framework.api.scope.DefaultScoped;
 import io.yupiik.ia.agent.core.cli.PromptHandlebarsHelper;
 import io.yupiik.ia.agent.core.cli.slash.SlashGroup;
+import io.yupiik.ia.agent.core.shell.slash.SlashCommandSet;
 import io.yupiik.ia.agent.core.tools.EmbeddedTool;
+import io.yupiik.ia.agent.core.tools.ToolCategory;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.nio.file.Files;
@@ -103,6 +105,7 @@ public class CodingAgentDocumentationGenerator implements Runnable {
     }
 
     private void writeTools(final RuntimeContainer container) {
+        final var workdir = sourceBase.toAbsolutePath().normalize();
         final var tools = container
                 .lookups(
                         EmbeddedTool.class,
@@ -112,7 +115,7 @@ public class CodingAgentDocumentationGenerator implements Runnable {
                                 .toList())
                 .instance();
         final var sb = new StringBuilder();
-        for (final var category : Stream.of(io.yupiik.ia.agent.core.tools.ToolCategory.values())
+        for (final var category : Stream.of(ToolCategory.values())
                 .sorted(Comparator.comparing(Enum::name))
                 .toList()) {
             final var inCategory =
@@ -125,10 +128,8 @@ public class CodingAgentDocumentationGenerator implements Runnable {
                     .append(" tools\n\n");
             for (final var tool : inCategory) {
                 sb.append("=== `").append(tool.name()).append("`\n\n");
-                sb.append(
-                                tool.description() == null || tool.description().isBlank()
-                                        ? "No description."
-                                        : tool.description())
+                final var description = tool.description(workdir);
+                sb.append(description == null || description.isBlank() ? "No description." : description)
                         .append("\n\n");
                 if (tool.readonly()) {
                     sb.append("NOTE: Read-only tool: it never modifies the working copy.\n\n");
@@ -144,8 +145,7 @@ public class CodingAgentDocumentationGenerator implements Runnable {
 
     private void writeSlashCommands(final RuntimeContainer container) {
         try (final var providersInstance = container.lookups(
-                io.yupiik.ia.agent.core.shell.slash.SlashCommandSet.class,
-                it -> it.stream().map(Instance::instance).toList())) {
+                SlashCommandSet.class, it -> it.stream().map(Instance::instance).toList())) {
             final var providers = providersInstance.instance();
             if (providers.isEmpty()) {
                 return;

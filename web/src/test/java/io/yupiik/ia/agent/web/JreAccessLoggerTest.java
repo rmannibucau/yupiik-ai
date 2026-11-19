@@ -37,6 +37,7 @@ import java.util.logging.Handler;
 import java.util.logging.Level;
 import java.util.logging.LogRecord;
 import java.util.logging.Logger;
+import java.util.regex.Pattern;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
@@ -49,6 +50,8 @@ import org.junit.jupiter.api.Test;
  * responses and the synthesized 404 lines for unmatched requests.
  */
 class JreAccessLoggerTest {
+    private static final Pattern LOG_PREFIX =
+            Pattern.compile("^[^ ]+ - - \\[[0-9]{2}/[A-Za-z]{3}/[0-9]{4}:[0-9]{2}:[0-9]{2}:[0-9]{2} [+-][0-9]{4}\\] $");
 
     private static final String LOGGER_NAME = JreAccessLogger.class.getName();
 
@@ -175,11 +178,7 @@ class JreAccessLoggerTest {
         assertTrue(requestLineIndex > 0, () -> "missing request line: " + line);
         assertTrue(line.endsWith("\"GET /hello HTTP/1.1\" 200 2"), () -> "unexpected: " + line);
         // host is the HTTP/1.1 Host header, identd/authuser always '-', timestamp is bracketed CLF
-        assertTrue(
-                line.substring(0, requestLineIndex)
-                        .matches(
-                                "^[^ ]+ - - \\[[0-9]{2}/[A-Za-z]{3}/[0-9]{4}:[0-9]{2}:[0-9]{2}:[0-9]{2} [+-][0-9]{4}\\] $"),
-                () -> "bad prefix: " + line);
+        assertTrue(LOG_PREFIX.matcher(line.substring(0, requestLineIndex)).matches(), () -> "bad prefix: " + line);
     }
 
     @Test

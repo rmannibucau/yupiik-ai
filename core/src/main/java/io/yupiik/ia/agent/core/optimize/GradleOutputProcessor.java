@@ -24,6 +24,7 @@ import java.util.stream.Stream;
 
 @ApplicationScoped
 public class GradleOutputProcessor implements OutputProcessor {
+    private static final Pattern TASK = Pattern.compile("> Task (:[^ ]+)");
     private final LogNoiseOutputProcessor logNoise;
     private final CommandOutputPostProcessor commandOutput;
 
@@ -133,7 +134,7 @@ public class GradleOutputProcessor implements OutputProcessor {
         final var passing = new LinkedHashSet<String>();
         for (final var raw : all) {
             final var line = commandOutput.stripAnsi(raw);
-            final var m = Pattern.compile("> Task (:[^ ]+)").matcher(line);
+            final var m = TASK.matcher(line);
             if (m.find()
                     && !line.contains("FAILED")
                     && !line.contains("FROM-CACHE")

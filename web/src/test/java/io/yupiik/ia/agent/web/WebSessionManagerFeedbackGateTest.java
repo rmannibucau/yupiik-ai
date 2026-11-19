@@ -38,6 +38,7 @@ import io.yupiik.ia.agent.core.shell.ShellRegistry;
 import io.yupiik.ia.agent.core.shell.TurnRunner;
 import io.yupiik.ia.agent.core.shell.btw.BtwAnswerer;
 import io.yupiik.ia.agent.core.shell.slash.SlashRegistry;
+import io.yupiik.ia.agent.core.tools.ToolRegistry;
 import io.yupiik.ia.agent.core.wiring.PrecisionDurationMarkerProvider;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
@@ -333,7 +334,8 @@ class WebSessionManagerFeedbackGateTest {
                 final UsageTracker usage,
                 final BooleanSupplier cancelled,
                 final ApprovalGate sessionGate,
-                final ChatSettings sessionSettings) {
+                final ChatSettings sessionSettings,
+                final Path workdir) {
             return CompletableFuture.completedFuture(new BtwAnswerer.BtwAnswer("unused", false));
         }
 
@@ -346,7 +348,11 @@ class WebSessionManagerFeedbackGateTest {
                 final ApprovalGate sessionGate,
                 final ChatSettings sessionSettings,
                 final SystemPromptBuilder systemPromptBuilder,
-                final UserFeedbackService feedback) {
+                final UserFeedbackService feedback,
+                final Path workdir,
+                final ToolRegistry registry,
+                final Set<String> ceiling) {
+            assertNotNull(ceiling);
             this.feedback = feedback;
             this.approval = sessionGate;
             return new CompletableFuture<>();

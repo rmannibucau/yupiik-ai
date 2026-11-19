@@ -65,6 +65,8 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.function.BiFunction;
@@ -2745,21 +2747,53 @@ public class ChatClient implements AutoCloseable {
 
     /** The provider's model list; the effective provider is the session's when a settings override exists. */
     public ModelsResponse models(final ChatSettings settings) throws IOException, InterruptedException {
+        return LlmWire.join(modelsAsync(settings));
+    }
+
+    /** Non-blocking catalog lookup. Cancellation is forwarded to the provider's model-list stage. */
+    public CompletableFuture<ModelsResponse> modelsAsync(final ChatSettings settings) {
         final var provider = provider(settings);
         final var providerId = providerIdOf(provider);
         final var cached = cachedModelsByProvider.get(providerId);
         if (cached != null) {
-            return cached;
+            return CompletableFuture.completedFuture(cached);
         }
         final var flavor = flavorForRouting(settings);
         try {
-            final var fetched = LlmWire.toModelsResponse(
-                    LlmWire.join(dialectClient(flavor == ApiFlavor.AUTO ? ApiFlavor.COMPLETIONS : flavor, provider)
-                            .models()));
-            cachedModelsByProvider.put(providerId, fetched);
-            return fetched;
-        } catch (final DialectNotSupportedException e) {
-            return new ModelsResponse(List.of());
+            final var transport = dialectClient(flavor == ApiFlavor.AUTO ? ApiFlavor.COMPLETIONS : flavor, provider)
+                    .models()
+                    .toCompletableFuture();
+            final var result = new CompletableFuture<ModelsResponse>();
+            result.whenComplete((value, failure) -> {
+                if (result.isCancelled()) {
+                    transport.cancel(true);
+                }
+            });
+            transport.whenComplete((value, failure) -> {
+                if (result.isDone()) {
+                    return;
+                }
+                var cause = failure;
+                while (cause instanceof CompletionException && cause.getCause() != null) {
+                    cause = cause.getCause();
+                }
+                if (cause instanceof DialectNotSupportedException) {
+                    result.complete(new ModelsResponse(List.of()));
+                } else if (cause != null) {
+                    result.completeExceptionally(cause);
+                } else {
+                    try {
+                        final var fetched = LlmWire.toModelsResponse(value);
+                        cachedModelsByProvider.put(providerId, fetched);
+                        result.complete(fetched);
+                    } catch (final RuntimeException e) {
+                        result.completeExceptionally(e);
+                    }
+                }
+            });
+            return result;
+        } catch (final RuntimeException e) {
+            return CompletableFuture.failedFuture(e);
         }
     }
 

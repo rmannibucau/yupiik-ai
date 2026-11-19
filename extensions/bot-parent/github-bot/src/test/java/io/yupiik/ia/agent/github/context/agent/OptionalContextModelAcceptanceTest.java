@@ -35,6 +35,7 @@ import io.yupiik.ia.agent.core.llm.ChatCompletionRequest;
 import io.yupiik.ia.agent.core.llm.Message;
 import io.yupiik.ia.agent.core.llm.Tool;
 import io.yupiik.ia.agent.core.tools.EmbeddedTool;
+import io.yupiik.ia.agent.core.tools.ToolContext;
 import io.yupiik.ia.agent.core.wiring.HttpClientProducer;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import io.yupiik.ia.agent.github.configuration.AgentContextConfiguration;
@@ -72,6 +73,7 @@ class OptionalContextModelAcceptanceTest {
                 "Live context model acceptance requires explicit authorization");
         final var values = new HashMap<String, String>();
         values.put("yca.storageHome", home.toString());
+        values.put("yca.workingDir", home.toString());
         values.put("yca.provider.providers.length", "1");
         for (final var field : Map.of(
                         "id", "PROVIDER", "api", "API", "model", "MODEL", "baseUrl", "BASE_URL", "apiKey", "API_KEY")
@@ -90,6 +92,7 @@ class OptionalContextModelAcceptanceTest {
         final var config = new CodingAgentConfiguration$FusionConfigurationFactory(
                         key -> Optional.ofNullable(source.get(key)))
                 .get();
+        final var workdir = config.resolveWorkingDir();
         try (final var container = jsonContainer();
                 final var lookup = container.lookup(JsonMapper.class)) {
             final var json = lookup.instance();
@@ -112,7 +115,7 @@ class OptionalContextModelAcceptanceTest {
                         null,
                         false,
                         tools.stream()
-                                .map(tool -> Tool.function(tool.name(), tool.description(), tool.schema()))
+                                .map(tool -> Tool.function(tool.name(), tool.description(workdir), tool.schema()))
                                 .toList(),
                         null,
                         1024,
@@ -136,7 +139,7 @@ class OptionalContextModelAcceptanceTest {
                     } else {
                         assertEquals("summary", arguments.get("operation"));
                     }
-                    final var result = tool.execute(arguments);
+                    final var result = tool.execute(arguments, ToolContext.empty(workdir));
                     assertTrue(result.error());
                     assertEquals(
                             "Context capability unavailable.",

@@ -23,14 +23,19 @@ import io.yupiik.ia.agent.core.tools.EmbeddedTool;
 import io.yupiik.ia.agent.core.tools.ToolCategory;
 import io.yupiik.ia.agent.core.tools.ToolContext;
 import io.yupiik.ia.agent.github.configuration.AgentContextConfiguration;
+import java.nio.file.Path;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 class ContextToolsTest {
+    @TempDir
+    private static Path testWorkdir;
+
     private static final String ENDPOINT = "https://127.0.0.1:1/context/12345678-1234-1234-1234-123456789abc/rpc";
 
     @Test
@@ -45,13 +50,14 @@ class ContextToolsTest {
                 final var sources = Configuration.of(config.enabled() ? Map.of("PATH", "fixture") : Map.of());
                 for (final var tool : List.<EmbeddedTool>of(
                         new GitTool(config, json, sources), new GithubContextTool(config, json, sources))) {
-                    assertFalse(tool.usable());
+                    assertFalse(tool.usable(testWorkdir));
                     assertTrue(tool.readonly());
                     assertEquals(ToolCategory.READ, tool.category());
                     assertTrue(tool.execute(
                                     tool.name().equals("git")
                                             ? Map.of("argv", List.of("log"))
-                                            : Map.of("operation", "summary"))
+                                            : Map.of("operation", "summary"),
+                                    ToolContext.empty(testWorkdir))
                             .error());
                 }
             }
@@ -70,7 +76,7 @@ class ContextToolsTest {
                         sources.get("PATH").filter(value -> !value.isBlank()).isPresent();
                 for (final var tool : List.<EmbeddedTool>of(
                         new GitTool(config, json, sources), new GithubContextTool(config, json, sources))) {
-                    assertEquals(expected, tool.usable(), tool.name());
+                    assertEquals(expected, tool.usable(testWorkdir), tool.name());
                 }
             }
         }
@@ -86,7 +92,7 @@ class ContextToolsTest {
                 final var args = tool.name().equals("git")
                         ? Map.<String, Object>of("argv", List.of("log"))
                         : Map.<String, Object>of("operation", "summary");
-                assertTrue(tool.usable());
+                assertTrue(tool.usable(testWorkdir));
                 assertEquals(
                         "Context tool is not allowed.",
                         tool.execute(args, context(false, false, Set.of())).output());
@@ -118,13 +124,17 @@ class ContextToolsTest {
             final var args = new HashMap<String, Object>();
             args.put("argv", List.of("log"));
             args.put("repository", null);
-            assertEquals("Context capability unavailable.", git.execute(args).output());
+            assertEquals(
+                    "Context capability unavailable.",
+                    git.execute(args, ToolContext.empty(testWorkdir)).output());
             assertEquals(
                     "Invalid Git arguments.",
-                    git.execute(Map.of("argv", List.of(1))).output());
+                    git.execute(Map.of("argv", List.of(1)), ToolContext.empty(testWorkdir))
+                            .output());
             assertEquals(
                     "Invalid Git arguments.",
-                    git.execute(Map.of("argv", List.of("log"), "shell", "evil")).output());
+                    git.execute(Map.of("argv", List.of("log"), "shell", "evil"), ToolContext.empty(testWorkdir))
+                            .output());
             for (final var operation : List.of(
                     "summary",
                     "repositories",
@@ -144,26 +154,34 @@ class ContextToolsTest {
                 }
                 assertEquals(
                         "Context capability unavailable.",
-                        context.execute(input).output());
+                        context.execute(input, ToolContext.empty(testWorkdir)).output());
             }
             assertEquals(
                     "Invalid context arguments.",
-                    context.execute(Map.of("operation", "git")).output());
-            assertEquals("Invalid context arguments.", context.execute(Map.of()).output());
-            assertEquals(
-                    "Invalid context arguments.",
-                    context.execute(new HashMap<>(Map.of("page", 1))).output());
-            assertEquals(
-                    "Invalid context arguments.",
-                    context.execute(Map.of("operation", "prepare_source", "depth", 1.5))
+                    context.execute(Map.of("operation", "git"), ToolContext.empty(testWorkdir))
                             .output());
             assertEquals(
                     "Invalid context arguments.",
-                    context.execute(Map.of("operation", "prepare_source", "revision", "main"))
+                    context.execute(Map.of(), ToolContext.empty(testWorkdir)).output());
+            assertEquals(
+                    "Invalid context arguments.",
+                    context.execute(new HashMap<>(Map.of("page", 1)), ToolContext.empty(testWorkdir))
                             .output());
             assertEquals(
                     "Invalid context arguments.",
-                    context.execute(Map.of("operation", "summary", "url", "https://example.org"))
+                    context.execute(Map.of("operation", "prepare_source", "depth", 1.5), ToolContext.empty(testWorkdir))
+                            .output());
+            assertEquals(
+                    "Invalid context arguments.",
+                    context.execute(
+                                    Map.of("operation", "prepare_source", "revision", "main"),
+                                    ToolContext.empty(testWorkdir))
+                            .output());
+            assertEquals(
+                    "Invalid context arguments.",
+                    context.execute(
+                                    Map.of("operation", "summary", "url", "https://example.org"),
+                                    ToolContext.empty(testWorkdir))
                             .output());
         }
     }
@@ -183,9 +201,10 @@ class ContextToolsTest {
                 () -> turnCancelled,
                 null,
                 () -> callCancelled,
-                null,
+                testWorkdir,
                 -1,
                 allowed,
+                null,
                 null);
     }
 }

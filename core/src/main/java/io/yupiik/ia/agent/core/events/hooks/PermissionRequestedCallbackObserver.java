@@ -19,6 +19,7 @@ import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.fusion.framework.build.api.event.OnEvent;
 import io.yupiik.ia.agent.core.events.HookResponse;
 import io.yupiik.ia.agent.core.events.PermissionRequestedEvent;
+import java.nio.file.Path;
 
 /** Runs the {@code yca.hooks.PermissionRequested} callbacks and denies the request when any forbids it. */
 @ApplicationScoped
@@ -33,7 +34,8 @@ public class PermissionRequestedCallbackObserver {
         if (event.result().forbidden()) {
             return;
         }
-        final var responses = runner.run(event.id(), event.payload(), 0);
+        final var responses = runner.run(
+                event.id(), event.payload(), 0, Path.of(event.eventContext().cwd()));
         for (final var response : responses) {
             if (response.decision() == HookResponse.HookResponseDecision.forbid) {
                 event.result().forbid(response.reason() == null ? "forbidden by hook" : response.reason());

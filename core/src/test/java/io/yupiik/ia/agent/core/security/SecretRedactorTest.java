@@ -20,8 +20,12 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
+import io.yupiik.ia.agent.core.configuration.CodingAgentConfigurations;
 import io.yupiik.ia.agent.core.configuration.SecretRedactionMode;
+import io.yupiik.ia.agent.core.configuration.TestConfigs;
 import java.util.List;
+import java.util.Map;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -34,6 +38,27 @@ class SecretRedactorTest {
     private static final String GITHUB = "github_pat_abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQRSTUVW";
     private static final String OPENAI = "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJK";
     private static final String AWS = "AKIAIOSFODNN7EXAMPLE";
+
+    @Test
+    void configuredPatternsKeepFindAnchorsLimitsExclusionsAndFreshMatchers() {
+        final var registry = new SecretRegistry(
+                TestConfigs.codingAgent(Map.of(
+                        "yca.secrets.patterns", "[,(?m)^YCA\\$[0-9]{4}$",
+                        "yca.secrets.exclude", "YCA\\$0000")),
+                List.of(),
+                new SecretVault(),
+                List.of());
+        final var redactor = new SecretRedactor(registry, new SecretSessionModes());
+        final var text = "unchanged\nYCA$1234\nYCA$0000\nYCA$12345\n";
+        final var redacted = redactor.redact(text, "s");
+        assertFalse(redacted.contains("\nYCA$1234\n"), redacted);
+        assertTrue(redacted.startsWith("unchanged\n"), redacted);
+        assertTrue(redacted.endsWith("\nYCA$0000\nYCA$12345\n"), redacted);
+        assertEquals(text, redactor.restore(redacted, "s"));
+        assertEquals(redacted, redactor.redact(text, "s"));
+        assertEquals("no match", redactor.redact("no match", "s"));
+        assertEquals(text, redactor.restore(redactor.redact(text, "other"), "other"));
+    }
 
     @Test
     void wellKnownPrefixes() {
@@ -186,9 +211,7 @@ class SecretRedactorTest {
         return registry;
     }
 
-    private static io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration configWithNoSecrets() {
-        return io.yupiik.ia.agent.core.configuration.CodingAgentConfigurations.builder()
-                .baseUrl("http://localhost:0")
-                .build();
+    private static CodingAgentConfiguration configWithNoSecrets() {
+        return CodingAgentConfigurations.builder().baseUrl("http://localhost:0").build();
     }
 }

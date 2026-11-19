@@ -20,17 +20,22 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.fusion.framework.api.event.Emitter;
+import io.yupiik.ia.agent.core.agent.AgentEvent.ToolTimingEvent;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
+import io.yupiik.ia.agent.core.configuration.TestConfigs;
+import io.yupiik.ia.agent.core.context.TokenEstimator;
+import io.yupiik.ia.agent.core.context.UsageTracker;
+import io.yupiik.ia.agent.core.optimize.AfterToolExecutionEvent;
+import io.yupiik.ia.agent.core.optimize.BeforeToolExecutionEvent;
 import io.yupiik.ia.agent.core.optimize.GenericOutputProcessor;
 import io.yupiik.ia.agent.core.optimize.LogNoiseOutputProcessor;
 import io.yupiik.ia.agent.core.optimize.MavenOutputProcessor;
+import io.yupiik.ia.agent.core.optimize.OutputProcessor;
 import io.yupiik.ia.agent.core.runtime.Cancellations;
 import io.yupiik.ia.agent.core.runtime.StatusReporter;
 import io.yupiik.ia.agent.core.tools.builtin.EditFileTool;
 import java.nio.file.Path;
 import java.time.Clock;
-import io.yupiik.ia.agent.core.context.TokenEstimator;
-import io.yupiik.ia.agent.core.context.UsageTracker;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -39,13 +44,17 @@ import org.junit.jupiter.api.io.TempDir;
 
 class ToolExecutionServiceTest {
     @TempDir
+    private static Path testWorkdir;
+
+    @TempDir
     Path storageHome;
 
     /** The status reporter is per-session: it now travels in the tool context, not the service. */
     private ToolContext context(final List<String> reports) {
         final var reporter = new StatusReporter();
         reporter.setSink(reports::add);
-        return new ToolContext("s1", null, null, null, null, null, reporter, null, null, Cancellations.NEVER);
+        return new ToolContext(
+                "s1", null, null, null, null, null, reporter, null, null, Cancellations.NEVER, null, null, testWorkdir);
     }
 
     private ToolExecutionService service() {
@@ -62,7 +71,7 @@ class ToolExecutionServiceTest {
     }
 
     private CodingAgentConfiguration config(final String genericMaxLines) {
-        return io.yupiik.ia.agent.core.configuration.TestConfigs.codingAgent(
+        return TestConfigs.codingAgent(
                 Map.of("yca.storageHome", storageHome.toString(), "yca.optimize.genericMaxLines", genericMaxLines));
     }
 
@@ -74,7 +83,7 @@ class ToolExecutionServiceTest {
             }
 
             @Override
-            public String description() {
+            public String description(final Path workdir) {
                 return "fake " + name;
             }
 
@@ -89,7 +98,7 @@ class ToolExecutionServiceTest {
             }
 
             @Override
-            public ToolResult execute(final Map<String, Object> args) {
+            public ToolResult execute(final Map<String, Object> args, final ToolContext context) {
                 return ToolResult.ok(output);
             }
         };
@@ -136,18 +145,19 @@ class ToolExecutionServiceTest {
         final var output = "value={key:[1,2,3]};\n".repeat(100);
         final var usage = new UsageTracker(null, null, null, Clock.systemUTC());
         final var context = new ToolContext(
-                "s1", null, null, null, null, null, null, usage, null, Cancellations.NEVER);
+                "s1", null, null, null, null, null, null, usage, null, Cancellations.NEVER, null, null, testWorkdir);
         final var result = service().execute(tool("bash", output), Map.of("command", "cat big.txt"), context);
         assertEquals(1, usage.optimizedOutputs());
         assertEquals(output.length() - result.output().length(), usage.optimizedCharsSaved());
         assertEquals(
-                TokenEstimator.estimate(output) - TokenEstimator.estimate(result.output()), usage.optimizedTokensSaved());
+                TokenEstimator.estimate(output) - TokenEstimator.estimate(result.output()),
+                usage.optimizedTokensSaved());
         assertTrue(usage.optimizedTokensSaved() > usage.optimizedCharsSaved() / 4);
     }
 
     @Test
     void perToolDisabledProcessorBehavesAsIdentity() {
-        final var configuration = io.yupiik.ia.agent.core.configuration.TestConfigs.codingAgent(
+        final var configuration = TestConfigs.codingAgent(
                 Map.of("yca.storageHome", storageHome.toString(), "yca.optimize.toolOutputs.generic.enabled", "false"));
         final var service = new ToolExecutionService(
                 configuration,
@@ -167,7 +177,7 @@ class ToolExecutionServiceTest {
 
     @Test
     void globalDisabledStillWins() {
-        final var configuration = io.yupiik.ia.agent.core.configuration.TestConfigs.codingAgent(Map.of(
+        final var configuration = TestConfigs.codingAgent(Map.of(
                 "yca.storageHome", storageHome.toString(),
                 "yca.optimize.toolOutputs.generic.enabled", "true",
                 "yca.optimize.disabled", "generic"));
@@ -190,8 +200,7 @@ class ToolExecutionServiceTest {
     @Test
     void commandWrapperIsUnwrappedBeforeProcessorDispatch() {
         // a `sudo timeout 120 mvn ...` command must engage the maven processor (head unwrapped to `mvn`)
-        final var configuration = io.yupiik.ia.agent.core.configuration.TestConfigs.codingAgent(
-                Map.of("yca.storageHome", storageHome.toString()));
+        final var configuration = TestConfigs.codingAgent(Map.of("yca.storageHome", storageHome.toString()));
         final var service = serviceWith(configuration, List.of(new MavenOutputProcessor()));
         final var output = String.join(
                 "\n",
@@ -214,7 +223,7 @@ class ToolExecutionServiceTest {
     void commandWrapperUnwrappingCanBeDisabled() {
         // without the wrapper stripping the head stays `sudo` and maven's supports() is false, so the
         // output is left unoptimized (no processable command matches, no reduction is reported)
-        final var configuration = io.yupiik.ia.agent.core.configuration.TestConfigs.codingAgent(
+        final var configuration = TestConfigs.codingAgent(
                 Map.of("yca.storageHome", storageHome.toString(), "yca.optimize.skipCommandWrapper", "false"));
         final var service = serviceWith(configuration, List.of(new MavenOutputProcessor()));
         final var output = String.join(
@@ -329,8 +338,7 @@ class ToolExecutionServiceTest {
     }
 
     private ToolExecutionService serviceWith(
-            final CodingAgentConfiguration configuration,
-            final List<io.yupiik.ia.agent.core.optimize.OutputProcessor> processors) {
+            final CodingAgentConfiguration configuration, final List<OutputProcessor> processors) {
         return new ToolExecutionService(
                 configuration,
                 new Emitter() {
@@ -371,7 +379,7 @@ class ToolExecutionServiceTest {
                             }
                         },
                         List.of(new GenericOutputProcessor(configuration)))
-                .execute(new EditFileTool(configuration), Map.of("oldString", "x", "newString", "y"), context(reports));
+                .execute(new EditFileTool(), Map.of("oldString", "x", "newString", "y"), context(reports));
         assertFalse(result.success(), result.output());
         assertTrue(result.output().contains("path is required"), result.output());
         assertFalse(result.output().contains("NullPointerException"), result.output());
@@ -392,9 +400,9 @@ class ToolExecutionServiceTest {
                 new Emitter() {
                     @Override
                     public <T> void emit(final T event) {
-                        if (event instanceof io.yupiik.ia.agent.core.optimize.BeforeToolExecutionEvent
-                                || event instanceof io.yupiik.ia.agent.core.optimize.AfterToolExecutionEvent
-                                || event instanceof io.yupiik.ia.agent.core.agent.AgentEvent.ToolTimingEvent) {
+                        if (event instanceof BeforeToolExecutionEvent
+                                || event instanceof AfterToolExecutionEvent
+                                || event instanceof ToolTimingEvent) {
                             throw new IllegalStateException(
                                     "observer boom: " + event.getClass().getSimpleName());
                         }

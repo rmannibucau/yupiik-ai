@@ -26,11 +26,13 @@ import io.yupiik.ia.agent.test.TestJsonMapper;
 import java.io.ByteArrayOutputStream;
 import java.io.PrintStream;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Path;
 import java.util.function.Consumer;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.api.parallel.ResourceLock;
 import org.junit.jupiter.api.parallel.Resources;
 
@@ -38,6 +40,9 @@ import org.junit.jupiter.api.parallel.Resources;
 @ResourceLock(Resources.SYSTEM_ERR)
 @ExtendWith(TestJsonMapper.class)
 class CliCommandTest {
+    @TempDir
+    private static Path eventWorkdir;
+
     private PrintStream originalOut;
     private PrintStream originalErr;
     private final ByteArrayOutputStream err = new ByteArrayOutputStream();
@@ -60,8 +65,8 @@ class CliCommandTest {
     void verbosePrintsFullOutputForNonStreamedTool(final JsonMapper mapper) throws Exception {
         final var dispatcher = dispatcher("verbose", ToolOutputVisibility.SHOWN, mapper);
 
-        dispatcher.accept(new AgentEvent.ToolStarted("read", "{}", "s1"));
-        dispatcher.accept(new AgentEvent.ToolFinished("read", "line1\nline2", true, "s1"));
+        dispatcher.accept(new AgentEvent.ToolStarted("read", "{}", "s1", eventWorkdir));
+        dispatcher.accept(new AgentEvent.ToolFinished("read", "line1\nline2", true, "s1", eventWorkdir));
 
         final var stderr = err.toString(StandardCharsets.UTF_8);
         assertTrue(stderr.contains("line1"), "verbose should show the full non-streamed output:\n" + stderr);
@@ -72,9 +77,9 @@ class CliCommandTest {
     void verboseDoesNotReprintStreamedToolOutput(final JsonMapper mapper) throws Exception {
         final var dispatcher = dispatcher("verbose", ToolOutputVisibility.SHOWN, mapper);
 
-        dispatcher.accept(new AgentEvent.ToolStarted("bash", "{}", "s1"));
-        dispatcher.accept(new AgentEvent.ToolStream("bash", "streamed line", "s1"));
-        dispatcher.accept(new AgentEvent.ToolFinished("bash", "streamed line", true, "s1"));
+        dispatcher.accept(new AgentEvent.ToolStarted("bash", "{}", "s1", eventWorkdir));
+        dispatcher.accept(new AgentEvent.ToolStream("bash", "streamed line", "s1", eventWorkdir));
+        dispatcher.accept(new AgentEvent.ToolFinished("bash", "streamed line", true, "s1", eventWorkdir));
 
         final var stderr = err.toString(StandardCharsets.UTF_8);
         // streamed output must be printed live but not re-printed from ToolFinished.output

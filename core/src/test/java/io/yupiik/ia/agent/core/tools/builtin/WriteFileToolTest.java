@@ -32,7 +32,8 @@ class WriteFileToolTest {
     @Test
     void writesAbsolutePathAsGiven(@TempDir final Path root) throws Exception {
         final var target = root.resolve("abs.txt");
-        final var result = new WriteFileTool().execute(Map.of("path", target.toString(), "content", "hello"));
+        final var result = new WriteFileTool()
+                .execute(Map.of("path", target.toString(), "content", "hello"), ToolContext.empty(root));
         assertTrue(result.success(), result.output());
         assertEquals("hello", Files.readString(target));
     }
@@ -47,14 +48,9 @@ class WriteFileToolTest {
     }
 
     @Test
-    void crossRootWriteSurfacesTargetNotice(@TempDir final Path processDir, @TempDir final Path sessionDir)
-            throws Exception {
-        // a relative write resolved against a session root that differs from the configured default
-        // must surface where it actually landed, instead of silently diverging from the launch dir
-        final var tool = new WriteFileTool(io.yupiik.ia.agent.core.configuration.TestConfigs.codingAgent(Map.of(
-                "yca.storageHome", processDir.toString(),
-                "yca.projectDir", processDir.toString(),
-                "yca.workingDir", processDir.toString())));
+    void relativeWriteSurfacesTargetNotice(@TempDir final Path sessionDir) throws Exception {
+        // A relative write surfaces its actual session target without using process-global configuration.
+        final var tool = new WriteFileTool();
         final var result =
                 tool.execute(Map.of("path", "analyzis/out.txt", "content", "payload"), ToolContext.empty(sessionDir));
         assertTrue(result.success(), result.output());
@@ -113,16 +109,17 @@ class WriteFileToolTest {
     }
 
     @Test
-    void missingPathReturnsFriendlyErrorInsteadOfNpe() {
+    void missingPathReturnsFriendlyErrorInsteadOfNpe(@TempDir final Path root) {
         // a null/missing "path" must surface a clear "path is required", never Path.of(null) -> NPE
-        final var write = new WriteFileTool().execute(Map.of("content", "x"));
+        final var write = new WriteFileTool().execute(Map.of("content", "x"), ToolContext.empty(root));
         assertFalse(write.success(), write.output());
         assertEquals("path is required", write.output());
     }
 
     @Test
-    void missingPathForEditReturnsFriendlyErrorInsteadOfNpe() {
-        final var edit = new EditFileTool().execute(Map.of("oldString", "x", "newString", "y"));
+    void missingPathForEditReturnsFriendlyErrorInsteadOfNpe(@TempDir final Path root) {
+        final var edit =
+                new EditFileTool().execute(Map.of("oldString", "x", "newString", "y"), ToolContext.empty(root));
         assertFalse(edit.success(), edit.output());
         assertEquals("path is required", edit.output());
     }

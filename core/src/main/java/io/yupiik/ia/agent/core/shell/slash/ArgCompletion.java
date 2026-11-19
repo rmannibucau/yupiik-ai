@@ -145,8 +145,15 @@ public interface ArgCompletion {
         if (arg == null || arg.isBlank()) {
             return "";
         }
-        final var tokens = arg.strip().split("\\s+");
-        return tokens.length == 0 ? "" : tokens[tokens.length - 1];
+        final var stripped = arg.strip();
+        for (var i = stripped.length() - 1; i >= 0; i--) {
+            final var c = stripped.charAt(i);
+            // Default regex \\s is ASCII-only, unlike Character.isWhitespace.
+            if (c == ' ' || c == '\t' || c == '\n' || c == '\u000b' || c == '\f' || c == '\r') {
+                return stripped.substring(i + 1);
+            }
+        }
+        return stripped;
     }
 
     /**

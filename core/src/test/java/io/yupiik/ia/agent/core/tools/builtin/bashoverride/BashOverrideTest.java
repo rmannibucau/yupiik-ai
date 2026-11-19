@@ -16,6 +16,7 @@
 package io.yupiik.ia.agent.core.tools.builtin.bashoverride;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.ia.agent.core.configuration.BashOverridesConfiguration;
@@ -24,6 +25,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Optional;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -32,8 +34,7 @@ class BashOverrideTest {
     private static final List<String> COMMANDS =
             List.of("cat", "ls", "head", "tail", "echo", "pwd", "cd", "sed", "wc", "grep", "find", "rg");
 
-    private static final java.util.concurrent.ExecutorService SHARED_EXECUTOR =
-            Executors.newVirtualThreadPerTaskExecutor();
+    private static final ExecutorService SHARED_EXECUTOR = Executors.newVirtualThreadPerTaskExecutor();
 
     private static BashOverride override(final int cap) {
         final var commands = List.of(
@@ -75,6 +76,28 @@ class BashOverrideTest {
         write(dir, "y.txt", "y");
         final var out = override(0).tryRewrite("ls *.txt", dir).orElse("");
         assertTrue(out.contains("x.txt\n") && out.contains("y.txt\n"), out);
+    }
+
+    @Test
+    void findReusesNamePatternAcrossRecursionButNotAcrossOperations(@TempDir final Path dir) {
+        write(dir, "root/a[1].txt", "x");
+        write(dir, "root/a1.txt", "x");
+        write(dir, "root/nested/a[1].txt", "x");
+        write(dir, "root/nested/b[1].txt", "x");
+        final var find = new JavaFind();
+        final var out = new StringBuilder();
+        assertTrue(find.run(dir, List.of("root", "-name", "a[?].txt", "-type", "f"), out));
+        final var result = out.toString();
+        assertTrue(result.contains("/root/a[1].txt\n"), result);
+        assertTrue(result.contains("/root/nested/a[1].txt\n"), result);
+        assertFalse(result.contains("/a1.txt\n"), result);
+        assertFalse(result.contains("/b[1].txt\n"), result);
+
+        out.setLength(0);
+        assertTrue(find.run(dir, List.of("root", "-name", "b[?].txt", "-maxdepth", "0"), out));
+        assertEquals("", out.toString());
+        assertTrue(find.run(dir, List.of("root", "-name", "b[?].txt"), out));
+        assertTrue(out.toString().endsWith("/root/nested/b[1].txt\n"), out.toString());
     }
 
     @Test

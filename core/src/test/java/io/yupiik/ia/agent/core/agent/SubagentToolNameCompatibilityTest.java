@@ -35,6 +35,7 @@ import io.yupiik.ia.agent.core.snapshot.SnapshotStore;
 import io.yupiik.ia.agent.core.todo.InMemoryTodoStore;
 import io.yupiik.ia.agent.core.tools.EmbeddedTool;
 import io.yupiik.ia.agent.core.tools.ToolCategory;
+import io.yupiik.ia.agent.core.tools.ToolContext;
 import io.yupiik.ia.agent.core.tools.ToolRegistry;
 import io.yupiik.ia.agent.core.tools.ToolResult;
 import io.yupiik.ia.agent.core.wiring.PrecisionDurationMarkerProvider;
@@ -60,6 +61,9 @@ import org.junit.jupiter.api.io.TempDir;
 @ExtendWith(TestJsonMapper.class)
 @Timeout(20)
 class SubagentToolNameCompatibilityTest {
+    @TempDir
+    private static Path testWorkdir;
+
     @TempDir
     Path storageHome;
 
@@ -191,7 +195,7 @@ class SubagentToolNameCompatibilityTest {
         };
         final var graph = new StructuralCodeGraph() {
             @Override
-            public void ensureReadyAsync() {}
+            public void ensureReadyAsync(final Path root) {}
         };
         final var clock = Clock.systemUTC();
         try (final var executor = Executors.newVirtualThreadPerTaskExecutor()) {
@@ -232,6 +236,7 @@ class SubagentToolNameCompatibilityTest {
                     new InMemorySessionStore(clock),
                     new SnapshotStore(configuration),
                     new InMemoryTodoStore(),
+                    ToolContext.empty(testWorkdir),
                     () -> false);
             state.awaitResult();
             return new RunOutcome(state.result(), List.copyOf(requests));
@@ -246,7 +251,7 @@ class SubagentToolNameCompatibilityTest {
             }
 
             @Override
-            public String description() {
+            public String description(final Path workdir) {
                 return "Test tool";
             }
 
@@ -261,12 +266,12 @@ class SubagentToolNameCompatibilityTest {
             }
 
             @Override
-            public boolean usable() {
+            public boolean usable(final Path workdir) {
                 return usable;
             }
 
             @Override
-            public ToolResult execute(final Map<String, Object> args) {
+            public ToolResult execute(final Map<String, Object> args, final ToolContext context) {
                 return ToolResult.ok("done");
             }
         };

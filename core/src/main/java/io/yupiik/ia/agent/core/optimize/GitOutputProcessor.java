@@ -25,6 +25,8 @@ import java.util.stream.Stream;
 
 @ApplicationScoped
 public class GitOutputProcessor implements OutputProcessor {
+    private static final Pattern PULL_SUMMARY =
+            Pattern.compile("(\\d+) files? changed, (\\d+) insertions?\\(\\+\\), (\\d+) deletions?\\(-\\)");
     private static final Pattern GIT_STASH_PREFIX = Pattern.compile("^git\\s+stash\\s*");
     private static final Pattern GIT_PREFIX = Pattern.compile("^git\\s+");
 
@@ -354,9 +356,7 @@ public class GitOutputProcessor implements OutputProcessor {
                 continue;
             }
             if ("pull".equals(sub)) {
-                final var files = Pattern.compile(
-                                "(\\d+) files? changed, (\\d+) insertions?\\(\\+\\), (\\d+) deletions?\\(-\\)")
-                        .matcher(line);
+                final var files = PULL_SUMMARY.matcher(line);
                 if (files.matches()) {
                     out.add("ok " + files.group(1) + " files changed");
                     continue;
