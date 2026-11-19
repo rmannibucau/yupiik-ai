@@ -102,6 +102,7 @@ class ProjectWorkflowTest {
                             .sessionId();
                     sessions.put(entry.getKey(), id);
                     client.sessions.add(id);
+                    client.awaitInitialUpdates(id);
                     client.request("build-" + entry.getKey(), "session/set_mode", new SetMode(id, "build"));
                 }
                 assertNotEquals(sessions.get("A"), sessions.get("B"));
@@ -394,6 +395,38 @@ class ProjectWorkflowTest {
             assertEquals(id, message.id());
             assertNull(message.error(), messageError(message));
             return message;
+        }
+
+        private void awaitInitialUpdates(final String session) throws Exception {
+            // session/new answers before initialUpdates() runs. A set_mode response is not
+            // a barrier for that work: its queued command can finish before the initial plan.
+            boolean commands = false;
+            boolean plan = false;
+            while (!commands || !plan) {
+                final var message = read();
+                assertNull(message.id(), message.toString());
+                assertEquals("session/update", message.method(), message.toString());
+                final var params = (Map<?, ?>) message.params();
+                final var source = params.get("sessionId");
+                assertTrue(sessions.contains(source), message.toString());
+                final var update = (Map<?, ?>) params.get("update");
+                switch (String.valueOf(update.get("sessionUpdate"))) {
+                    case "config_option_update" -> delayedConfigUpdates.add(message);
+                    case "available_commands_update" -> {
+                        assertEquals(session, source, message.toString());
+                        assertFalse(commands, "Duplicate initial commands update");
+                        assertFalse(((List<?>) update.get("availableCommands")).isEmpty(), message.toString());
+                        commands = true;
+                    }
+                    case "plan" -> {
+                        assertEquals(session, source, message.toString());
+                        assertFalse(plan, "Duplicate initial plan update");
+                        assertEquals(List.of(), update.get("entries"), message.toString());
+                        plan = true;
+                    }
+                    default -> fail("Unexpected initialization update: " + message);
+                }
+            }
         }
 
         private String messageError(final Envelope message) {
