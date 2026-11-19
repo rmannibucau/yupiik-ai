@@ -320,17 +320,44 @@ class RestrictedServicesGatewayTest {
     }
 
     @Test
-    void streamsWithoutWaitingForCompletionAndCancelsOnExpiry() throws Exception {
+    void streamsWithoutWaitingForCompletion() throws Exception {
         try (final var fixture = new Fixture()) {
             fixture.stall.set(true);
             try (final var gateway = new RestrictedServicesGateway(
-                            settings(fixture, 2, 5, 1024, 1024),
+                            settings(fixture, 60, 60, 1024, 1024),
+                            Configuration.of(secrets()),
+                            new ProviderBudgetConfiguration(null, null, null));
+                    final var client = client();
+                    final AutoCloseable releaseUpstream = () -> fixture.release.countDown()) {
+                assertTimeoutPreemptively(Duration.ofSeconds(15), () -> {
+                    final var response = client.send(
+                            HttpRequest.newBuilder(uri(gateway, INFER))
+                                    .header("Authorization", "Bearer " + PROVIDER)
+                                    .header("Content-Type", "application/json")
+                                    .POST(HttpRequest.BodyPublishers.ofString("{}"))
+                                    .build(),
+                            HttpResponse.BodyHandlers.ofInputStream());
+                    try (final var body = response.body()) {
+                        assertEquals(200, response.statusCode());
+                        assertEquals('d', body.read());
+                        assertEquals(1, fixture.release.getCount(), "Upstream completion must still be blocked");
+                    }
+                });
+            }
+        }
+    }
+
+    @Test
+    void cancelsStreamingOnExpiry() throws Exception {
+        try (final var fixture = new Fixture()) {
+            fixture.stall.set(true);
+            try (final var gateway = new RestrictedServicesGateway(
+                            settings(fixture, 10, 30, 1024, 1024),
                             Configuration.of(secrets()),
                             new ProviderBudgetConfiguration(null, null, null));
                     final var client = client();
                     // Release the stalled upstream before client.close(), including on assertion failure.
                     final AutoCloseable releaseUpstream = () -> fixture.release.countDown()) {
-                final var start = System.nanoTime();
                 final var response = client.send(
                         HttpRequest.newBuilder(uri(gateway, INFER))
                                 .header("Authorization", "Bearer " + PROVIDER)
@@ -340,8 +367,8 @@ class RestrictedServicesGatewayTest {
                         HttpResponse.BodyHandlers.ofInputStream());
                 try (final var body = response.body()) {
                     assertEquals('d', body.read());
-                    assertTrue(Duration.ofNanos(System.nanoTime() - start).toSeconds() < 2);
-                    assertTimeoutPreemptively(Duration.ofSeconds(5), () -> {
+                    assertEquals(200, response.statusCode());
+                    assertTimeoutPreemptively(Duration.ofSeconds(15), () -> {
                         try {
                             body.readAllBytes();
                         } catch (final IOException cancelled) {
@@ -349,6 +376,7 @@ class RestrictedServicesGatewayTest {
                         }
                     });
                 }
+                assertEquals(1, fixture.release.getCount(), "Expiry must cancel without releasing the upstream");
                 assertThrows(
                         IOException.class,
                         () -> send(client, gateway, INFER, "Bearer " + PROVIDER, "application/json", "{}"));
@@ -826,7 +854,8 @@ class RestrictedServicesGatewayTest {
 
         private void await() {
             try {
-                release.await(10, TimeUnit.SECONDS);
+                // Only teardown releases the upstream; natural completion must not masquerade as cancellation.
+                release.await();
             } catch (final InterruptedException cancelled) {
                 Thread.currentThread().interrupt();
             }
