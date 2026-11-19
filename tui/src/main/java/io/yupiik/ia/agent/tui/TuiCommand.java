@@ -3415,31 +3415,24 @@ public class TuiCommand implements Runnable {
     }
 
     /**
-     * A lazy completion slice landed: if the input already warrants a live-completion popup
-     * but none is open (it was typed before the async candidate caches finished populating),
-     * recompute it now that the slice is cached - otherwise a user who typed "/model m" and
-     * paused would see no popup until they hit another key. Only reopen an *empty* popup so an
-     * explicit Esc dismissal or an in-progress arrow navigation is never disturbed.
+     * Recompute after a lazy completion slice lands, including when an old popup is still
+     * visible and an empty result is waiting to be applied. Queue the refresh on the render
+     * thread so it invalidates those in-flight results. Explicit dismissal still wins, and
+     * applyCompletionResult preserves the highlight when the candidate list is unchanged.
      */
     private void recomputePendingCompletion() {
         final var activeState = active();
         if (activeState == null) {
             return;
         }
-        final var line = activeState.input.getLine(activeState.input.cursorRow());
-        final var cursor = activeState.input.cursorCol();
-        if (!activeState.completionDismissed
-                && (activeState.completion == null || activeState.completion.empty())
-                && (line.startsWith("/") || tokenAt(line, cursor).startsWith("@"))) {
-            // re-check the dismissal flag on the render thread: the user may have hit
-            // Esc (or accepted a candidate) between the warm-up completing and this running,
-            // and an explicit dismissal must never be undone
-            runLater(activeState, () -> {
-                if (!activeState.completionDismissed) {
-                    liveComplete(activeState);
-                }
-            });
-        }
+        runLater(activeState, () -> {
+            final var line = activeState.input.getLine(activeState.input.cursorRow());
+            final var cursor = activeState.input.cursorCol();
+            if (!activeState.completionDismissed
+                    && (line.startsWith("/") || tokenAt(line, cursor).startsWith("@"))) {
+                liveComplete(activeState);
+            }
+        });
     }
 
     private void moveCursorWord(final UiState state, final boolean forward) {

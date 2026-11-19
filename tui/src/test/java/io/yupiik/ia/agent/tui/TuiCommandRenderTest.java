@@ -108,7 +108,6 @@ import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -2634,6 +2633,57 @@ class TuiCommandRenderTest {
                 backend.text().contains("> m01"),
                 () -> "an Esc-dismissed completion popup must not be resurrected by a late result:\n" + backend.text());
 
+        quit();
+    }
+
+    @Test
+    void completionCacheArrivalBeforeEmptyResultStillOpensPopup() throws Exception {
+        final var executor = new HoldingExecutor();
+        final var command = command(
+                testRegistry(),
+                stubAgentLoop(),
+                false,
+                newUsageTracker(),
+                new TodoStore(configuration(), formatMapper),
+                Clock.systemUTC(),
+                new SubagentRegistry(configuration(), new ProviderManager(configuration(), formatMapper)),
+                executor);
+        uiThread = new Thread(command, "tui-completion-cache-arrival-test");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("yca coding agent");
+        tuiRef.get().dispatch(new PasteEvent("/mo"));
+        tuiRef.get().dispatch(KeyEvent.ofChar('d'));
+        awaitText("> /mode");
+
+        executor.hold();
+        tuiRef.get().dispatch(new PasteEvent("el m"));
+        tuiRef.get().dispatch(KeyEvent.ofChar('0'));
+        awaitText("/model m0");
+        final var renderBlocked = new CountDownLatch(1);
+        final var releaseRender = new CountDownLatch(1);
+        tuiRef.get().runLater(() -> {
+            renderBlocked.countDown();
+            try {
+                assertTrue(releaseRender.await(TIMEOUT_MS, TimeUnit.MILLISECONDS), "render was not released");
+            } catch (final InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException(e);
+            }
+        });
+        try {
+            assertTrue(renderBlocked.await(TIMEOUT_MS, TimeUnit.MILLISECONDS), "render did not pause");
+            // Compute an empty suggestion and enqueue its application. Then populate the model
+            // cache while the old slash-command popup is still visible, before that empty result
+            // can clear it. The cache notification must not be lost against the old popup.
+            executor.runNextHeld();
+            executor.runNextHeld();
+        } finally {
+            releaseRender.countDown();
+            executor.releaseHeld();
+        }
+        awaitText("> m01");
         quit();
     }
 
@@ -7098,7 +7148,7 @@ class TuiCommandRenderTest {
     private static final class HoldingExecutor extends AbstractExecutorService {
         private final ExecutorService delegate = Executors.newVirtualThreadPerTaskExecutor();
         private final AtomicBoolean holding = new AtomicBoolean(false);
-        private final List<Runnable> held = new CopyOnWriteArrayList<>();
+        private final BlockingQueue<Runnable> held = new LinkedBlockingQueue<>();
 
         @Override
         public void execute(final Runnable command) {
@@ -7112,6 +7162,13 @@ class TuiCommandRenderTest {
         /** Routes subsequent submissions to the held queue instead of running them. */
         void hold() {
             holding.set(true);
+        }
+
+        /** Runs one task without releasing any work it submits in turn. */
+        void runNextHeld() throws InterruptedException {
+            final var task = held.poll(TIMEOUT_MS, TimeUnit.MILLISECONDS);
+            assertNotNull(task, "no held task arrived");
+            task.run();
         }
 
         /**
