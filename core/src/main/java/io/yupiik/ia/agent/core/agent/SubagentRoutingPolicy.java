@@ -61,7 +61,8 @@ public final class SubagentRoutingPolicy {
             }
             final var model =
                     settings.model() == null || settings.model().isBlank() ? source.model() : settings.model();
-            reference = "$" + source.id() + "/" + (model == null ? "" : model);
+            final var id = source.id() == null || source.id().isBlank() ? "default" : source.id();
+            reference = "$" + id + "/" + (model == null ? "" : model);
         }
         parent = resolve(reference);
         global = configuration.subagents();
@@ -86,17 +87,24 @@ public final class SubagentRoutingPolicy {
             return resolve(explicit.strip());
         }
         if (profileModel != null) {
-            return resolve(profileModel);
+            return sameProvider(resolve(profileModel));
         }
-        if (overridesEnabled()) {
-            final var defaultModel = provider != null && provider.defaultModel() != null
-                    ? provider.defaultModel()
-                    : global == null ? null : global.defaultModel();
-            if (defaultModel != null && !defaultModel.isBlank()) {
-                return resolve(defaultModel.strip());
-            }
+        return defaultModel();
+    }
+
+    public EffectiveAgentModel defaultModel() {
+        final var selected = provider != null && provider.defaultModel() != null
+                ? provider.defaultModel()
+                : global == null ? null : global.defaultModel();
+        return selected == null || selected.isBlank() ? parent : sameProvider(resolve(selected.strip()));
+    }
+
+    private EffectiveAgentModel sameProvider(final EffectiveAgentModel effective) {
+        if (!parent.settings().providerId().equals(effective.settings().providerId())) {
+            throw new IllegalArgumentException(
+                    "Implicit cross-provider sub-agent routing is disabled; explicitly select $provider/model.");
         }
-        return parent;
+        return effective;
     }
 
     public EffectiveAgentModel resolve(final String reference) {
@@ -113,7 +121,11 @@ public final class SubagentRoutingPolicy {
                 throw new IllegalArgumentException("Unknown or incomplete sub-agent model route.");
             }
         }
-        final var effective = resolver.resolve(context.settings(), null, reference, null);
+        // Bare sub-agent names never search another provider's catalog.
+        final var pinned = reference.startsWith("$")
+                ? reference
+                : "$" + parent.settings().providerId() + "/" + reference;
+        final var effective = resolver.resolve(context.settings(), null, pinned, null);
         if (effective.resolved() == null
                 || effective.resolved().provider() == null
                 || effective.reference() == null
@@ -123,10 +135,11 @@ public final class SubagentRoutingPolicy {
         // Keep both concrete provider settings and the explicit wire route, including a provider
         // literally named "default", rather than the UI setter's reset-to-process-default sentinel.
         final var settings = effective.settings();
+        final var id = effective.resolved().provider().id();
         return new EffectiveAgentModel(
                 effective.resolved(),
                 new ChatSettings(
-                        effective.resolved().provider().id(),
+                        id == null || id.isBlank() ? "default" : id,
                         effective.routedReference(),
                         settings.variant(),
                         settings.sampling()),
@@ -139,18 +152,37 @@ public final class SubagentRoutingPolicy {
         final var route = effective.routedReference();
         final var tools =
                 configuration.tools() == null ? null : configuration.tools().spawnSubagent();
+        final var destination = effective.resolved().provider().subagents();
         return SubagentModelPolicy.allows(tools, effective)
                 && !contains(global == null ? null : global.excludes(), route)
-                && !contains(provider == null ? null : provider.excludes(), route);
+                && !contains(provider == null ? null : provider.excludes(), route)
+                && !contains(destination == null ? null : destination.excludes(), route);
     }
 
-    /** Only these routes may be disclosed by discovery or used without an explicit-model consent prompt. */
+    /** Discovery is provider-scoped, not an execution grant. */
+    public boolean visible(final EffectiveAgentModel effective, final String providerFilter) {
+        final var scope = providerFilter == null || providerFilter.isBlank()
+                ? parent.settings().providerId()
+                : providerFilter;
+        return scope.equals(effective.settings().providerId()) && hardAllowed(effective);
+    }
+
+    public boolean isDefault(final EffectiveAgentModel effective) {
+        try {
+            return defaultModel().routedReference().equals(effective.routedReference());
+        } catch (final IllegalArgumentException invalidDefault) {
+            // An invalid default must not authorize the parent route or prevent explicit recovery.
+            return false;
+        }
+    }
+
+    /** Financial authorization is separate from catalog visibility and generic tool/YOLO permissions. */
     public boolean available(final EffectiveAgentModel effective) {
         if (!hardAllowed(effective)) {
             return false;
         }
         final var route = effective.routedReference();
-        if (parent.routedReference().equals(route)
+        if (isDefault(effective)
                 || context.permissions() != null
                         && context.permissions().subagentRoutes().allows(route)) {
             return true;
@@ -158,11 +190,13 @@ public final class SubagentRoutingPolicy {
         final var includes = provider != null && provider.includes() != null
                 ? provider.includes()
                 : global == null ? null : global.includes();
-        return overridesEnabled() && (includes == null || includes.isEmpty() || contains(includes, route));
+        return overridesEnabled() && contains(includes, route);
     }
 
     public boolean admit(final EffectiveAgentModel effective, final boolean explicit) {
-        if (context.isCancelled() || !hardAllowed(effective)) {
+        if (context.isCancelled()
+                || !hardAllowed(effective)
+                || !explicit && !parent.settings().providerId().equals(effective.settings().providerId())) {
             return false;
         }
         return available(effective)

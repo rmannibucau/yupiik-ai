@@ -51,6 +51,8 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 @ExtendWith(TestJsonMapper.class)
 class SubagentRoutePrivacyTest {
@@ -65,8 +67,8 @@ class SubagentRoutePrivacyTest {
     }
 
     @Test
-    void secureDefaultFollowsExactLiveSessionRouteNotDeclaringOrProcessProvider() {
-        final var f = new Fixture(Map.of("yca.provider.providers.1.subagents.defaultModel", "$external/alt"));
+    void secureDefaultFollowsLiveSessionProviderAndCatalogIncludesItsConfiguredModels() {
+        final var f = new Fixture(Map.of());
         final var ctx = f.context("private", "shared");
         final var catalog = f.catalog(ctx);
         assertTrue(catalog.success(), catalog.output());
@@ -80,7 +82,7 @@ class SubagentRoutePrivacyTest {
         assertEquals("$private/unlisted", f.started.getLast().admittedModel().routedReference());
         final var unlisted = f.catalog(f.context("private", "unlisted")).output();
         assertTrue(unlisted.contains("$private/unlisted"), unlisted);
-        assertFalse(unlisted.contains("$private/shared"), unlisted);
+        assertTrue(unlisted.contains("$private/shared"), unlisted);
         final var switched = f.catalog(f.context("external", "alt")).output();
         assertTrue(switched.contains("$external/alt"), switched);
         assertFalse(switched.contains("$private/shared"), switched);
@@ -107,8 +109,9 @@ class SubagentRoutePrivacyTest {
         assertTrue(f.spawn(Map.of("model", "$external/shared"), ctx).success());
         assertTrue(f.spawn(Map.of("model", "$external/shared"), ctx).success());
         assertEquals(1, prompts.get());
-        assertTrue(f.catalog(ctx).output().contains("$external/shared"));
-        assertFalse(f.catalog(ctx).output().contains("$external/alt"));
+        assertFalse(f.catalog(ctx).output().contains("$external/shared"));
+        assertTrue(f.catalog(ctx, "external").output().contains("$external/shared"));
+        assertTrue(f.catalog(ctx, "external").output().contains("$external/alt"));
         assertEquals(
                 "$external/shared",
                 f.started.getFirst().admittedModel().settings().model());
@@ -192,7 +195,8 @@ class SubagentRoutePrivacyTest {
         final var ctx = enabled.context("private", "shared");
         assertTrue(enabled.spawn(Map.of("model", "$external/shared"), ctx).success());
         assertFalse(enabled.spawn(Map.of("model", "$external/alt"), ctx).success());
-        assertTrue(enabled.catalog(ctx).output().contains("$external/shared"));
+        assertFalse(enabled.catalog(ctx).output().contains("$external/shared"));
+        assertTrue(enabled.catalog(ctx, "external").output().contains("$external/shared"));
         assertFalse(enabled.catalog(ctx).output().contains("$external/alt"));
         final var disabled = new Fixture(Map.of(
                 "yca.subagents.allowModelOverride",
@@ -291,11 +295,10 @@ class SubagentRoutePrivacyTest {
         final var inherited = new Fixture(
                 Map.of("yca.subagents.allowModelOverride", "true", "yca.subagents.defaultModel", "$external/alt"));
         assertEquals(null, inherited.manager.provider("private").subagents().allowModelOverride());
-        assertTrue(inherited
+        assertFalse(inherited
                 .spawn(Map.of(), inherited.context("private", "shared"))
                 .success());
-        assertEquals(
-                "$external/alt", inherited.started.getFirst().admittedModel().routedReference());
+        assertTrue(inherited.started.isEmpty());
         final var empty = new Fixture(Map.of(
                 "yca.subagents.allowModelOverride",
                 "true",
@@ -307,7 +310,7 @@ class SubagentRoutePrivacyTest {
                 "",
                 "yca.provider.providers.1.subagents.defaultModel",
                 ""));
-        assertTrue(empty.spawn(Map.of("model", "$external/alt"), empty.context("private", "shared"))
+        assertFalse(empty.spawn(Map.of("model", "$external/alt"), empty.context("private", "shared"))
                 .success());
         assertTrue(empty.spawn(Map.of(), empty.context("private", "shared")).success());
         assertEquals("$private/shared", empty.started.getLast().admittedModel().routedReference());
@@ -320,10 +323,249 @@ class SubagentRoutePrivacyTest {
         assertFalse(f.spawn(Map.of("model", "$external/unlisted"), ctx).success());
         f.permissions.setGate((title, detail, tool, args) -> ApprovalGate.Result.ALLOW_SESSION);
         assertTrue(f.spawn(Map.of("model", "$external/unlisted"), ctx).success());
-        assertTrue(f.catalog(ctx).output().contains("$external/unlisted"));
+        assertFalse(f.catalog(ctx).output().contains("$external/unlisted"));
+        assertTrue(f.catalog(ctx, "external").output().contains("$external/unlisted"));
         assertFalse(f.catalog(ctx).output().contains("$external/alt"));
         f.permissions.setGate((title, detail, tool, args) -> ApprovalGate.Result.DENY);
         assertFalse(f.spawn(Map.of("model", "$external/alt"), ctx).success());
+    }
+
+    @Test
+    void astraParentDiscoversAndSpawnsSolOnTheSameCodexProvider() {
+        final var f = new Fixture(Map.of(
+                "yca.provider.providers.1.id", "codex",
+                "yca.provider.providers.1.model", "gpt-6-astra",
+                "yca.provider.providers.1.models.length", "1",
+                "yca.provider.providers.1.models.0.model", "gpt-6.1-sol",
+                "yca.provider.providers.1.subagents.defaultModel", "$codex/gpt-6.1-sol",
+                "yca.provider.providers.1.subagents.excludes", "$codex/gpt-6-astra"));
+        final var ctx = f.context("codex", "gpt-6-astra");
+        final var filtered = f.catalog.execute(
+                Map.of("provider", "codex", "kind", "models", "query", "gpt-6.1-sol", "limit", 5), ctx);
+        assertModelMetadata(filtered, "$codex/gpt-6.1-sol", true, true, false);
+        assertModelMetadata(f.catalog(ctx), "$codex/gpt-6.1-sol", true, true, false);
+        assertFalse(f.catalog(ctx).output().contains("$codex/gpt-6-astra"));
+        assertTrue(f.spawn(Map.of(), ctx).success());
+        assertTrue(f.spawn(Map.of("model", "gpt-6.1-sol"), ctx).success());
+        assertEquals("$codex/gpt-6.1-sol", f.started.getLast().admittedModel().routedReference());
+        assertFalse(f.spawn(Map.of("model", "$codex/gpt-6-astra"), ctx).success());
+    }
+
+    @Test
+    void astraSessionListsSolCatalogWithoutAuthorizingItAndPinsBareDuplicateToAstra() {
+        final var f = new Fixture(Map.of(
+                "yca.provider.providers.0.id", "sol",
+                "yca.provider.providers.1.id", "astra",
+                "yca.provider.providers.1.models.length", "1",
+                "yca.provider.providers.1.models.0.model", "alt"));
+        final var ctx = f.context("astra", "shared");
+        final var catalog = f.catalog(ctx);
+        assertTrue(catalog.success(), catalog.output());
+        assertTrue(catalog.output().contains("$astra/shared"), catalog.output());
+        assertTrue(catalog.output().contains("$astra/alt"), catalog.output());
+        assertFalse(catalog.output().contains("$sol/"), catalog.output());
+        assertModelMetadata(catalog, "$astra/shared", true, true, false);
+        assertModelMetadata(catalog, "$astra/alt", false, false, true);
+        assertFalse(f.spawn(Map.of("model", "$astra/alt"), ctx).success());
+        assertTrue(f.spawn(Map.of("model", "shared"), ctx).success());
+        assertEquals("$astra/shared", f.started.getLast().admittedModel().routedReference());
+
+        final var sol = f.catalog(ctx, "sol");
+        assertTrue(sol.success(), sol.output());
+        assertModelMetadata(sol, "$sol/shared", false, false, true);
+        assertModelMetadata(sol, "$sol/alt", false, false, true);
+        assertFalse(f.spawn(Map.of("model", "$sol/shared"), ctx).success());
+        final var prompts = new AtomicInteger();
+        f.permissions.setGate((title, detail, tool, args) -> {
+            assertEquals("subagent_model_route", tool);
+            prompts.incrementAndGet();
+            return ApprovalGate.Result.ALLOW_SESSION;
+        });
+        assertTrue(f.spawn(Map.of("model", "$sol/shared"), ctx).success());
+        assertTrue(f.spawn(Map.of("model", "$astra/alt"), ctx).success());
+        assertEquals(2, prompts.get());
+        assertFalse(f.catalog(ctx).output().contains("$sol/"));
+        assertModelMetadata(f.catalog(ctx, "sol"), "$sol/shared", false, true, false);
+        assertModelMetadata(f.catalog(ctx, "sol"), "$sol/alt", false, false, true);
+        assertModelMetadata(f.catalog(ctx), "$astra/alt", false, true, false);
+    }
+
+    @Test
+    void bareExternallyDeclaredModelNeedsConsentForSessionProviderAndItsGrantRemainsDiscoverable() {
+        final var f = new Fixture(Map.of());
+        final var ctx = f.context("private", "shared");
+        assertFalse(f.spawn(Map.of("model", "alt"), ctx).success());
+        final var prompts = new AtomicInteger();
+        f.permissions.setGate((title, detail, tool, args) -> {
+            assertEquals("$private/alt", args.get("destination"));
+            assertEquals("subagent_model_route", tool);
+            prompts.incrementAndGet();
+            return ApprovalGate.Result.ALLOW_SESSION;
+        });
+        assertTrue(f.spawn(Map.of("model", "alt"), ctx).success());
+        assertEquals("$private/alt", f.started.getLast().admittedModel().routedReference());
+        assertEquals(
+                "$private/alt", f.started.getLast().admittedModel().settings().model());
+        assertTrue(f.spawn(Map.of("model", "$private/alt"), ctx).success());
+        assertEquals(1, prompts.get());
+        assertModelMetadata(f.catalog(ctx), "$private/alt", false, true, false);
+        assertFalse(f.catalog(ctx).output().contains("$external/"));
+    }
+
+    @Test
+    void configuredSameProviderDefaultIsAuthorizedWithOverridesDisabledButDifferentParentIsNot() {
+        final var f = new Fixture(Map.of(
+                "yca.provider.providers.1.models.length", "1",
+                "yca.provider.providers.1.models.0.model", "alt",
+                "yca.provider.providers.1.subagents.defaultModel", "$private/alt",
+                "yca.provider.providers.1.subagents.allowModelOverride", "false"));
+        final var ctx = f.context("private", "shared");
+        assertModelMetadata(f.catalog(ctx), "$private/alt", true, true, false);
+        assertModelMetadata(f.catalog(ctx), "$private/shared", false, false, true);
+        assertTrue(f.spawn(Map.of(), ctx).success());
+        assertTrue(f.spawn(Map.of("model", "$private/alt"), ctx).success());
+        assertFalse(f.spawn(Map.of("model", "$private/shared"), ctx).success());
+        assertEquals(2, f.started.size());
+        f.permissions.setGate((title, detail, tool, args) -> ApprovalGate.Result.ALLOW_SESSION);
+        assertTrue(f.spawn(Map.of("model", "$private/shared"), ctx).success());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"omitted", ""})
+    void emptyOrAbsentIncludesDoesNotAuthorizeAlternativesEvenInYolo(final String includes) {
+        final var overrides = new HashMap<String, String>();
+        overrides.put("yca.subagents.allowModelOverride", "true");
+        overrides.put("yca.permissions.mode", "yolo");
+        overrides.put("yca.mode", "build");
+        overrides.put("yca.provider.providers.1.models.length", "1");
+        overrides.put("yca.provider.providers.1.models.0.model", "alt");
+        if (!"omitted".equals(includes)) {
+            overrides.put("yca.subagents.includes", includes);
+        }
+        final var f = new Fixture(overrides);
+        final var ctx = f.context("private", "shared");
+        assertModelMetadata(f.catalog(ctx), "$private/alt", false, false, true);
+        assertFalse(f.spawn(Map.of("model", "$private/alt"), ctx).success());
+        assertFalse(f.spawn(Map.of("model", "$external/alt"), ctx).success());
+        assertTrue(f.started.isEmpty());
+        final var prompts = new AtomicInteger();
+        f.permissions.setGate((title, detail, tool, args) -> {
+            assertEquals("subagent_model_route", tool);
+            prompts.incrementAndGet();
+            return ApprovalGate.Result.ALLOW_SESSION;
+        });
+        assertTrue(f.spawn(Map.of("model", "$private/alt"), ctx).success());
+        assertTrue(f.spawn(Map.of("model", "$external/alt"), ctx).success());
+        assertEquals(2, prompts.get());
+        assertModelMetadata(f.catalog(ctx), "$private/alt", false, true, false);
+        assertFalse(f.catalog(ctx).output().contains("$external/"));
+    }
+
+    @Test
+    void exactIncludesAuthorizeExplicitAlternativesWithoutPromptsButNotImplicitCrossProviderRoutes() {
+        final var f = new Fixture(Map.of(
+                "yca.permissions.mode", "yolo",
+                "yca.mode", "build",
+                "yca.subagents.allowModelOverride", "true",
+                "yca.subagents.includes", "$private/alt,$external/shared",
+                "yca.subagents.defaultModel", "$external/shared"));
+        final var ctx = f.context("private", "shared");
+        final var prompts = new AtomicInteger();
+        f.permissions.setGate((title, detail, tool, args) -> {
+            prompts.incrementAndGet();
+            return ApprovalGate.Result.ALLOW_SESSION;
+        });
+        assertFalse(f.spawn(Map.of(), ctx).success());
+        assertFalse(f.spawn(Map.of("agent", "reviewer"), ctx).success());
+        assertTrue(f.spawn(Map.of("model", "$private/alt"), ctx).success());
+        assertTrue(f.spawn(Map.of("model", "$external/shared"), ctx).success());
+        assertEquals(0, prompts.get());
+        // An existing session grant must not turn an implicit cross-provider route into consent.
+        assertTrue(f.spawn(Map.of("model", "$external/alt"), ctx).success());
+        assertEquals(1, prompts.get());
+        final var changedDefault = new Fixture(Map.of("yca.subagents.defaultModel", "$external/alt"));
+        final var granted = changedDefault.context(f.permissions, "private", "shared", () -> false);
+        assertFalse(changedDefault.spawn(Map.of(), granted).success());
+        assertEquals(1, prompts.get());
+        assertTrue(changedDefault.started.isEmpty());
+    }
+
+    @ParameterizedTest
+    @ValueSource(
+            strings = {
+                "yca.subagents.excludes",
+                "yca.provider.providers.1.subagents.excludes",
+                "yca.provider.providers.0.subagents.excludes"
+            })
+    void globalSourceAndDestinationExcludesAreAdditiveAndBeatIncludesAndPreviousGrants(final String exclude) {
+        final var approved = new Fixture(Map.of());
+        approved.permissions.setGate((title, detail, tool, args) -> ApprovalGate.Result.ALLOW_SESSION);
+        assertTrue(approved.spawn(Map.of("model", "$external/shared"), approved.context("private", "shared"))
+                .success());
+        final var overrides = new HashMap<String, String>();
+        overrides.put("yca.subagents.allowModelOverride", "true");
+        overrides.put("yca.subagents.includes", "$external/shared");
+        // Non-matching narrower lists must not replace a broader exclusion.
+        overrides.put("yca.subagents.excludes", "$private/irrelevant");
+        overrides.put("yca.provider.providers.1.subagents.excludes", "$private/irrelevant");
+        overrides.put("yca.provider.providers.0.subagents.excludes", "$external/irrelevant");
+        overrides.put(exclude, "$external/shared");
+        final var denied = new Fixture(overrides);
+        final var ctx = denied.context(approved.permissions, "private", "shared", () -> false);
+        final var prompts = new AtomicInteger();
+        approved.permissions.setGate((title, detail, tool, args) -> {
+            prompts.incrementAndGet();
+            return ApprovalGate.Result.ALLOW_SESSION;
+        });
+        assertFalse(denied.spawn(Map.of("model", "$external/shared"), ctx).success());
+        assertFalse(denied.catalog(ctx, "external").output().contains("$external/shared"));
+        assertTrue(denied.started.isEmpty());
+        assertEquals(0, prompts.get());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"yca.subagents.excludes", "yca.provider.providers.1.subagents.excludes"})
+    void sameProviderExcludesBeatParentDefaultProfileAndIncludes(final String exclude) {
+        final var overrides = new HashMap<String, String>();
+        overrides.put("yca.subagents.allowModelOverride", "true");
+        overrides.put("yca.subagents.includes", "$private/shared");
+        overrides.put("yca.subagents.defaultModel", "$private/shared");
+        overrides.put("yca.agents.0.model.name", "$private/shared");
+        overrides.put("yca.subagents.excludes", "$private/irrelevant");
+        overrides.put("yca.provider.providers.1.subagents.excludes", "$private/irrelevant");
+        overrides.put(exclude, "$private/shared");
+        final var f = new Fixture(overrides);
+        final var ctx = f.context("private", "shared");
+        final var prompts = new AtomicInteger();
+        f.permissions.setGate((title, detail, tool, args) -> {
+            prompts.incrementAndGet();
+            return ApprovalGate.Result.ALLOW_SESSION;
+        });
+        assertFalse(f.spawn(Map.of(), ctx).success());
+        assertFalse(f.spawn(Map.of("agent", "reviewer"), ctx).success());
+        assertFalse(f.spawn(Map.of("model", "$private/shared"), ctx).success());
+        assertFalse(f.catalog(ctx).output().contains("$private/shared"));
+        assertTrue(f.started.isEmpty());
+        assertEquals(0, prompts.get());
+    }
+
+    @SuppressWarnings("unchecked")
+    private void assertModelMetadata(
+            final ToolResult catalog,
+            final String reference,
+            final boolean defaultModel,
+            final boolean authorized,
+            final boolean requiresApproval) {
+        assertTrue(catalog.success(), catalog.output());
+        final var result = mapper.fromString(Map.class, catalog.output());
+        final var options = (List<Map<String, Object>>) result.get("options");
+        final var model = options.stream()
+                .filter(option -> reference.equals(option.get("reference")))
+                .findFirst()
+                .orElseThrow(() -> new AssertionError("Missing " + reference + " in " + catalog.output()));
+        assertEquals(defaultModel, model.get("default"), catalog.output());
+        assertEquals(authorized, model.get("authorized"), catalog.output());
+        assertEquals(requiresApproval, model.get("requires_approval"), catalog.output());
     }
 
     @Test
@@ -441,6 +683,10 @@ class SubagentRoutePrivacyTest {
 
         private ToolResult catalog(final ToolContext context) {
             return catalog.execute(Map.of("kind", "all", "limit", 50), context);
+        }
+
+        private ToolResult catalog(final ToolContext context, final String provider) {
+            return catalog.execute(Map.of("kind", "models", "limit", 50, "provider", provider), context);
         }
     }
 }

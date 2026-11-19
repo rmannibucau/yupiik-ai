@@ -28,7 +28,9 @@ import io.yupiik.ia.agent.core.wiring.ProviderManager;
  *
  * <p>Routing of the selected reference follows the documented contract: {@code $provider/model}
  * selects that provider explicitly; a bare name is pinned to whichever configured provider
- * declares it, then to the spawning session's provider, then to the process current provider.</p>
+ * declares it, then to the session's provider, then to the process current provider.
+ * Sub-agent admission uses {@link SubagentRoutingPolicy} to pin bare names to the active
+ * session provider before calling this resolver; main-agent routing is unchanged.</p>
  */
 @ApplicationScoped
 public class AgentModelResolver {

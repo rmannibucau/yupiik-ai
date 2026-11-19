@@ -132,8 +132,10 @@ public class SpawnSubagentTool implements EmbeddedTool {
                                 Schemas.str(
                                         "Optional model (or $provider/model) routing this sub-agent to a specific "
                                                 + "model/provider instead of inheriting the parent session's selection or the "
-                                                + "provider's subagents.defaultModel. Alternative routes require policy permission or "
-                                                + "explicit user approval before project context is sent; hard excludes cannot be overridden."),
+                                                + "provider's subagents.defaultModel. Bare names stay on the active session provider; "
+                                                + "cross-provider routing requires explicit $provider/model. The effective default or "
+                                                + "enabled exact includes authorize routes; otherwise dedicated user approval is required "
+                                                + "even in YOLO. Discovery/profile selection does not authorize execution; hard excludes cannot be overridden."),
                         "max_turns",
                                 Schemas.intProp(
                                         "Maximum model round-trips for the sub-agent; a non-positive or omitted value means no per-spawn override, so the configured subagent/global/provider limit applies."),
@@ -199,7 +201,7 @@ public class SpawnSubagentTool implements EmbeddedTool {
                 return ToolResult.error(
                         "Model is not available for subagents or user approval was not granted: "
                                 + effective.routedReference()
-                                + ". Use the current session route or a permitted option from list_subagent_options. "
+                                + ". Use the configured default or an authorized option from list_subagent_options. "
                                 + "Only an explicit model request can ask for destination approval; hard denies cannot be overridden.");
             }
         } catch (final IllegalArgumentException invalid) {

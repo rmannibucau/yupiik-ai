@@ -41,25 +41,25 @@ public record SubagentConfiguration(
         @Property(
                 defaultValue = "false",
                 documentation =
-                        "Allow automatic sub-agent routing to alternative models. By default children stay on the live parent provider/model; explicitly requested alternatives require user approval.")
+                        "Allow automatic alternative-model routing only with a nonempty exact includes list. The effective same-provider default is authorized even when false; otherwise the parent is the default. Explicit alternatives outside authorization require dedicated route approval, including in YOLO; no approval UI fails closed. Discovery is not authorization.")
         boolean allowModelOverride,
 
         @Property(
                 defaultValue = "java.util.List.of()",
                 documentation =
-                        "Exact $provider/model routes automatically available when overrides are enabled. Empty imposes no inclusion restriction. Explicit alternatives outside this list require user approval.")
+                        "Exact $provider/model alternatives authorized only when overrides are enabled and this list is nonempty. Empty grants no additional autonomy (formerly unrestricted). Does not restrict discovery: all configured models on the active session provider are discoverable by default; an explicit provider filter can inspect another catalog, subject to hard restrictions.")
         List<String> includes,
 
         @Property(
                 defaultValue = "java.util.List.of()",
                 documentation =
-                        "Exact $provider/model hard denies for every sub-agent; cannot be overridden by provider settings or user approval.")
+                        "Exact routed $provider/model hard denies for discovery and every sub-agent, additive with source-provider and destination-provider excludes. Applies even to inherited parents and defaults; provider settings, user approval and exact-route session grants cannot override these.")
         List<String> excludes,
 
         @Property(
                 defaultValue = "\"\"",
                 documentation =
-                        "Default alternative model for sub-agents when overrides are enabled, subject to includes/excludes. Blank inherits the parent route.")
+                        "Same-provider default sub-agent route, authorized independently of overrides and includes, subject to hard denies and administrative restrictions. Blank inherits the exact parent route; a different default removes the parent's automatic exemption. Bare names are pinned to the session provider; profiles/defaults cannot implicitly cross providers, bypass authorization or initiate approvals. Cross-provider selection requires explicit $other/model routing and authorization.")
         String defaultModel) {
     public SubagentConfiguration {
         includes = includes == null ? List.of() : List.copyOf(includes);

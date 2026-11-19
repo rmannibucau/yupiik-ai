@@ -24,22 +24,22 @@ public record ProviderSubagentConfiguration(
         @Property(
                 defaultValue = "null",
                 documentation =
-                        "Allow automatic alternative-model routing; null inherits yca.subagents.allowModelOverride (false by default).")
+                        "Allow automatic alternative-model routing only with a nonempty effective exact includes list; empty grants no additional autonomy. Null inherits yca.subagents.allowModelOverride (false by default). The effective same-provider default remains authorized when false; discovery is not authorization.")
         Boolean allowModelOverride,
 
         @Property(
                 documentation =
-                        "Exact $provider/model routes automatically available when overrides are enabled. Null inherits global includes; empty permits any configured destination.")
+                        "Exact $provider/model alternatives authorized only when overrides are enabled and this list is nonempty. Null inherits global includes; empty grants no additional autonomy. Does not restrict discovery of configured models on the session provider or an explicitly filtered provider.")
         List<String> includes,
 
         @Property(
                 documentation =
-                        "Exact $provider/model hard denies, in addition to global excludes. User approval cannot override these.")
+                        "Exact routed $provider/model hard denies, additive with global, source-provider and destination-provider excludes for discovery and spawning. Applies even to inherited parents and defaults; neither user approval nor exact-route session grants can override these.")
         List<String> excludes,
 
         @Property(
                 documentation =
-                        "Default sub-agent model, subject to route policy. Null inherits the global defaultModel; blank inherits the parent route. Ignored when overrides are disabled.")
+                        "Same-provider default sub-agent route, authorized even when overrides are disabled, subject to hard denies and administrative restrictions. Null inherits the global defaultModel; blank inherits the parent route. A different default removes the parent's automatic exemption. Bare names are pinned to the session provider; profiles/defaults cannot implicitly cross providers or initiate approvals. Cross-provider selection requires explicit $other/model routing and authorization.")
         String defaultModel) {
     public ProviderSubagentConfiguration {
         includes = includes == null ? null : List.copyOf(includes);

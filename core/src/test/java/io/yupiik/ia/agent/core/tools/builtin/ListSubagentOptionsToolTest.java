@@ -97,6 +97,23 @@ class ListSubagentOptionsToolTest {
     }
 
     @Test
+    void discoveryDoesNotRequireModelOverrideOrAuthorizeAlternatives(final JsonMapper mapper) {
+        this.mapper = mapper;
+        final var tool = tool(config(Map.of("yca.subagents.allowModelOverride", "false")));
+        final var alternative = execute(tool, Map.of("kind", "models", "query", "review-model"));
+        assertTrue(alternative.success(), alternative.output());
+        assertTrue(alternative.output().contains("$default/review-model"), alternative.output());
+        assertTrue(alternative.output().contains("\"default\":false"), alternative.output());
+        assertTrue(alternative.output().contains("\"authorized\":false"), alternative.output());
+        assertTrue(alternative.output().contains("\"requires_approval\":true"), alternative.output());
+
+        final var parent = execute(tool, Map.of("kind", "models", "query", "parent-model"));
+        assertTrue(parent.output().contains("\"default\":true"), parent.output());
+        assertTrue(parent.output().contains("\"authorized\":true"), parent.output());
+        assertTrue(parent.output().contains("\"requires_approval\":false"), parent.output());
+    }
+
+    @Test
     void boundsPagesAndRejectsInvalidFilters(final JsonMapper mapper) {
         this.mapper = mapper;
         final var tool = tool(config(Map.of()));

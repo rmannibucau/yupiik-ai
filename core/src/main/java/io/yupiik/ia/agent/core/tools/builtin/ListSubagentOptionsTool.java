@@ -91,9 +91,10 @@ public class ListSubagentOptionsTool implements EmbeddedTool {
 
     @Override
     public String description() {
-        return "Search this session's permitted agent profiles and model routes for spawn_subagent. "
-                + "By default only the current provider/model is available. An explicit alternative model "
-                + "may ask the user for destination approval before project context is sent. "
+        return "Search configured agent profiles and model routes for spawn_subagent. "
+                + "By default list non-blacklisted models on the active session provider; an explicit provider filter "
+                + "selects another provider's catalog without authorizing execution. Entries report default, authorized, "
+                + "and requires_approval. Explicit unauthorized model choices need dedicated user approval, even in YOLO. "
                 + "Pass kind (agents, models, or all) and a small limit to keep the reply cheap; filter by a "
                 + "provider id or a query substring when you already know what to look for. Call only when you "
                 + "need to choose or inspect options; results are bounded and paginated.";
@@ -111,7 +112,7 @@ public class ListSubagentOptionsTool implements EmbeddedTool {
                 "query",
                         Schemas.str(
                                 "Optional case-insensitive substring to match names, descriptions, model ids, or providers."),
-                "provider", Schemas.str("Optional provider id filter for model options."),
+                "provider", Schemas.str("Provider catalog to inspect (default: active session provider); not execution approval."),
                 "offset", Schemas.intProp("Zero-based result offset for pagination (default: 0)."),
                 "limit", Schemas.intProp("Maximum results to return (default: 20, hard maximum: 50).")));
     }
@@ -193,13 +194,7 @@ public class ListSubagentOptionsTool implements EmbeddedTool {
                     continue;
                 }
                 final var model = effective.routedReference();
-                if (!routing.available(effective)) {
-                    continue;
-                }
-                if (providerFilter != null
-                        && !providerFilter.isBlank()
-                        && !providerFilter.equals(
-                                effective.resolved().provider().id())) {
+                if (!routing.visible(effective, providerFilter)) {
                     continue;
                 }
                 final var haystack = (agent.name() + " " + description).toLowerCase(Locale.ROOT);
@@ -215,13 +210,18 @@ public class ListSubagentOptionsTool implements EmbeddedTool {
                 if (model != null) {
                     entry.put("model", model);
                 }
+                authorization(entry, routing, effective);
                 entries.add(entry);
             }
         }
         if ("all".equals(kind) || "models".equals(kind)) {
             final var references = new LinkedHashSet<String>();
             references.add(routing.parent().routedReference());
-            references.add(routing.select(null, null).routedReference());
+            try {
+                references.add(routing.defaultModel().routedReference());
+            } catch (final IllegalArgumentException invalidDefault) {
+                // A stale or cross-provider default does not hide the session provider's catalog.
+            }
             if (context.permissions() != null) {
                 references.addAll(context.permissions().subagentRoutes().routes());
             }
@@ -257,14 +257,11 @@ public class ListSubagentOptionsTool implements EmbeddedTool {
             final String search,
             final String providerFilter,
             final EffectiveAgentModel effective) {
-        if (!routing.available(effective)) {
+        if (!routing.visible(effective, providerFilter)) {
             return;
         }
-        final var providerId = effective.resolved().provider().id();
+        final var providerId = effective.settings().providerId();
         final var model = effective.reference();
-        if (providerFilter != null && !providerFilter.isBlank() && !providerFilter.equals(providerId)) {
-            return;
-        }
         final var reference = effective.routedReference();
         final var haystack = (providerId + " " + model + " " + reference).toLowerCase(Locale.ROOT);
         if (!search.isEmpty() && !haystack.contains(search)) {
@@ -275,7 +272,18 @@ public class ListSubagentOptionsTool implements EmbeddedTool {
         entry.put("name", model);
         entry.put("provider", providerId);
         entry.put("reference", reference);
+        authorization(entry, routing, effective);
         entries.add(entry);
+    }
+
+    private void authorization(
+            final Map<String, Object> entry,
+            final SubagentRoutingPolicy routing,
+            final EffectiveAgentModel effective) {
+        final var authorized = routing.available(effective);
+        entry.put("default", routing.isDefault(effective));
+        entry.put("authorized", authorized);
+        entry.put("requires_approval", !authorized);
     }
 
     private SpawnSubagentToolConfiguration policy() {

@@ -364,7 +364,9 @@ class SpawnSubagentToolTest {
 
     @Test
     void forwardsExplicitModelToTheSubagentState() {
-        final var cfg = config(Map.of("yca.subagents.allowModelOverride", "true"));
+        final var cfg = config(Map.of(
+                "yca.subagents.allowModelOverride", "true",
+                "yca.subagents.includes", "$default/other-model"));
         final var reg = registry(cfg);
         final var captured = new AtomicReference<String>();
         final var runner =
