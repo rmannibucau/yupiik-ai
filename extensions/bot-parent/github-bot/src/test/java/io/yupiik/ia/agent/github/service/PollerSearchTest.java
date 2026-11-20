@@ -243,6 +243,9 @@ class PollerSearchTest {
     @Test
     void failedBaselineMustFinishDirectReconciliationBeforeSearching() throws Exception {
         try (final var fixture = new Fixture()) {
+            // Scan sequentially: cancellation of concurrent client requests does not
+            // guarantee their server handlers finish before the next poll clears its calls.
+            fixture.parallelism = 1;
             fixture.failPath = "/repos/owner/repo/pulls/comments";
             assertThrows(RuntimeException.class, () -> fixture.poll(START));
             fixture.failPath = "";
@@ -471,6 +474,7 @@ class PollerSearchTest {
         private boolean reviews;
         private boolean discussions;
         private boolean searchEnabled = true;
+        private int parallelism = 4;
         private String selected = "owner/repo,owner/other";
         private TaskStore store;
 
@@ -498,7 +502,7 @@ class PollerSearchTest {
                     1,
                     new PollOptions.Reviews(reviews),
                     new PollOptions.Discussions(discussions),
-                    4,
+                    parallelism,
                     new PollOptions.Search(searchEnabled, 3600));
             try (final var github = new GitHubClient(
                     URI.create(conf.api()), json, () -> "test", Clock.fixed(instant, ZoneOffset.UTC))) {

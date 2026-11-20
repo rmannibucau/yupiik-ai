@@ -946,6 +946,58 @@ class TrustedGitStoreTest {
         }
     }
 
+    @Test
+    void toleratesTransientSymlinkProbesWhileInitializing() throws Exception {
+        final var fixture = fixture();
+        final var executable = initializationSymlink(transport(fixture), true);
+        try (final var store = new TrustedGitStore(
+                temporary.resolve("private"), executable.toString(), Duration.ofSeconds(15), BUDGET, 67108864L, null)) {
+            final var view = store.prepare(URL, fixture.head(), 1, false);
+            assertEquals(fixture.head(), read(store, view, "rev-parse", "HEAD").strip());
+            try (final var paths = Files.walk(view.directory())) {
+                assertFalse(paths.anyMatch(Files::isSymbolicLink));
+            }
+        }
+    }
+
+    @Test
+    void rejectsSymlinksRemainingAfterInitialization() throws Exception {
+        final var fixture = fixture();
+        final var executable = initializationSymlink(transport(fixture), false);
+        final var root = temporary.resolve("private");
+        try (final var store =
+                new TrustedGitStore(root, executable.toString(), Duration.ofSeconds(15), BUDGET, 67108864L, null)) {
+            final var error = assertThrows(IOException.class, () -> store.prepare(URL, fixture.head(), 1, false));
+            assertEquals("Symbolic link in trusted Git storage", error.getMessage());
+            try (final var paths = Files.walk(root)) {
+                assertFalse(paths.anyMatch(path -> path.getFileName().toString().startsWith("generation-")));
+            }
+        }
+    }
+
+    private Path initializationSymlink(final Path executable, final boolean transientLink) throws IOException {
+        // Widen Git init's native symlink("testing", "tXXXXXX") probe so the quota sampler sees it.
+        Files.writeString(executable, Files.readString(executable).replace("exec /usr/bin/git \"$@\"", """
+                                initializing=false
+                                for argument do
+                                    if [ "$argument" = init ]; then
+                                        initializing=true
+                                    fi
+                                    directory=$argument
+                                done
+                                if [ "$initializing" = true ]; then
+                                    /usr/bin/git "$@" || exit 1
+                                    /bin/ln -s testing "$directory/t-probe" || exit 1
+                                    /bin/sleep 0.2
+                                    %s
+                                    exit 0
+                                fi
+                                exec /usr/bin/git "$@"
+                                """.formatted(
+                        transientLink ? "/bin/rm \"$directory/t-probe\"" : ":")));
+        return executable;
+    }
+
     private record Fixture(
             Path directory, String old, String parent, String head, String unrelated, String tag, String nested) {}
 

@@ -788,7 +788,9 @@ public final class TrustedGitStore implements AutoCloseable {
         try {
             while (!process.waitFor(20, TimeUnit.MILLISECONDS)) {
                 check(deadline);
-                budget();
+                // Git init briefly creates a symlink to "testing" to probe filesystem support.
+                // Do not follow it; require all links to be gone in the post-exit budget check.
+                budget(args.getFirst().equals("init"));
             }
             while (reader.isAlive() || writer.isAlive()) {
                 check(deadline);
@@ -889,6 +891,10 @@ public final class TrustedGitStore implements AutoCloseable {
     }
 
     private void budget() throws IOException {
+        budget(false);
+    }
+
+    private void budget(final boolean initializing) throws IOException {
         if (home == null) {
             return;
         }
@@ -896,10 +902,10 @@ public final class TrustedGitStore implements AutoCloseable {
         Files.walkFileTree(home, new SimpleFileVisitor<>() {
             @Override
             public FileVisitResult visitFile(final Path path, final BasicFileAttributes attributes) throws IOException {
-                if (attributes.isSymbolicLink()) {
+                if (attributes.isSymbolicLink() && !initializing) {
                     throw new IOException("Symbolic link in trusted Git storage");
                 }
-                if (attributes.isRegularFile()) {
+                if (attributes.isRegularFile() || attributes.isSymbolicLink()) {
                     if (attributes.size() > maxBytes - size[0]) {
                         throw new IOException("Trusted Git scratch disk budget exceeded");
                     }
