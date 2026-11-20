@@ -215,9 +215,7 @@ public class ToolExecutionService {
                         if (context.usage() != null) {
                             context.usage()
                                     .recordOptimization(
-                                            output.length(),
-                                            processed.length(),
-                                            originalTokens - processedTokens);
+                                            output.length(), processed.length(), originalTokens - processedTokens);
                         }
                         return processed;
                     }
