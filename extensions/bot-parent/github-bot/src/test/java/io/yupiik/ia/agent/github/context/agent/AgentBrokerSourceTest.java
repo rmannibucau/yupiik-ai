@@ -129,13 +129,27 @@ class AgentBrokerSourceTest {
 
     private List<String> fixtureFlags(final Path workspace, final String mode) throws Exception {
         final var executable = workspace.resolve("git-fixture");
-        Files.writeString(
-                executable,
-                "#!/bin/sh\nexec "
-                        + TestJava.javaCommand("-cp", classpath(), GitProcessFixture.class.getName()).stream()
-                                .map(AgentBrokerSourceTest::shell)
-                                .collect(Collectors.joining(" "))
-                        + " " + mode + " " + shell(workspace.toString()) + " \"$@\"\n");
+        if (mode.equals("stall") || mode.equals("inherited-pipe")) {
+            // These one/two-second deadlines test pipe supervision, not JVM startup.
+            // Publish PIDs with shell builtins before blocking, without two nested JVMs
+            // that can be killed between creating and writing their PID files on busy CI.
+            Files.writeString(
+                    executable,
+                    "#!/bin/sh\nprintf %s $$ > "
+                            + shell(workspace.resolve("git.pid").toString())
+                            + "\nsleep 30 &\nprintf %s $! > "
+                            + shell(workspace.resolve("child.pid").toString())
+                            + "\n: > " + shell(workspace.resolve("child.ready").toString())
+                            + (mode.equals("inherited-pipe") ? "\nsleep 0.4\nexit 0\n" : "\nwait\n"));
+        } else {
+            Files.writeString(
+                    executable,
+                    "#!/bin/sh\nexec "
+                            + TestJava.javaCommand("-cp", classpath(), GitProcessFixture.class.getName()).stream()
+                                    .map(AgentBrokerSourceTest::shell)
+                                    .collect(Collectors.joining(" "))
+                            + " " + mode + " " + shell(workspace.toString()) + " \"$@\"\n");
+        }
         Files.setPosixFilePermissions(executable, PosixFilePermissions.fromString("rwx------"));
         final var flags = new ArrayList<>(flags("a".repeat(40)));
         flags.set(flags.indexOf("--timeout") + 1, mode.equals("stall") ? "2" : "1");
@@ -327,6 +341,23 @@ class AgentBrokerSourceTest {
         assertTrue(valid.output().contains("password=" + environment.get("YCA_CONTEXT_GIT_TOKEN") + "\n"));
         assertFalse(valid.output().contains("control-only-secret"));
         assertFalse(valid.output().contains("never-use-github"));
+        // approve/reject must not start Java at all, even with an unavailable helper entry point.
+        for (final var notification : List.of("approve", "reject")) {
+            final var notifyCommand = new ArrayList<>(command);
+            notifyCommand.set(
+                    notifyCommand.indexOf("credential.helper=" + helper),
+                    "credential.helper=" + helper.replace(AgentBrokerSource.class.getName(), "UnavailableHelper"));
+            notifyCommand.set(notifyCommand.size() - 1, notification);
+            final var result = process(
+                    workspace.resolve("repository"),
+                    notifyCommand,
+                    credential.stripTrailing() + "\nusername=context\npassword="
+                            + environment.get("YCA_CONTEXT_GIT_TOKEN") + "\n\n",
+                    environment);
+            assertEquals(0, result.exit(), result.error());
+            assertEquals("", result.output());
+            assertEquals("", result.error());
+        }
         for (final var invalid : List.of(
                 credential.replace("protocol=https", "protocol=http"),
                 credential.replace("broker.example:8443", "evil.example:8443"),

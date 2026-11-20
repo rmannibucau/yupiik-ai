@@ -604,7 +604,11 @@ public final class AgentBrokerSource {
                 AgentBrokerSource.class.getName()));
         args.addAll(options.flags());
         args.add("credential");
-        return "!" + args.stream().map(AgentBrokerSource::quote).collect(Collectors.joining(" "));
+        // Git also invokes helpers with store/erase after authentication. These are no-ops:
+        // do not launch another JVM (or persist anything) for either notification.
+        return "!f() { if [ \"$1\" = get ]; then exec "
+                + args.stream().map(AgentBrokerSource::quote).collect(Collectors.joining(" "))
+                + " \"$@\"; fi; }; f";
     }
 
     private static String absoluteClasspath() {

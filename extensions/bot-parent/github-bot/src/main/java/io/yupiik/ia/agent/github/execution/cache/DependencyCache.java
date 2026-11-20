@@ -307,6 +307,14 @@ public final class DependencyCache {
                     timedOut++;
                     continue;
                 }
+                final var source = storage.toAbsolutePath().normalize().resolve(entry.directory());
+                checkedPath(source);
+                // Missing folders have no candidate to publish. Do not wait for another
+                // writer or consume admission time for an entry this attempt did not use.
+                if (!Files.exists(source, LinkOption.NOFOLLOW_LINKS)) {
+                    unchanged++;
+                    continue;
+                }
                 try (final var unit = locks.unit(key, admission)) {
                     if (unit == null || System.nanoTime() >= admission) {
                         timedOut++;
@@ -328,12 +336,6 @@ public final class DependencyCache {
                             if (!expected.isEmpty()) {
                                 rejectCorrupt(MANIFEST, expected);
                             }
-                        }
-                        final var source = storage.toAbsolutePath().normalize().resolve(entry.directory());
-                        checkedPath(source);
-                        if (!Files.exists(source, LinkOption.NOFOLLOW_LINKS)) {
-                            unchanged++;
-                            continue;
                         }
                         final var manifest = work(slot.slot(), "manifest");
                         stage(slot.slot(), configuration.limits().maxManifestBytes(), operationDeadline);

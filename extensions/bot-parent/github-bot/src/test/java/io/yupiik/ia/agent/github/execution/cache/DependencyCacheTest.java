@@ -204,12 +204,36 @@ class DependencyCacheTest {
                 return two.publish(REPOSITORY, b, baselineB);
             });
             start.countDown();
-            assertEquals(2, first.get().published() + second.get().published());
+            assertEquals(new DependencyCache.Publication(1, 1, 0, 0), first.get());
+            assertEquals(new DependencyCache.Publication(1, 1, 0, 0), second.get());
         }
         final var restored = temporary.resolve("merged");
         one.restore(REPOSITORY, restored);
         assertEquals("A", Files.readString(restored.resolve("a/one")));
         assertEquals("B", Files.readString(restored.resolve("b/two")));
+    }
+
+    @Test
+    void missingEntryDoesNotConflictWithANewerRevisionWhileAnotherEntryPublishes() throws Exception {
+        final var policy = policy(16_000_000, List.of(entry("a"), entry("b")), 2);
+        final var one = new DependencyCache(policy, NOW);
+        final var two = new DependencyCache(policy, NOW);
+        final var a = temporary.resolve("attempt-a");
+        final var b = temporary.resolve("attempt-b");
+        final var baselineA = one.restore(REPOSITORY, a);
+        final var baselineB = two.restore(REPOSITORY, b);
+        file(a, "a/one", "A");
+        file(b, "b/two", "B");
+        assertEquals(new DependencyCache.Publication(1, 1, 0, 0), one.publish(REPOSITORY, a, baselineA));
+        // a has changed since baselineB, but this attempt has no a candidate at all.
+        assertEquals(new DependencyCache.Publication(1, 1, 0, 0), two.publish(REPOSITORY, b, baselineB));
+        final var restored = temporary.resolve("merged-after-stale-missing-entry");
+        final var merged = new DependencyCache(policy, NOW).restore(REPOSITORY, restored);
+        assertFalse(merged.revisions().get("a").isEmpty());
+        assertFalse(merged.revisions().get("b").isEmpty());
+        assertEquals("A", Files.readString(restored.resolve("a/one")));
+        assertEquals("B", Files.readString(restored.resolve("b/two")));
+        assertEquals(new DependencyCache.Publication(0, 2, 0, 0), two.publish(REPOSITORY, restored, merged));
     }
 
     @Test

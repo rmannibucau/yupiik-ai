@@ -195,7 +195,7 @@ class AgentBrokerGatewayTest {
                         final var operationCommand = new ArrayList<>(operationFlags);
                         operationCommand.addAll(operation);
                         final var result = run(workspace, operationCommand, context.credentials());
-                        assertEquals(0, result.exit(), result.output());
+                        assertEquals(0, result.exit(), operation.getFirst() + ": " + result.output());
                         assertEquals(
                                 localHead, git(checkout, "rev-parse", "HEAD").strip());
                         assertEquals("uncommitted agent work\n", Files.readString(checkout.resolve("file.txt")));
