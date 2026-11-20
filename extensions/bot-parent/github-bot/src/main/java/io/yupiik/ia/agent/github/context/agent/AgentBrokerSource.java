@@ -28,10 +28,14 @@ import java.io.UncheckedIOException;
 import java.math.BigDecimal;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.FileVisitResult;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
+import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
+import java.nio.file.SimpleFileVisitor;
 import java.nio.file.StandardOpenOption;
+import java.nio.file.attribute.BasicFileAttributes;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -751,31 +755,60 @@ public final class AgentBrokerSource {
     }
 
     private void bounds() throws IOException {
-        if (expired()) {
-            throw new SourceFailure(
-                    Thread.currentThread().isInterrupted() ? FailureCode.CANCELLED : FailureCode.DEADLINE_EXCEEDED);
-        }
+        checkDeadline();
         if (!Files.exists(repository, LinkOption.NOFOLLOW_LINKS)) {
             return;
         }
-        long total = 0;
-        try (final var files = Files.walk(repository)) {
-            final var iterator = files.iterator();
-            while (iterator.hasNext()) {
-                final var path = iterator.next();
-                if (Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS)) {
-                    total = Math.addExact(total, Files.size(path));
+        // Native Git can rename/remove lock files and temporary pack directories during this scan.
+        // Use the traversal's attributes rather than statting a potentially vanished entry again.
+        Files.walkFileTree(repository, new SimpleFileVisitor<>() {
+            private long total;
+
+            @Override
+            public FileVisitResult preVisitDirectory(final Path directory, final BasicFileAttributes attributes)
+                    throws IOException {
+                checkDeadline();
+                return FileVisitResult.CONTINUE;
+            }
+
+            @Override
+            public FileVisitResult visitFile(final Path file, final BasicFileAttributes attributes) throws IOException {
+                checkDeadline();
+                if (attributes.isRegularFile()) {
+                    total = Math.addExact(total, attributes.size());
                     if (total > options.maxBytes()) {
                         throw new IOException("Soft disk bound exceeded.");
                     }
                 }
-                if (expired()) {
-                    throw new SourceFailure(
-                            Thread.currentThread().isInterrupted()
-                                    ? FailureCode.CANCELLED
-                                    : FailureCode.DEADLINE_EXCEEDED);
-                }
+                return FileVisitResult.CONTINUE;
             }
+
+            @Override
+            public FileVisitResult visitFileFailed(final Path file, final IOException failure) throws IOException {
+                checkDeadline();
+                if (failure instanceof NoSuchFileException) {
+                    return FileVisitResult.CONTINUE;
+                }
+                throw failure;
+            }
+
+            @Override
+            public FileVisitResult postVisitDirectory(final Path directory, final IOException failure)
+                    throws IOException {
+                checkDeadline();
+                if (failure != null && !(failure instanceof NoSuchFileException)) {
+                    throw failure;
+                }
+                return FileVisitResult.CONTINUE;
+            }
+        });
+        checkDeadline();
+    }
+
+    private void checkDeadline() throws IOException {
+        if (expired()) {
+            throw new SourceFailure(
+                    Thread.currentThread().isInterrupted() ? FailureCode.CANCELLED : FailureCode.DEADLINE_EXCEEDED);
         }
     }
 

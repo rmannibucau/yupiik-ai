@@ -82,6 +82,16 @@ class AgentBrokerSourceTest {
     }
 
     @Test
+    void transientGitFilesDoNotRejectAnOtherwiseClassifiedOperation() throws Exception {
+        final var workspace = Files.createDirectory(temporary.resolve("churn"));
+        final var flags = fixtureFlags(workspace, "churn");
+        flags.set(flags.indexOf("--timeout") + 1, "10");
+        final var result = launch(workspace, flags, List.of("init"));
+        assertNotEquals(0, result.exit());
+        assertTrue(result.error().contains("stage=git_init code=GIT_EXIT"), result.error());
+    }
+
+    @Test
     void failuresHaveFixedClassificationsWithoutGitOutputArgumentsOrCredentials() throws Exception {
         for (final var mode : List.of("exit", "output-limit")) {
             final var workspace = Files.createDirectory(temporary.resolve(mode));
@@ -163,6 +173,19 @@ class AgentBrokerSourceTest {
             Files.writeString(
                     workspace.resolve("git.pid"),
                     Long.toString(ProcessHandle.current().pid()));
+            if (mode.equals("churn")) {
+                // Git creates and removes lock files and temporary object directories during fetch.
+                final var root = Path.of("objects");
+                Files.createDirectory(root);
+                final long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
+                while (System.nanoTime() < until) {
+                    final var directory = Files.createTempDirectory(root, "incoming-");
+                    final var lock = Files.createFile(directory.resolve("pack.lock"));
+                    Files.delete(lock);
+                    Files.delete(directory);
+                }
+                System.exit(7);
+            }
             if (mode.equals("exit")) {
                 System.out.println("fixture-private-value");
                 System.err.println("fixture-private-value");
