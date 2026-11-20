@@ -166,21 +166,28 @@ class StdioMcpClientTest {
     }
 
     private StdioMcpClient adversary(
-            final String mode, final Path tmp, final JsonMapper mapper, final int timeoutSeconds) {
-        return new StdioMcpClient(
-                "adversary",
-                List.of(
-                        Path.of(System.getProperty("java.home"), "bin", "java").toString(),
-                        "-cp",
-                        System.getProperty("java.class.path"),
-                        AdversarialMcpServer.class.getName(),
-                        mode,
-                        tmp.toString()),
-                List.of(),
-                null,
-                timeoutSeconds,
-                mapper,
-                null);
+            final String mode, final Path tmp, final JsonMapper mapper, final int timeoutSeconds) throws IOException {
+        final List<String> command;
+        if ((mode.equals("delayed-call") || mode.equals("slow-pages"))
+                && !System.getProperty("os.name", "").toLowerCase().contains("win")) {
+            // A one-second RPC deadline must exercise the delayed reply, not JVM startup/JIT
+            // competing with the parallel suite. Keep real process/pipe I/O without a child JVM.
+            final var script = tmp.resolve("timed-server.sh");
+            try (final var source = StdioMcpClientTest.class.getResourceAsStream("/mcp/timed-server.sh")) {
+                assertNotNull(source);
+                Files.copy(source, script);
+            }
+            command = List.of("/bin/sh", script.toString(), tmp.resolve("pid").toString(), mode);
+        } else {
+            command = List.of(
+                    Path.of(System.getProperty("java.home"), "bin", "java").toString(),
+                    "-cp",
+                    System.getProperty("java.class.path"),
+                    AdversarialMcpServer.class.getName(),
+                    mode,
+                    tmp.toString());
+        }
+        return new StdioMcpClient("adversary", command, List.of(), null, timeoutSeconds, mapper, null);
     }
 
     private void assertReaped(final Path tmp) throws Exception {

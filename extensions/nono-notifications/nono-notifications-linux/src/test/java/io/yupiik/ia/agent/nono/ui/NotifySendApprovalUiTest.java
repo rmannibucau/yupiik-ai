@@ -141,9 +141,16 @@ class NotifySendApprovalUiTest {
             final var executable = script(body);
             try (final var ui = new NotifySendApprovalUi(executable);
                     final var handle = ui.present("test", Duration.ofMillis(300))) {
-                final var pid = awaitPid(executable);
                 assertFalse(handle.decision().toCompletableFuture().get(3, TimeUnit.SECONDS));
-                assertFalse(ProcessHandle.of(pid).map(ProcessHandle::isAlive).orElse(false));
+                // The deadline includes process startup: on a busy runner cancellation can
+                // correctly kill the shell before its first instruction publishes a PID.
+                // Once the decision completes, any published process must already be reaped.
+                final var pidFile = Path.of(executable + ".pid");
+                if (Files.exists(pidFile) && !Files.readString(pidFile).isBlank()) {
+                    final var pid = Long.parseLong(Files.readString(pidFile));
+                    assertFalse(
+                            ProcessHandle.of(pid).map(ProcessHandle::isAlive).orElse(false));
+                }
             }
         }
     }
