@@ -409,6 +409,7 @@
   </profiles>
 
   <subprojects>
+    <subproject>testing</subproject>
     <subproject>llm-client</subproject>
     <subproject>html-to-markdown</subproject>
     <subproject>code-graph-index</subproject>

@@ -20,6 +20,12 @@
   <dependencies>
     <dependency>
       <groupId>io.yupiik.ia.agent</groupId>
+      <artifactId>testing</artifactId>
+      <version>${project.version}</version>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>io.yupiik.ia.agent</groupId>
       <artifactId>bot-runtime</artifactId>
       <version>${project.version}</version>
     </dependency>

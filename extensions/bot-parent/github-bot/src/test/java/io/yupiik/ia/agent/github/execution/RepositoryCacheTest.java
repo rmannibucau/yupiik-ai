@@ -18,6 +18,7 @@ package io.yupiik.ia.agent.github.execution;
 import static org.junit.jupiter.api.Assertions.*;
 
 import io.yupiik.ia.agent.github.support.TestScript;
+import io.yupiik.ia.agent.testing.UnlinkingTempDirDeletionStrategy;
 import java.io.IOException;
 import java.nio.channels.FileChannel;
 import java.nio.file.Files;
@@ -34,7 +35,7 @@ import org.junit.jupiter.api.io.TempDir;
 class RepositoryCacheTest {
     private static final String REPO = "https://github.com/yupiik/example.git";
 
-    @TempDir
+    @TempDir(deletionStrategy = UnlinkingTempDirDeletionStrategy.class)
     Path temporary;
 
     @Test

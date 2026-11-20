@@ -22,6 +22,7 @@ import io.yupiik.ia.agent.bot.runtime.ExecutionPolicy;
 import io.yupiik.ia.agent.bot.runtime.ProviderBudgetEnvironment;
 import io.yupiik.ia.agent.bot.runtime.TestScript;
 import io.yupiik.ia.agent.bot.runtime.configuration.ExecutorConfiguration;
+import io.yupiik.ia.agent.testing.UnlinkingTempDirDeletionStrategy;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.attribute.PosixFilePermissions;
@@ -36,7 +37,7 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.MethodSource;
 
 class DockerRestrictedServicesTest {
-    @TempDir
+    @TempDir(deletionStrategy = UnlinkingTempDirDeletionStrategy.class)
     Path home;
 
     @ParameterizedTest

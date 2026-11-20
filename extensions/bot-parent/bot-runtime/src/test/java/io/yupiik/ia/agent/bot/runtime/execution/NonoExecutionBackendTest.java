@@ -21,6 +21,7 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 import io.yupiik.fusion.json.internal.JsonMapperImpl;
 import io.yupiik.ia.agent.bot.runtime.RuntimeJsonMapper;
 import io.yupiik.ia.agent.bot.runtime.TestScript;
+import io.yupiik.ia.agent.testing.UnlinkingTempDirDeletionStrategy;
 import java.net.StandardProtocolFamily;
 import java.net.UnixDomainSocketAddress;
 import java.nio.channels.ServerSocketChannel;
@@ -43,7 +44,7 @@ import org.junit.jupiter.params.provider.ValueSource;
 
 @Timeout(15)
 class NonoExecutionBackendTest {
-    @TempDir
+    @TempDir(deletionStrategy = UnlinkingTempDirDeletionStrategy.class)
     Path home;
 
     @Test

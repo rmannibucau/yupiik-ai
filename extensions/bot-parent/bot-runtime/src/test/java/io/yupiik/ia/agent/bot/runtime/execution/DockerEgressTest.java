@@ -22,6 +22,7 @@ import io.yupiik.ia.agent.bot.runtime.ExecutionPolicy;
 import io.yupiik.ia.agent.bot.runtime.TestJava;
 import io.yupiik.ia.agent.bot.runtime.TestScript;
 import io.yupiik.ia.agent.bot.runtime.configuration.ExecutorConfiguration;
+import io.yupiik.ia.agent.testing.UnlinkingTempDirDeletionStrategy;
 import java.net.Proxy;
 import java.net.ProxySelector;
 import java.net.URI;
@@ -39,7 +40,7 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.MethodSource;
 
 class DockerEgressTest {
-    @TempDir
+    @TempDir(deletionStrategy = UnlinkingTempDirDeletionStrategy.class)
     Path home;
 
     @ParameterizedTest

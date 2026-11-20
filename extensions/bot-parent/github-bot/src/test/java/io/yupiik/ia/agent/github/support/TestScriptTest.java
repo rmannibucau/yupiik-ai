@@ -17,6 +17,7 @@ package io.yupiik.ia.agent.github.support;
 
 import static org.junit.jupiter.api.Assertions.*;
 
+import io.yupiik.ia.agent.testing.UnlinkingTempDirDeletionStrategy;
 import java.nio.channels.FileChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -26,7 +27,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 class TestScriptTest {
-    @TempDir
+    @TempDir(deletionStrategy = UnlinkingTempDirDeletionStrategy.class)
     Path temporary;
 
     @Test

@@ -66,6 +66,7 @@ import io.yupiik.ia.agent.github.support.BotJsonMapper;
 import io.yupiik.ia.agent.github.support.BotTestConfiguration;
 import io.yupiik.ia.agent.github.support.TaskFixtures;
 import io.yupiik.ia.agent.github.support.TestScript;
+import io.yupiik.ia.agent.testing.UnlinkingTempDirDeletionStrategy;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.URI;
@@ -102,7 +103,7 @@ class WorkerTest {
 
     private static final String URL = "https://github.com/owner/repo/issues/12#issuecomment-99";
 
-    @TempDir
+    @TempDir(deletionStrategy = UnlinkingTempDirDeletionStrategy.class)
     Path home;
 
     private JsonMapperImpl json;

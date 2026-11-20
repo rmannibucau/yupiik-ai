@@ -26,6 +26,7 @@ import io.yupiik.ia.agent.github.configuration.DependencyCacheConfiguration.Entr
 import io.yupiik.ia.agent.github.configuration.DependencyCacheConfiguration.Kind;
 import io.yupiik.ia.agent.github.configuration.DependencyCacheConfiguration.Limits;
 import io.yupiik.ia.agent.github.support.TestJava;
+import io.yupiik.ia.agent.testing.UnlinkingTempDirDeletionStrategy;
 import java.io.DataOutputStream;
 import java.io.File;
 import java.io.IOException;
@@ -52,7 +53,7 @@ class CacheSnapshotTest {
     private static final Entry GENERIC = new Entry("npm", Kind.GENERIC, "cache", List.of());
     private static final Limits LIMITS = new Limits(10_000, 128L * 1024 * 1024, 4 * 1024 * 1024, 60, 1);
 
-    @TempDir
+    @TempDir(deletionStrategy = UnlinkingTempDirDeletionStrategy.class)
     Path temporary;
 
     @Test
