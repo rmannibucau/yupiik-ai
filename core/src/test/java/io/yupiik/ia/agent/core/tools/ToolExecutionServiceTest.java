@@ -191,7 +191,10 @@ class ToolExecutionServiceTest {
         assertTrue(result.output().contains("kept line 0"), result.output());
         assertFalse(result.output().contains("   \n"), "blank runs must be compacted");
         assertEquals(1, reports.size(), reports.toString());
-        assertTrue(reports.get(0).contains("output optimized by Generic"), reports.toString());
+        assertEquals(
+                "output optimized by GenericOutputProcessor (" + TokenEstimator.estimate(sb.toString()) + " -> "
+                        + TokenEstimator.estimate(result.output()) + " estimated tokens)",
+                reports.get(0));
     }
 
     @Test

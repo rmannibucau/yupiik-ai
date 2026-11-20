@@ -206,16 +206,18 @@ public class ToolExecutionService {
                             processor.process(effective, output.lines()).collect(joining("\n"));
                     // only accept a meaningful reduction: tiny wins are noise, not optimization
                     if (processed.length() * 100L <= output.length() * (100L - minReduction)) {
+                        final var originalTokens = TokenEstimator.estimate(output);
+                        final var processedTokens = TokenEstimator.estimate(processed);
                         if (reporter != null) {
-                            reporter.report("output optimized by " + processor.displayName() + " (" + output.length()
-                                    + " -> " + processed.length() + " chars)");
+                            reporter.report("output optimized by " + processor.displayName() + " (" + originalTokens
+                                    + " -> " + processedTokens + " estimated tokens)");
                         }
                         if (context.usage() != null) {
                             context.usage()
                                     .recordOptimization(
                                             output.length(),
                                             processed.length(),
-                                            TokenEstimator.estimate(output) - TokenEstimator.estimate(processed));
+                                            originalTokens - processedTokens);
                         }
                         return processed;
                     }
