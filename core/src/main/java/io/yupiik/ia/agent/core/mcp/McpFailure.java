@@ -25,6 +25,7 @@ import java.util.regex.Pattern;
 
 /** MCP server detail is deliberately absent from exception messages and causes. */
 class McpFailure extends IOException {
+    private static final Pattern UNSAFE_SERVER_NAME = Pattern.compile("[^A-Za-z0-9_.-]");
     private static final Pattern TERMINAL_CSI = Pattern.compile("\u001b\\[[0-?]*[ -/]*[@-~]");
     private static final Pattern TERMINAL_OSC = Pattern.compile("\u001b\\][^\u0007\u001b]*(?:\u0007|\u001b\\\\)");
     private static final Pattern CONTROLS = Pattern.compile("[\\p{Cc}\\p{Cf}&&[^\\n\\t]]");
@@ -35,10 +36,20 @@ class McpFailure extends IOException {
     private static final Pattern URL_CREDENTIALS = Pattern.compile("(?i)(https?://)[^/@\\s]+:[^/@\\s]+@");
 
     private final String detail;
+    private final boolean toolError;
 
     McpFailure(final String message, final String detail) {
+        this(message, detail, false);
+    }
+
+    private McpFailure(final String message, final String detail, final boolean toolError) {
         super(message);
         this.detail = detail;
+        this.toolError = toolError;
+    }
+
+    static McpFailure toolError(final String detail) {
+        return new McpFailure("MCP tool returned an error", detail, true);
     }
 
     String detail() {
@@ -63,7 +74,7 @@ class McpFailure extends IOException {
                 }
             }
         }
-        return new McpFailure(getMessage(), sanitize(detail, secrets));
+        return new McpFailure(getMessage(), sanitize(detail, secrets), toolError);
     }
 
     private static String sanitize(final String detail, final List<String> secrets) {
@@ -86,6 +97,11 @@ class McpFailure extends IOException {
     }
 
     static ToolDiagnosticException forUi(final String name, final Throwable failure) {
+        return forUi(name, null, List.of(), failure);
+    }
+
+    static ToolDiagnosticException forUi(
+            final String name, final String server, final List<Pattern> avoidOnErrorPatterns, final Throwable failure) {
         var current = failure;
         for (var depth = 0; current != null && depth < 16; depth++, current = current.getCause()) {
             if (current instanceof McpHttpException http) {
@@ -101,8 +117,22 @@ class McpFailure extends IOException {
             }
             if (current instanceof McpFailure mcp) {
                 final var detail = mcp.detail();
+                final var avoid = mcp.toolError
+                        && detail != null
+                        && avoidOnErrorPatterns.stream()
+                                .anyMatch(it -> it.matcher(detail).find());
                 return new ToolDiagnosticException(
-                        "MCP tool " + name + " failed", detail == null || detail.isBlank() ? mcp.getMessage() : detail);
+                        "MCP tool " + name + " failed"
+                                + (avoid
+                                        ? ". MCP server '"
+                                                + UNSAFE_SERVER_NAME
+                                                        .matcher(server)
+                                                        .replaceAll("_")
+                                                + "' returned an error matching its configured avoidance policy. "
+                                                + "Avoid further calls to this server or its other tools for the current task "
+                                                + "unless access changes or the user requests a retry. Continue with alternatives."
+                                        : ""),
+                        detail == null || detail.isBlank() ? mcp.getMessage() : detail);
             }
         }
         // Unknown exceptions can contain arbitrary server data or credentials; do not forward them.

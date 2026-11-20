@@ -26,6 +26,7 @@ import io.yupiik.ia.agent.core.configuration.McpServerConfiguration;
 import io.yupiik.ia.agent.core.tools.EmbeddedTool;
 import io.yupiik.ia.agent.core.tools.ToolCategory;
 import io.yupiik.ia.agent.core.tools.ToolContext;
+import io.yupiik.ia.agent.core.tools.ToolDiagnosticException;
 import io.yupiik.ia.agent.core.tools.ToolResult;
 import io.yupiik.ia.agent.core.wiring.HttpClientProducer.SessionCapableClient;
 import io.yupiik.maven.knowledge.process.ProcessService;
@@ -52,6 +53,8 @@ import java.util.concurrent.TimeoutException;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.logging.Level;
 import java.util.logging.Logger;
+import java.util.regex.Pattern;
+import java.util.regex.PatternSyntaxException;
 
 @ApplicationScoped
 public class McpManager {
@@ -62,7 +65,14 @@ public class McpManager {
     // A per-instance logger re-resolves lazily, so only the active runtime registry emits.
     private final Logger logger = Logger.getLogger(McpManager.class.getName());
 
+    private static final Pattern UNSAFE_SERVER_NAME = Pattern.compile("[^A-Za-z0-9_.-]");
+    private static final List<Pattern> DEFAULT_AVOID_ON_ERROR_PATTERNS =
+            McpServerConfiguration.DEFAULT_AVOID_ON_ERROR_PATTERNS.stream()
+                    .map(Pattern::compile)
+                    .toList();
+
     private final CodingAgentConfiguration configuration;
+    private final Map<String, List<Pattern>> avoidOnErrorPatterns;
     private final JsonMapper mapper;
     private final List<EmbeddedTool> localTools;
     private final SessionCapableClient httpClient;
@@ -96,6 +106,13 @@ public class McpManager {
             final ProcessService processes,
             final ExecutorService executor) {
         this.configuration = configuration;
+        final var patterns = new LinkedHashMap<String, List<Pattern>>();
+        if (configuration.mcp() != null && configuration.mcp().servers() != null) {
+            for (final var server : configuration.mcp().servers()) {
+                patterns.put(server.name(), compileAvoidOnErrorPatterns(server.name(), server.avoidOnErrorPatterns()));
+            }
+        }
+        this.avoidOnErrorPatterns = Map.copyOf(patterns);
         this.mapper = mapper;
         this.localTools = localTools;
         this.httpClient = httpClient;
@@ -107,7 +124,26 @@ public class McpManager {
         this.async = executor != null;
     }
 
+    private static List<Pattern> compileAvoidOnErrorPatterns(final String server, final List<String> patterns) {
+        if (McpServerConfiguration.DEFAULT_AVOID_ON_ERROR_PATTERNS.equals(patterns)) {
+            return DEFAULT_AVOID_ON_ERROR_PATTERNS;
+        }
+        try {
+            return patterns.stream().map(Pattern::compile).toList();
+        } catch (final PatternSyntaxException e) {
+            // Do not include the expression or the regex exception: configuration can contain secrets.
+            throw new IllegalArgumentException("Invalid avoidOnErrorPatterns for MCP server '"
+                    + UNSAFE_SERVER_NAME.matcher(server).replaceAll("_") + "'");
+        }
+    }
+
+    ToolDiagnosticException failureForUi(final String server, final String tool, final Throwable failure) {
+        return McpFailure.forUi(
+                tool, server, avoidOnErrorPatterns.getOrDefault(server, DEFAULT_AVOID_ON_ERROR_PATTERNS), failure);
+    }
+
     protected McpManager() {
+        this.avoidOnErrorPatterns = Map.of();
         this.configuration = null;
         this.mapper = null;
         this.localTools = null;
@@ -182,7 +218,8 @@ public class McpManager {
 
                         @Override
                         public String description(final Path workdir) {
-                            return descriptor.description() == null ? descriptor.name() : descriptor.description();
+                            return "[" + server.name() + "] "
+                                    + (descriptor.description() == null ? descriptor.name() : descriptor.description());
                         }
 
                         @Override
@@ -213,7 +250,7 @@ public class McpManager {
                                 Thread.currentThread().interrupt();
                                 return ToolResult.error("Client MCP call interrupted");
                             } catch (final IOException | RuntimeException e) {
-                                throw McpFailure.forUi(qualified, e);
+                                throw McpFailure.forUi(qualified, server.name(), DEFAULT_AVOID_ON_ERROR_PATTERNS, e);
                             }
                         }
                     });

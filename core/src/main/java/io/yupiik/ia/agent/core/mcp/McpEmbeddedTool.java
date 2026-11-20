@@ -72,7 +72,7 @@ class McpEmbeddedTool implements EmbeddedTool {
         try {
             return ToolResult.ok(manager.call(serverName, tool.name(), args));
         } catch (final RuntimeException e) {
-            throw McpFailure.forUi(qualifiedName, e);
+            throw manager.failureForUi(serverName, qualifiedName, e);
         }
     }
 }
