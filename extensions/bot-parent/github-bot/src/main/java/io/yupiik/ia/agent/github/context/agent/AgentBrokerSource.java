@@ -561,6 +561,8 @@ public final class AgentBrokerSource {
         CANCELLED,
         GIT_EXIT,
         OUTPUT_LIMIT,
+        DISK_LIMIT,
+        DISK_SCAN_IO,
         PROCESS_START,
         PROCESS_IO,
         CLEANUP_FAILED
@@ -761,47 +763,54 @@ public final class AgentBrokerSource {
         }
         // Native Git can rename/remove lock files and temporary pack directories during this scan.
         // Use the traversal's attributes rather than statting a potentially vanished entry again.
-        Files.walkFileTree(repository, new SimpleFileVisitor<>() {
-            private long total;
+        try {
+            Files.walkFileTree(repository, new SimpleFileVisitor<>() {
+                private long total;
 
-            @Override
-            public FileVisitResult preVisitDirectory(final Path directory, final BasicFileAttributes attributes)
-                    throws IOException {
-                checkDeadline();
-                return FileVisitResult.CONTINUE;
-            }
-
-            @Override
-            public FileVisitResult visitFile(final Path file, final BasicFileAttributes attributes) throws IOException {
-                checkDeadline();
-                if (attributes.isRegularFile()) {
-                    total = Math.addExact(total, attributes.size());
-                    if (total > options.maxBytes()) {
-                        throw new IOException("Soft disk bound exceeded.");
-                    }
-                }
-                return FileVisitResult.CONTINUE;
-            }
-
-            @Override
-            public FileVisitResult visitFileFailed(final Path file, final IOException failure) throws IOException {
-                checkDeadline();
-                if (failure instanceof NoSuchFileException) {
+                @Override
+                public FileVisitResult preVisitDirectory(final Path directory, final BasicFileAttributes attributes)
+                        throws IOException {
+                    checkDeadline();
                     return FileVisitResult.CONTINUE;
                 }
-                throw failure;
-            }
 
-            @Override
-            public FileVisitResult postVisitDirectory(final Path directory, final IOException failure)
-                    throws IOException {
-                checkDeadline();
-                if (failure != null && !(failure instanceof NoSuchFileException)) {
+                @Override
+                public FileVisitResult visitFile(final Path file, final BasicFileAttributes attributes)
+                        throws IOException {
+                    checkDeadline();
+                    if (attributes.isRegularFile()) {
+                        if (attributes.size() > options.maxBytes() - total) {
+                            throw new SourceFailure(FailureCode.DISK_LIMIT);
+                        }
+                        total += attributes.size();
+                    }
+                    return FileVisitResult.CONTINUE;
+                }
+
+                @Override
+                public FileVisitResult visitFileFailed(final Path file, final IOException failure) throws IOException {
+                    checkDeadline();
+                    if (failure instanceof NoSuchFileException) {
+                        return FileVisitResult.CONTINUE;
+                    }
                     throw failure;
                 }
-                return FileVisitResult.CONTINUE;
-            }
-        });
+
+                @Override
+                public FileVisitResult postVisitDirectory(final Path directory, final IOException failure)
+                        throws IOException {
+                    checkDeadline();
+                    if (failure != null && !(failure instanceof NoSuchFileException)) {
+                        throw failure;
+                    }
+                    return FileVisitResult.CONTINUE;
+                }
+            });
+        } catch (final SourceFailure failure) {
+            throw failure;
+        } catch (final IOException failure) {
+            throw new SourceFailure(FailureCode.DISK_SCAN_IO);
+        }
         checkDeadline();
     }
 

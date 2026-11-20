@@ -89,6 +89,8 @@ class AgentBrokerSourceTest {
         final var result = launch(workspace, flags, List.of("init"));
         assertNotEquals(0, result.exit());
         assertTrue(result.error().contains("stage=git_init code=GIT_EXIT"), result.error());
+        assertFalse(result.error().contains(workspace.toString()), result.error());
+        assertFalse(result.error().contains(ENDPOINT), result.error());
     }
 
     @Test
@@ -451,8 +453,15 @@ class AgentBrokerSourceTest {
     void rejectsUnsafeConfigInvalidPathsBoundsAndExistingInitWithoutNetwork() throws Exception {
         final var workspace = temporary.resolve("invalid");
         final var head = fixture(workspace);
-        // Exercise main's rejection path too; the child matrix keeps its own real cwd throughout.
-        assertNotEquals(0, cli(workspace, head, "expand", "../outside").exit());
+        // Exercise main's disk-limit diagnostic too; the child matrix keeps its own real cwd throughout.
+        final var diskBound = new ArrayList<>(flags(head));
+        diskBound.set(diskBound.indexOf("--max-bytes") + 1, "1");
+        final var result = launch(workspace, diskBound, List.of("expand", "docs"));
+        assertNotEquals(0, result.exit());
+        assertTrue(result.error().contains("code=DISK_LIMIT"), result.error());
+        assertEquals("", result.output());
+        assertFalse(result.error().contains(workspace.toString()), result.error());
+        assertFalse(result.error().contains(ENDPOINT), result.error());
         matrix(workspace, head, "unsafe");
     }
 

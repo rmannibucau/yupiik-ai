@@ -235,7 +235,7 @@ class AgentBrokerHttpsTest {
                 for (final var operation : List.of(List.of("deepen", "1"), List.of("tags"), List.of("base"))) {
                     final var result =
                             run(workspace, helper(store, flags, operation.toArray(String[]::new)), environment, "");
-                    assertEquals(0, result.exit(), result.output());
+                    assertEquals(0, result.exit(), () -> operation.getFirst() + ": " + result.output());
                     assertEquals(localHead, git(repo, "rev-parse", "HEAD").strip());
                     assertEquals("uncommitted agent work\n", Files.readString(repo.resolve("src/code.txt")));
                     assertEquals("untracked agent work\n", Files.readString(repo.resolve("untracked.txt")));
