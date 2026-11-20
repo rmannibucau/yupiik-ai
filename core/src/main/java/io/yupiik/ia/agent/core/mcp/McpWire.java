@@ -128,7 +128,7 @@ public final class McpWire {
             text.append(json(mapper, result.structuredContent()));
         }
         if (Boolean.TRUE.equals(result.isError())) {
-            throw new McpFailure("MCP tool returned an error", text.toString());
+            throw McpFailure.toolError(text.toString());
         }
         return text.toString();
     }

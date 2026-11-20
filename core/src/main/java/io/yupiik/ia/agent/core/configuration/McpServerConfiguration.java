@@ -59,7 +59,42 @@ public record McpServerConfiguration(
                 defaultValue = "java.util.List.of()",
                 documentation =
                         "Tool names of this server treated as read-only (the only MCP tools allowed in plan mode). `*` enables all tools of the server.")
-        List<String> readonly) {
+        List<String> readonly,
+
+        @Property(
+                defaultValue =
+                        "io.yupiik.ia.agent.core.configuration.McpServerConfiguration.DEFAULT_AVOID_ON_ERROR_PATTERNS",
+                documentation =
+                        "Regular expressions searched in sanitized failed MCP tool diagnostics. A match advises "
+                                + "the model to avoid all tools of this server for the current task, without disabling them. "
+                                + "Defaults match explicit daily/monthly quota or request-limit exhaustion. Custom values "
+                                + "replace the defaults; an empty list disables this advice. Successful results are never matched.")
+        List<String> avoidOnErrorPatterns) {
+
+    public McpServerConfiguration {
+        avoidOnErrorPatterns =
+                avoidOnErrorPatterns == null || DEFAULT_AVOID_ON_ERROR_PATTERNS.equals(avoidOnErrorPatterns)
+                        ? DEFAULT_AVOID_ON_ERROR_PATTERNS
+                        : List.copyOf(avoidOnErrorPatterns);
+    }
+
+    public McpServerConfiguration(
+            final String name,
+            final String command,
+            final List<String> args,
+            final List<String> env,
+            final String dir,
+            final String url,
+            final String apiKey,
+            final List<String> headers,
+            final boolean enabled,
+            final List<String> readonly) {
+        this(name, command, args, env, dir, url, apiKey, headers, enabled, readonly, null);
+    }
+
+    public static final List<String> DEFAULT_AVOID_ON_ERROR_PATTERNS = List.of(
+            "(?i)\\b(?:daily|monthly)\\s+quota\\s+(?:reached|exceeded|exhausted)\\b",
+            "(?i)\\b(?:daily|monthly)\\s+(?:request|API request)\\s+limit\\s+(?:reached|exceeded|exhausted)\\b");
 
     public boolean isReadOnly(final String toolName) {
         return readonly != null && (readonly.contains("*") || readonly.contains(toolName));
