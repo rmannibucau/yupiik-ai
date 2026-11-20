@@ -70,6 +70,18 @@ import org.junit.jupiter.params.provider.ValueSource;
 @ExtendWith(TestJsonMapper.class)
 class McpManagerTest {
 
+    @Test
+    void startupOverrideCanUseConstructorWithoutConfiguration() {
+        try (final var manager = new McpManager(null, null, List.of(), null, null) {
+            @Override
+            public void start() {
+                // Test doubles supply their own tools instead of configured servers.
+            }
+        }) {
+            assertTrue(manager.tools().isEmpty());
+        }
+    }
+
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
     @Timeout(10)

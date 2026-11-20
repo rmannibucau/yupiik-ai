@@ -57,7 +57,7 @@ import java.util.regex.Pattern;
 import java.util.regex.PatternSyntaxException;
 
 @ApplicationScoped
-public class McpManager {
+public class McpManager implements AutoCloseable {
     // Non-static: resolved per instance so it binds to the ACTIVE runtime LogManager/registry.
     // In the GraalVM-native build the static form is initialized at image-build-time against the
     // legacy logging registry, while at runtime yca uses -Djava.util.logging.manager=YupiikLogManager;
@@ -107,7 +107,9 @@ public class McpManager {
             final ExecutorService executor) {
         this.configuration = configuration;
         final var patterns = new LinkedHashMap<String, List<Pattern>>();
-        if (configuration.mcp() != null && configuration.mcp().servers() != null) {
+        if (configuration != null
+                && configuration.mcp() != null
+                && configuration.mcp().servers() != null) {
             for (final var server : configuration.mcp().servers()) {
                 patterns.put(server.name(), compileAvoidOnErrorPatterns(server.name(), server.avoidOnErrorPatterns()));
             }
@@ -656,6 +658,7 @@ public class McpManager {
      * and drop the cached tool metadata. Invoked as an application-scoped bean destroy so MCP
      * subprocesses are torn down on application shutdown, not only on restart/reset.
      */
+    @Override
     @Destroy
     public void close() {
         lifecycleLock.lock();
