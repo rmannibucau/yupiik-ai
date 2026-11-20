@@ -1099,7 +1099,7 @@ class AcpOwnedWorkIntegrationTest {
                     support.providers,
                     support.configuration,
                     new PlanFileService(store),
-                    new PlanTodoSeeder(null, store, mapper),
+                    new PlanTodoSeeder(store),
                     support.commandOptions);
             writer = new PrintWriter(new PipedOutputStream(input), true);
             final var stream = new PrintStream(OutputStream.nullOutputStream()) {

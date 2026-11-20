@@ -21,16 +21,17 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.ia.agent.core.agent.MemoryExtractor;
-import io.yupiik.ia.agent.core.todo.PlanTodoSeeder;
+import io.yupiik.ia.agent.core.llm.ChatClient;
 import java.util.List;
 import java.util.Map;
+import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
 /**
  * Structured-output schemas must stay valid for strict providers (Anthropic structured outputs in
  * particular): {@code additionalProperties} only applies to objects, so an array entry carrying it
- * makes Anthropic reject the whole request with a 400 {@code json was malformed}. These regressions
- * pin the two schemas that previously violated that rule.
+ * makes Anthropic reject the whole request with a 400 {@code json was malformed}. This regression
+ * pins the memory-extraction schema that previously violated that rule.
  */
 class StructuredOutputSchemasTest {
 
@@ -48,19 +49,6 @@ class StructuredOutputSchemasTest {
         assertEquals(Boolean.FALSE, schema.get("additionalProperties"), "root must keep additionalProperties");
     }
 
-    @Test
-    void stepsSchemaHasNoArrayLevelAdditionalProperties() {
-        final var schema = PlanTodoSeeder.stepsSchema();
-        final var steps = array(schema, "steps");
-        assertNotNull(steps, "steps array expected");
-        assertFalse(steps.containsKey("additionalProperties"), "array must not carry additionalProperties");
-        final var item = asMap(steps.get("items"));
-        assertNotNull(item, "array items expected");
-        assertEquals(
-                Boolean.FALSE, item.get("additionalProperties"), "item objects must keep additionalProperties: false");
-        assertEquals(Boolean.FALSE, schema.get("additionalProperties"), "root must keep additionalProperties");
-    }
-
     private static Map<String, Object> array(final Map<String, Object> root, final String name) {
         final var properties = asMap(root.get("properties"));
         return properties == null ? null : asMap(properties.get(name));
@@ -70,8 +58,8 @@ class StructuredOutputSchemasTest {
     void sanitizerIsIdempotentOnTheBuiltInSchemas() {
         // yca's own schemas are already in the Anthropic-accepted subset: the sanitizer must not
         // change them (no added description, no forced properties), so their wire form stays as today
-        final var facts = io.yupiik.ia.agent.core.llm.ChatClient.sanitizeSchema(MemoryExtractor.factsSchema());
-        org.junit.jupiter.api.Assertions.assertEquals(MemoryExtractor.factsSchema(), facts);
+        final var facts = ChatClient.sanitizeSchema(MemoryExtractor.factsSchema());
+        Assertions.assertEquals(MemoryExtractor.factsSchema(), facts);
     }
 
     @Test
@@ -87,7 +75,7 @@ class StructuredOutputSchemasTest {
                         Map.of("type", "string", "maxLength", 10, "format", "email")),
                 "required",
                 List.of("age"));
-        final var sanitized = io.yupiik.ia.agent.core.llm.ChatClient.sanitizeSchema(schema);
+        final var sanitized = ChatClient.sanitizeSchema(schema);
         // objects gain additionalProperties:false at every level
         assertEquals(Boolean.FALSE, sanitized.get("additionalProperties"), "root object must be closed");
         final var age = asMap(asMap(sanitized.get("properties")).get("age"));
@@ -98,7 +86,7 @@ class StructuredOutputSchemasTest {
                 "dropped constraints must move into the description: " + age.get("description"));
         // a supported format is kept, an unsupported one moves to the description
         final var name = asMap(asMap(sanitized.get("properties")).get("name"));
-        org.junit.jupiter.api.Assertions.assertEquals("email", name.get("format"));
+        Assertions.assertEquals("email", name.get("format"));
         assertTrue(
                 name.get("description") instanceof String d && d.contains("maxLength"),
                 "maxLength is unsupported and must move to the description: " + name.get("description"));

@@ -16,250 +16,44 @@
 package io.yupiik.ia.agent.core.todo;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertSame;
-import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertNull;
 
-import io.yupiik.fusion.json.JsonMapper;
-import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
-import io.yupiik.ia.agent.core.configuration.TestConfigs;
-import io.yupiik.ia.agent.core.llm.ChatClient;
-import io.yupiik.ia.agent.core.llm.ChatCompletionRequest;
-import io.yupiik.ia.agent.core.llm.ChatResult;
-import io.yupiik.ia.agent.core.llm.Message;
-import io.yupiik.ia.agent.core.llm.Usage;
-import io.yupiik.ia.agent.core.session.FileSessionStore;
+import io.yupiik.ia.agent.core.session.InMemorySessionStore;
 import io.yupiik.ia.agent.core.session.SessionEntry;
-import io.yupiik.ia.agent.core.session.SessionStore;
-import io.yupiik.ia.agent.test.TestJsonMapper;
-import java.nio.file.Path;
 import java.time.Clock;
 import java.util.List;
-import java.util.Map;
-import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.extension.ExtendWith;
-import org.junit.jupiter.api.io.TempDir;
 
-@ExtendWith(TestJsonMapper.class)
 class PlanTodoSeederTest {
-    @TempDir
-    Path dir;
+    @Test
+    void retrievesLastNonblankAssistantPlanWithoutTruncation() {
+        final var sessions = new InMemorySessionStore(Clock.systemUTC());
+        final var id = sessions.create();
+        final var plan = "Plan:\n" + "a concrete implementation step\n".repeat(500);
+        sessions.append(id, SessionEntry.of(1, "assistant", "earlier plan", null, null));
+        sessions.append(id, SessionEntry.of(2, "assistant", plan, null, null));
+        sessions.append(id, SessionEntry.of(3, "user", "implement it", null, null));
+        sessions.append(id, SessionEntry.of(4, "assistant", " \n", null, null));
+        sessions.append(id, SessionEntry.of(5, "tool", "tool result", null, null));
+        sessions.append(id, SessionEntry.of(6, "assistant", List.of("not a text plan"), null, null));
+        final var otherId = sessions.create();
+        sessions.append(otherId, SessionEntry.of(1, "assistant", "another session's plan", null, null));
 
-    private JsonMapper mapper;
+        final var plans = new PlanTodoSeeder(sessions);
 
-    @BeforeEach
-    void bindMapper(final JsonMapper mapper) {
-        this.mapper = mapper;
+        assertEquals(plan, plans.plan(id));
+        assertEquals("another session's plan", plans.plan(otherId));
     }
 
     @Test
-    void seedsTodosFromLastAssistantPlan() {
-        final var sessions = newSessionStore();
+    void returnsNullWithoutAssistantText() {
+        final var sessions = new InMemorySessionStore(Clock.systemUTC());
         final var id = sessions.create();
+        final var plans = new PlanTodoSeeder(sessions);
+        assertNull(plans.plan(id));
         sessions.append(id, SessionEntry.of(1, "user", "plan a refactor", null, null));
-        sessions.append(id, SessionEntry.of(2, "assistant", "earlier answer", null, null));
-        sessions.append(
-                id,
-                SessionEntry.of(3, "assistant", "Plan:\n1. extract service\n2. add tests\n3. update docs", null, null));
-
-        final var todos = newTodoStore();
-        final var seeder = seeder(
-                todos,
-                sessions,
-                "[{\"content\": \"extract service\", \"status\": \"pending\"}, "
-                        + "{\"content\": \"add tests\", \"status\": \"pending\"}]");
-
-        assertSame(PlanTodoSeeder.SeedResult.SEEDED, seeder.seedFromLastAssistant(id, todos));
-        final var all = todos.all();
-        assertEquals(2, all.size());
-        assertEquals("extract service", all.get(0).content());
-        assertEquals("pending", all.get(0).status());
-        assertEquals("add tests", all.get(1).content());
-    }
-
-    @Test
-    void skipsWhenTodosAlreadyExist() {
-        final var sessions = newSessionStore();
-        final var id = sessions.create();
-        sessions.append(id, SessionEntry.of(1, "assistant", "a plan", null, null));
-
-        final var todos = newTodoStore();
-        todos.replace(List.of(new TodoItem("existing", "pending")));
-        final var seeder = seeder(todos, sessions, "[{\"content\": \"x\", \"status\": \"pending\"}]");
-
-        assertSame(PlanTodoSeeder.SeedResult.ALREADY_POPULATED, seeder.seedFromLastAssistant(id, todos));
-        assertEquals(1, todos.all().size());
-        assertEquals("existing", todos.all().get(0).content());
-    }
-
-    @Test
-    void skipsWithoutAssistantMessage() {
-        final var sessions = newSessionStore();
-        final var id = sessions.create();
-        sessions.append(id, SessionEntry.of(1, "user", "hi", null, null));
-
-        final var todos = newTodoStore();
-        final var seeder = seeder(todos, sessions, "[{\"content\": \"x\", \"status\": \"pending\"}]");
-
-        assertSame(PlanTodoSeeder.SeedResult.NO_PLAN, seeder.seedFromLastAssistant(id, todos));
-        assertTrue(todos.all().isEmpty());
-    }
-
-    @Test
-    void invalidResponseLeavesTodosEmpty() {
-        final var sessions = newSessionStore();
-        final var id = sessions.create();
-        sessions.append(id, SessionEntry.of(1, "assistant", "a plan", null, null));
-
-        final var todos = newTodoStore();
-        final var seeder = seeder(todos, sessions, "sorry, I cannot answer that");
-
-        assertSame(PlanTodoSeeder.SeedResult.NO_ACTIONABLE_STEPS, seeder.seedFromLastAssistant(id, todos));
-        assertTrue(todos.all().isEmpty());
-    }
-
-    @Test
-    void emptyStepsArrayYieldsNoActionableSteps() {
-        final var sessions = newSessionStore();
-        final var id = sessions.create();
-        sessions.append(id, SessionEntry.of(1, "assistant", "greeting, no plan here", null, null));
-
-        final var todos = newTodoStore();
-        final var seeder = seeder(todos, sessions, "{\"steps\":[]}");
-
-        assertSame(PlanTodoSeeder.SeedResult.NO_ACTIONABLE_STEPS, seeder.seedFromLastAssistant(id, todos));
-        assertTrue(todos.all().isEmpty());
-    }
-
-    @Test
-    void llmFailureYieldsDerivationFailed() {
-        final var sessions = newSessionStore();
-        final var id = sessions.create();
-        sessions.append(id, SessionEntry.of(1, "assistant", "a plan", null, null));
-
-        final var todos = newTodoStore();
-        final var seeder = new PlanTodoSeeder(new FailingChatClient(), sessions, mapper);
-
-        assertSame(PlanTodoSeeder.SeedResult.DERIVATION_FAILED, seeder.seedFromLastAssistant(id, todos));
-        assertTrue(todos.all().isEmpty());
-    }
-
-    @Test
-    void invalidItemsAreDropped() {
-        final var sessions = newSessionStore();
-        final var id = sessions.create();
-        sessions.append(id, SessionEntry.of(1, "assistant", "a plan", null, null));
-
-        final var todos = newTodoStore();
-        final var seeder = seeder(
-                todos,
-                sessions,
-                "[{\"content\": \"ok\", \"status\": \"pending\"}, "
-                        + "{\"content\": \"\", \"status\": \"pending\"}, "
-                        + "{\"content\": \"bad status\", \"status\": \"later\"}]");
-
-        assertSame(PlanTodoSeeder.SeedResult.SEEDED, seeder.seedFromLastAssistant(id, todos));
-        assertEquals(1, todos.all().size());
-        assertEquals("ok", todos.all().get(0).content());
-    }
-
-    @Test
-    void structuredStepsDecodeKnownFieldsAndFilterIncompleteItems() {
-        final var sessions = newSessionStore();
-        final var id = sessions.create();
-        sessions.append(id, SessionEntry.of(1, "assistant", "a plan", null, null));
-        final var todos = newTodoStore();
-        final var client = new StubChatClient("""
-                {"extension":{"nested":[1,true]},"steps":[
-                  {"status":"pending","content":"check \\"quotes\\" and\\nnewlines","extra":{}},
-                  {"content":"missing status"},
-                  {"content":"","status":"pending"},
-                  {"content":"wrong status","status":"later"}]}
-                """, true);
-        final var seeder = new PlanTodoSeeder(client, sessions, mapper);
-
-        assertSame(PlanTodoSeeder.SeedResult.SEEDED, seeder.seedFromLastAssistant(id, todos));
-        assertEquals(List.of(new TodoItem("check \"quotes\" and\nnewlines", "pending")), todos.all());
-    }
-
-    @Test
-    void malformedStructuredEnvelopesDoNotSeedTodos() {
-        final var sessions = newSessionStore();
-        final var id = sessions.create();
-        sessions.append(id, SessionEntry.of(1, "assistant", "a plan", null, null));
-        for (final var response :
-                List.of("{}", "null", "{\"steps\":null}", "{\"steps\":[]}", "{\"steps\":{}}", "{broken")) {
-            final var todos = newTodoStore();
-            final var seeder = new PlanTodoSeeder(new StubChatClient(response, true), sessions, mapper);
-            assertSame(
-                    PlanTodoSeeder.SeedResult.NO_ACTIONABLE_STEPS, seeder.seedFromLastAssistant(id, todos), response);
-            assertTrue(todos.all().isEmpty(), response);
-        }
-    }
-
-    @Test
-    void fallbackStillAcceptsAnArrayInsideMarkdown() {
-        final var sessions = newSessionStore();
-        final var id = sessions.create();
-        sessions.append(id, SessionEntry.of(1, "assistant", "a plan", null, null));
-        final var todos = newTodoStore();
-        final var seeder = seeder(todos, sessions, "```json\n[{\"content\":\"step\",\"status\":\"pending\"}]\n```");
-        assertSame(PlanTodoSeeder.SeedResult.SEEDED, seeder.seedFromLastAssistant(id, todos));
-        assertEquals(List.of(new TodoItem("step", "pending")), todos.all());
-    }
-
-    private PlanTodoSeeder seeder(final TodoStore todos, final SessionStore sessions, final String llmResponse) {
-        return new PlanTodoSeeder(new StubChatClient(llmResponse), sessions, mapper);
-    }
-
-    private TodoStore newTodoStore() {
-        return new TodoStore(configuration(), mapper);
-    }
-
-    private SessionStore newSessionStore() {
-        return new FileSessionStore(configuration(), mapper, Clock.systemUTC());
-    }
-
-    private CodingAgentConfiguration configuration() {
-        return TestConfigs.codingAgent(Map.of("yca.storageHome", dir.toString()));
-    }
-
-    private static final class StubChatClient extends ChatClient {
-        private final String response;
-        private final boolean structured;
-
-        private StubChatClient(final String response) {
-            this(response, false);
-        }
-
-        private StubChatClient(final String response, final boolean structured) {
-            super();
-            this.response = response;
-            this.structured = structured;
-        }
-
-        @Override
-        public ChatResult chat(final ChatCompletionRequest request) {
-            return new ChatResult(Message.assistant(response, null), Usage.EMPTY);
-        }
-
-        @Override
-        public StructuredResult chatStructured(
-                final ChatCompletionRequest request, final String schemaName, final Map<String, Object> schema) {
-            return new StructuredResult(new ChatResult(Message.assistant(response, null), Usage.EMPTY), structured);
-        }
-    }
-
-    private static final class FailingChatClient extends ChatClient {
-        @Override
-        public ChatResult chat(final ChatCompletionRequest request) {
-            throw new IllegalStateException("boom");
-        }
-
-        @Override
-        public StructuredResult chatStructured(
-                final ChatCompletionRequest request, final String schemaName, final Map<String, Object> schema) {
-            throw new IllegalStateException("boom");
-        }
+        sessions.append(id, SessionEntry.of(2, "assistant", " ", null, null));
+        sessions.append(id, SessionEntry.of(3, "assistant", null, null, null));
+        assertNull(plans.plan(id));
     }
 }

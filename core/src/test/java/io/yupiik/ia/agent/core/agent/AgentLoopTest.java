@@ -386,17 +386,7 @@ class AgentLoopTest {
         final var runtime = new SessionRuntime(
                 loop, loop.permissionService, null, loop.usageTracker, null, null, null, null, testWorkdir);
         final var service = new AgentSessionService(
-                null,
-                null,
-                null,
-                null,
-                null,
-                null,
-                null,
-                new PlanTodoSeeder(null, null, mapper),
-                configuration,
-                null,
-                null);
+                null, null, null, null, null, null, null, new PlanTodoSeeder(null), configuration, null, null);
         eventObserver = event -> {
             if (event instanceof AgentEvent.Notice notice) {
                 assertEquals("mode: " + runtime.permissions().mode().name().toLowerCase(Locale.ROOT), notice.message());

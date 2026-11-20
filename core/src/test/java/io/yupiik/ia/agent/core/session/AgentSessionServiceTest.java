@@ -37,6 +37,8 @@ import io.yupiik.ia.agent.core.context.CompactionCoordinator;
 import io.yupiik.ia.agent.core.context.CompactionResult;
 import io.yupiik.ia.agent.core.context.ContextManager;
 import io.yupiik.ia.agent.core.llm.ChatClient;
+import io.yupiik.ia.agent.core.llm.ChatCompletionRequest;
+import io.yupiik.ia.agent.core.llm.ChatResult;
 import io.yupiik.ia.agent.core.llm.ChatSettings;
 import io.yupiik.ia.agent.core.llm.Message;
 import io.yupiik.ia.agent.core.llm.ToolCall;
@@ -247,6 +249,73 @@ class AgentSessionServiceTest {
         service.setMode("build", "s1", runtime);
 
         assertEquals(PermissionMode.YOLO, permissions.permissionMode());
+    }
+
+    @Test
+    void modeSwitchesPreserveTodosWithoutAuxiliaryRequests() {
+        final var client = new ChatClient() {
+            @Override
+            public ChatResult chat(final ChatCompletionRequest request) {
+                throw new AssertionError("Mode changes must not request completions");
+            }
+
+            @Override
+            public StructuredResult chatStructured(
+                    final ChatCompletionRequest request, final String schemaName, final Map<String, Object> schema) {
+                throw new AssertionError("Mode changes must not derive todos");
+            }
+        };
+        final var plans = new PlanTodoSeeder() {
+            @Override
+            public String plan(final String sessionId) {
+                throw new AssertionError("Mode changes must not inspect assistant plans");
+            }
+        };
+        try (client) {
+            final var service = new AgentSessionService(client, null, null, null, null, null, null, plans, cfg(), null);
+            for (final var original : List.of(
+                    List.<TodoItem>of(),
+                    List.of(new TodoItem("existing task", "pending"), new TodoItem("finished task", "completed")))) {
+                final var todos = new TodoStore() {
+                    @Override
+                    public List<TodoItem> all() {
+                        return original;
+                    }
+
+                    @Override
+                    public List<TodoItem> replace(final List<TodoItem> items) {
+                        throw new AssertionError("Mode changes must preserve todos");
+                    }
+                };
+                final var permissions = new PermissionService(cfg(), cfg().resolveWorkingDir());
+                permissions.setMode(AgentMode.PLAN);
+                final var runtime = runtime(permissions, todos, null);
+
+                final var entering = service.setMode("build", "s1", runtime);
+                assertEquals("mode: build - permissions: auto_edit", entering.message());
+                assertNull(entering.seedMessage());
+                assertNull(entering.seedError());
+                assertEquals(AgentMode.BUILD, permissions.mode());
+                assertEquals(PermissionMode.AUTO_EDIT, permissions.permissionMode());
+                assertEquals(original, todos.all());
+
+                permissions.setPermissionMode(PermissionMode.YOLO);
+                final var staying = service.setMode("build", "s1", runtime);
+                assertEquals("mode: build", staying.message());
+                assertNull(staying.seedMessage());
+                assertNull(staying.seedError());
+                assertEquals(PermissionMode.YOLO, permissions.permissionMode());
+                assertEquals(original, todos.all());
+
+                final var planning = service.setMode("plan", "s1", runtime);
+                assertEquals("mode: plan", planning.message());
+                assertNull(planning.seedMessage());
+                assertNull(planning.seedError());
+                assertEquals(AgentMode.PLAN, permissions.mode());
+                assertEquals(PermissionMode.ASK, permissions.permissionMode());
+                assertEquals(original, todos.all());
+            }
+        }
     }
 
     @Test

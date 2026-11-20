@@ -9,7 +9,7 @@ The model records progress with `write_todo`, which replaces the entire list on 
 Todos are self-reported progress, not a hard execution gate: missing or stale items do not themselves fail a turn.
 
 In plan mode, the model records proposed steps as pending items.
-Entering build seeds an empty todo list from the plan when needed.
+Switching to build preserves the todo list and does not generate missing todos or make an extra LLM request.
 
 == Track status without losing history
 

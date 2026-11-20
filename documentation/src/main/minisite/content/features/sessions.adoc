@@ -74,7 +74,7 @@ Use `/variant` to list variants for the current model, including the implicit `d
 `/variant <name>` changes the variant without changing models.
 `/variant default` restores the configured default variant when one exists, otherwise the implicit default.
 
-Session-triggered calls resolve routing lazily from that session: foreground turns, subagents, compaction, memory extraction, plan seeding and requested indexing.
+Session-triggered calls resolve routing lazily from that session: foreground turns, subagents, compaction, memory extraction and requested indexing.
 Dedicated background-model overrides and explicit subagent routes can select another model.
 See xref:agents.adoc[Custom agents], xref:compaction.adoc[Compaction and compression], and xref:memory.adoc[Memory] for their precedence rules.
 Only session-less startup work uses the process default, including deterministic Maven dependency scanning and model-completion prefetch before the first tab exists.
@@ -189,6 +189,6 @@ Compaction warnings include the `/memory compact` retry hint.
 Undecodable provider responses report the dialect, endpoint, HTTP status, content type and a body excerpt rather than a bare parser error.
 A 2xx error envelope is raised as an error, not accepted as an empty completion.
 If an Anthropic-compatible gateway returns SSE despite `"stream": false`, yca reconstructs the buffered completion from frames.
-This also supports background compaction and todo seeding, including the `output_tokens_details.thinking_tokens` usage breakdown.
+This also supports background compaction, including the `output_tokens_details.thinking_tokens` usage breakdown.
 
 include::content/_partials/mermaid.js.adoc[]

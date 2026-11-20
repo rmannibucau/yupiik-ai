@@ -174,6 +174,7 @@ public class AgentSessionService {
         return description.isEmpty() || description.equals(tool.name()) ? null : description;
     }
 
+    /** The seed fields are retained for wire compatibility and are always null. */
     public record ModeChange(String message, String seedMessage, String seedError) {}
 
     /** Whether the typed input matches a resume alias ({@code yca.resumeAliases}). */
@@ -182,9 +183,8 @@ public class AgentSessionService {
     }
 
     /**
-     * Switches the agent working mode and, when entering {@code BUILD} mode,
-     * attempts to seed the todo list from the last assistant plan. The mode and
-     * the todo list belong to the session owning {@code runtime}.
+     * Switches the agent working mode without deriving or changing todos.
+     * Mode changes are local and do not require an LLM request.
      *
      * <p>Crossing from {@code PLAN} to {@code BUILD} also sets the session
      * approval mode to {@code AUTO_EDIT}: build implies a default posture where
@@ -218,24 +218,9 @@ public class AgentSessionService {
         if (mode != previousMode && runtime.loop() != null) {
             runtime.loop().notifyModeChanged(mode);
         }
-        String seedMessage = null;
-        String seedError = null;
-        if (mode == AgentMode.BUILD) {
-            try {
-                seedMessage = switch (planTodoSeeder.seedFromLastAssistant(sessionId, runtime.todos())) {
-                    case ALREADY_POPULATED -> "todos already present, nothing to seed";
-                    case NO_PLAN -> "no plan found to seed todos from";
-                    case DERIVATION_FAILED -> "found a plan but could not derive todos from it";
-                    case NO_ACTIONABLE_STEPS -> "plan found but contained no actionable steps";
-                    case SEEDED -> "todos seeded from the plan";
-                };
-            } catch (final RuntimeException e) {
-                seedError = "todo seeding failed: " + e.getMessage();
-            }
-        }
         final var message = "mode: " + mode.name().toLowerCase(Locale.ROOT)
                 + (mode == AgentMode.BUILD && previousMode != AgentMode.BUILD ? " - permissions: auto_edit" : "");
-        return new ModeChange(message, seedMessage, seedError);
+        return new ModeChange(message, null, null);
     }
 
     /**

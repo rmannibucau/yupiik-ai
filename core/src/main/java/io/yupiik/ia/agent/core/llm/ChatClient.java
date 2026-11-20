@@ -1832,7 +1832,7 @@ public class ChatClient implements AutoCloseable {
     /**
      * Result of a structured-output call. {@code structured} is true when the provider honoured the
      * JSON Schema and the response is expected to be a conformant JSON object; false when the schema
-     * was unsupported (or rejected twice) and the caller must fall back to its own parsing.
+     * was unsupported or rejected and the caller must fall back to its own parsing.
      */
     public record StructuredResult(ChatResult result, boolean structured) {}
 
@@ -1841,8 +1841,8 @@ public class ChatClient implements AutoCloseable {
      * Schema. The flavor-specific request field is composed here (response_format for completions,
      * text.format for the responses API, output_config for Anthropic) and carried to the wire through
      * the request extras. If the provider rejects the schema with a 400 it is retried once without it;
-     * a second 400 marks the provider as not supporting structured output for the rest of the session,
-     * so subsequent calls go straight to the plain path.
+     * the rejection is cached temporarily per provider, model and schema, so subsequent calls go
+     * straight to the plain path until the cache entry expires.
      */
     public StructuredResult chatStructured(
             final ChatCompletionRequest request, final String schemaName, final Map<String, Object> schema)
@@ -1852,36 +1852,36 @@ public class ChatClient implements AutoCloseable {
         final var routedReq = routed.request();
         final var flavor = effectiveFlavor(routedReq.settings());
         final var base = new LinkedHashMap<String, Object>();
-        if (request.others() != null) {
-            base.putAll(request.others());
+        if (routedReq.others() != null) {
+            base.putAll(routedReq.others());
         }
         final var plainReq = new ChatCompletionRequest(
                 model,
-                request.messages(),
-                request.temperature(),
-                request.topP(),
+                routedReq.messages(),
+                routedReq.temperature(),
+                routedReq.topP(),
                 false,
-                request.tools(),
-                request.toolChoice(),
-                request.maxTokens(),
-                request.reasoningEffort(),
+                routedReq.tools(),
+                routedReq.toolChoice(),
+                routedReq.maxTokens(),
+                routedReq.reasoningEffort(),
                 base,
-                request.sessionId(),
+                routedReq.sessionId(),
                 routedReq.settings());
         final var structuredReq = new ChatCompletionRequest(
                 model,
-                request.messages(),
-                request.temperature(),
-                request.topP(),
+                routedReq.messages(),
+                routedReq.temperature(),
+                routedReq.topP(),
                 false,
-                request.tools(),
-                request.toolChoice(),
-                request.maxTokens(),
-                request.reasoningEffort(),
+                routedReq.tools(),
+                routedReq.toolChoice(),
+                routedReq.maxTokens(),
+                routedReq.reasoningEffort(),
                 withStructuredField(base, flavor, schemaName, schema),
-                request.sessionId(),
-                request.settings());
-        final var providerId = providerIdFor(request);
+                routedReq.sessionId(),
+                routedReq.settings());
+        final var providerId = providerIdFor(routedReq);
         final var rejectionKey = providerId + ":" + model + ":" + schemaName;
         if (isStructuredRejected(rejectionKey)) {
             return new StructuredResult(chatInternal(withPromotedExtras(applyModelDefaults(plainReq))), false);

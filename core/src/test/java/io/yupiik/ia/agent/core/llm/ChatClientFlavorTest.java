@@ -22,6 +22,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import io.yupiik.fusion.httpclient.core.ExtendedHttpClient;
 import io.yupiik.fusion.json.JsonMapper;
@@ -539,6 +540,170 @@ class ChatClientFlavorTest {
         assertEquals(ApiFlavor.COMPLETIONS, client.flavor());
         assertTrue(result.structured());
         assertEquals("hello there", result.result().message().content());
+    }
+
+    @Test
+    void chatStructuredRoutesExplicitCrossProviderReferencesAndRetainsSettings() throws Exception {
+        for (final var targetApi : List.of("responses", "completions")) {
+            final var defaultApi = "responses".equals(targetApi) ? "completions" : "responses";
+            final var cfg = structuredRoutingConfiguration(defaultApi, targetApi);
+            final var providers = new ProviderManager(cfg, mapper);
+            final var targetBodies = new CopyOnWriteArrayList<String>();
+            server.createContext("/target/" + targetApiPath(targetApi), exchange -> {
+                targetBodies.add(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
+                structuredRoutingResponse(exchange, targetApi);
+            });
+            try (final var routed = new ChatClient(cfg, mapper, providers, Clock.systemUTC(), http)) {
+                final var settings = new ChatSettings(
+                        "default",
+                        "unused-model",
+                        "careful",
+                        new ChatClient.SamplingOverride(Map.of(ChatClient.SamplingField.TOP_P, Optional.of(0.42))));
+                final var request = new ChatCompletionRequest(
+                        "$external/test-model",
+                        List.of(Message.system("keep system"), Message.user("keep user")),
+                        0.23,
+                        null,
+                        true,
+                        List.of(Tool.function("retained_tool", "keep description", Map.of("type", "object"))),
+                        "none",
+                        321,
+                        "low",
+                        Map.of("custom_payload", Map.of("keep", "value")),
+                        "structured-session",
+                        settings);
+                final var result = routed.chatStructured(request, "routing", Map.of("type", "object"));
+                assertTrue(result.structured());
+                assertEquals("routed answer", result.result().message().content());
+                assertEquals(1, targetBodies.size(), "only the explicit provider must receive the call");
+                final var body = targetBodies.getFirst();
+                assertTrue(body.contains("\"model\":\"test-model\""), body);
+                assertTrue(body.contains("keep system"), body);
+                assertTrue(body.contains("keep user"), body);
+                assertTrue(body.contains("\"temperature\":0.23"), body);
+                assertTrue(body.contains("\"top_p\":0.42"), body);
+                assertTrue(body.contains("\"variant_marker\":\"retained\""), body);
+                assertTrue(body.contains("\"custom_payload\":{\"keep\":\"value\"}"), body);
+                assertTrue(body.contains("\"tool_choice\":\"none\""), body);
+                assertTrue(body.contains("retained_tool"), body);
+                assertTrue(body.contains("keep description"), body);
+                assertTrue(body.contains("321"), body);
+                assertTrue(body.contains("low"), body);
+                assertFalse(body.contains("\"stream\":true"), body);
+                assertEquals("responses".equals(targetApi), body.contains("\"text\":{\"format\":"), body);
+                assertEquals("completions".equals(targetApi), body.contains("\"response_format\":"), body);
+                assertFalse(body.contains("structured-session"), "session attribution stays internal");
+                assertFalse(body.contains("unused-model"), "settings stay internal");
+                assertEquals(settings, request.settings(), "routing must not mutate the caller's selection");
+                assertEquals("structured-session", request.sessionId());
+                assertEquals("default", providers.currentProviderId());
+                assertTrue(bodies.isEmpty(), "the process-default provider must not receive the call");
+            }
+            server.removeContext("/target/" + targetApiPath(targetApi));
+        }
+    }
+
+    @Test
+    void chatStructuredRoutedFallbackAndRejectionCacheStayOnTheirProvider() throws Exception {
+        final var targetBodies = new CopyOnWriteArrayList<String>();
+        server.createContext("/target/responses", exchange -> {
+            final var body = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
+            targetBodies.add(body);
+            if (body.contains("json_schema")) {
+                respond(exchange, 400, "{\"error\":{\"message\":\"unsupported schema\"}}", "application/json");
+            } else {
+                structuredRoutingResponse(exchange, "responses");
+            }
+        });
+        final var cfg = structuredRoutingConfiguration("completions", "responses");
+        final var providers = new ProviderManager(cfg, mapper);
+        try (final var routed = new ChatClient(cfg, mapper, providers, Clock.systemUTC(), http)) {
+            final var settings = new ChatSettings(
+                    "default",
+                    null,
+                    "careful",
+                    new ChatClient.SamplingOverride(Map.of(ChatClient.SamplingField.TOP_P, Optional.of(0.42))));
+            final var explicit = request("$external/test-model").withSettings(settings);
+            final var schema = Map.<String, Object>of("type", "object");
+            assertFalse(routed.chatStructured(explicit, "routing", schema).structured());
+            assertEquals(2, targetBodies.size(), "one structured attempt and one routed plain fallback");
+            assertTrue(targetBodies.getFirst().contains("json_schema"));
+            assertFalse(targetBodies.getLast().contains("json_schema"));
+            assertFalse(routed.chatStructured(explicit, "routing", schema).structured());
+            assertEquals(3, targetBodies.size(), "the explicit route must reuse its own rejection memo");
+            assertFalse(routed.chatStructured(
+                            request("test-model").withSettings(settings.withProviderId("external")), "routing", schema)
+                    .structured());
+            assertEquals(4, targetBodies.size(), "the same route via settings shares its rejection memo");
+            for (final var body : targetBodies) {
+                assertTrue(body.contains("\"top_p\":0.42"), body);
+                assertTrue(body.contains("\"variant_marker\":\"retained\""), body);
+            }
+            assertTrue(
+                    routed.chatStructured(request(), "routing", schema).structured(),
+                    "same model and schema on the default provider must not inherit the rejection");
+            assertEquals(1, bodies.size());
+            assertTrue(bodies.getFirst().contains("response_format"));
+            assertEquals("default", providers.currentProviderId());
+        }
+    }
+
+    @Test
+    void chatStructuredRouted503DoesNotFallBackOrPoisonRejectionCache() throws Exception {
+        final var targetBodies = new CopyOnWriteArrayList<String>();
+        server.createContext("/target/responses", exchange -> {
+            targetBodies.add(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
+            if (targetBodies.size() == 1) {
+                respond(exchange, 503, "{\"error\":{\"message\":\"temporarily unavailable\"}}", "application/json");
+            } else {
+                structuredRoutingResponse(exchange, "responses");
+            }
+        });
+        final var cfg = structuredRoutingConfiguration("completions", "responses");
+        try (final var routed =
+                new ChatClient(cfg, mapper, new ProviderManager(cfg, mapper), Clock.systemUTC(), http)) {
+            final var request = request("$external/test-model");
+            final var schema = Map.<String, Object>of("type", "object");
+            final var failure =
+                    assertThrows(IOException.class, () -> routed.chatStructured(request, "routing", schema));
+            assertTrue(failure.getMessage().contains("503"), failure.getMessage());
+            assertEquals(1, targetBodies.size(), "503 must not trigger a plain fallback");
+            assertTrue(routed.chatStructured(request, "routing", schema).structured());
+            assertEquals(2, targetBodies.size());
+            assertTrue(
+                    targetBodies.stream().allMatch(body -> body.contains("json_schema")),
+                    "a transient failure must not memoize a schema rejection");
+            assertTrue(bodies.isEmpty());
+        }
+    }
+
+    private CodingAgentConfiguration structuredRoutingConfiguration(final String defaultApi, final String targetApi) {
+        return configuration(Map.ofEntries(
+                Map.entry("yca.provider.providers.length", "2"),
+                Map.entry("yca.provider.providers.0.api", defaultApi),
+                Map.entry("yca.provider.providers.1.id", "external"),
+                Map.entry(
+                        "yca.provider.providers.1.baseUrl",
+                        "http://localhost:" + server.getAddress().getPort() + "/target"),
+                Map.entry("yca.provider.providers.1.model", "test-model"),
+                Map.entry("yca.provider.providers.1.api", targetApi),
+                Map.entry("yca.provider.providers.1.tuning.variants.length", "1"),
+                Map.entry("yca.provider.providers.1.tuning.variants.0.name", "careful"),
+                Map.entry("yca.provider.providers.1.tuning.variants.0.extra", "{\"variant_marker\":\"retained\"}")));
+    }
+
+    private static String targetApiPath(final String api) {
+        return "responses".equals(api) ? "responses" : "chat/completions";
+    }
+
+    private static void structuredRoutingResponse(final HttpExchange exchange, final String api) {
+        respond(
+                exchange,
+                200,
+                "responses".equals(api)
+                        ? "{\"id\":\"r1\",\"model\":\"test-model\",\"output\":[{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"routed answer\"}]}]}"
+                        : "{\"id\":\"c1\",\"model\":\"test-model\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"routed answer\"},\"finish_reason\":\"stop\"}]}",
+                "application/json");
     }
 
     @Test

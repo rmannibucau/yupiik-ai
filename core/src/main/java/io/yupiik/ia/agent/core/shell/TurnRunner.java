@@ -174,11 +174,7 @@ public class TurnRunner {
                                 pending,
                                 env.session().sessionId(),
                                 env.session().runtime());
-                        env.frontend()
-                                .notice(
-                                        AgentEvent.Notice.Level.INFO,
-                                        result.message()
-                                                + (result.seedMessage() == null ? "" : " - " + result.seedMessage()));
+                        env.frontend().notice(AgentEvent.Notice.Level.INFO, result.message());
                     } catch (final RuntimeException e) {
                         env.frontend().notice(AgentEvent.Notice.Level.ERROR, "mode switch failed: " + e.getMessage());
                     }

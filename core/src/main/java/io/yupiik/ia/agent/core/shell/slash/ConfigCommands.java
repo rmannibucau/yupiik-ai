@@ -203,14 +203,7 @@ public class ConfigCommands implements SlashCommandSet {
         env.session().pendingMode(null); // an explicit idle switch clears any queued one
         final var result = agentSessionService.setMode(
                 arg, env.session().sessionId(), env.session().runtime());
-        final var sb = new StringBuilder(result.message());
-        if (result.seedMessage() != null) {
-            sb.append('\n').append(result.seedMessage());
-        }
-        if (result.seedError() != null) {
-            sb.append('\n').append(result.seedError());
-        }
-        return ShellOutcome.status(sb.toString());
+        return ShellOutcome.status(result.message());
     }
 
     private CompletionStage<ShellOutcome> model(final String arg, final ShellEnv env) {

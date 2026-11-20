@@ -20,7 +20,7 @@ For headless work, pass `--yca-run-mode build` or `--yca-run-mode plan` to `run`
 
 Entering `build` from `plan` sets the session's approval mode to `auto_edit`.
 File edits then apply without prompting, while bash commands still follow their rules or reach the approval gate.
-If the model did not record todos, switching to build seeds the list from the last plan.
+Switching modes preserves todos without an extra LLM request; missing todos are not generated automatically.
 
 In plan mode, read-only tools and plan-resolved bash rules run without prompting.
 File-mutating tools are hidden from the model; other gated actions follow the permission rules and are refused without an interactive approval path.
