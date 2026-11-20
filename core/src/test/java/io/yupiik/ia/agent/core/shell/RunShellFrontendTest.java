@@ -57,6 +57,19 @@ class RunShellFrontendTest {
     private static Path eventWorkdir;
 
     @Test
+    void diagnosticBypassesLoggingAndStdoutAndRemainsVisibleWithHiddenTools() {
+        final var frontend = new RunShellFrontend(false, ToolOutputVisibility.HIDDEN, presenter);
+        frontend.onEvent(new AgentEvent.ToolDiagnostic(
+                "mcp_example", "private failure\nsecond line", 42, "s1", "child", "Worker", eventWorkdir));
+        final var stderr = err.toString(StandardCharsets.UTF_8);
+        assertTrue(stderr.contains("private failure\nsecond line"), stderr);
+        assertTrue(stderr.contains("[Worker]"), stderr);
+        assertTrue(stderr.contains("#42"), stderr);
+        assertEquals("", out.toString(StandardCharsets.UTF_8));
+        assertTrue(logs.isEmpty(), logs.toString());
+    }
+
+    @Test
     void responseMarkersUseCapturedJulTimeWithoutChangingTheStdoutProduct() {
         final var frontend = new RunShellFrontend(false, ToolOutputVisibility.HIDDEN, presenter);
         frontend.onEvent(new AgentEvent.FeedbackStarted("text", 1000, "s1", null, null, eventWorkdir));

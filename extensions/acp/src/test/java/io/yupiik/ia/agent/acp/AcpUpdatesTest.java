@@ -54,6 +54,34 @@ class AcpUpdatesTest {
     private static final Map<String, ?> ALL = Map.of("session", Map.of("notices", Map.of(), "compaction", Map.of()));
 
     @Test
+    void diagnosticIsToolDisplayContentNeverRawOutputAndKeepsCanonicalScope() {
+        try (final var f = new Fixture(ALL)) {
+            f.updates.tool(
+                    "child-call",
+                    new AgentEvent.ToolStarted("mcp_example", "{}", 42, "s", "child", "Worker", eventWorkdir),
+                    null);
+            f.updates.tool(
+                    "child-call",
+                    new AgentEvent.ToolDiagnostic(
+                            "mcp_example", "private failure", 42, "s", "child", "Worker", eventWorkdir),
+                    null);
+            final var diagnostic = f.wire.getLast();
+            assertEquals("child-call", diagnostic.get("toolCallId"));
+            assertTrue(f.mapper.toString(diagnostic.get("content")).contains("private failure"));
+            assertFalse(diagnostic.containsKey("rawOutput"));
+            f.updates.tool(
+                    "child-call",
+                    new AgentEvent.ToolFinished(
+                            "mcp_example", "MCP failed", false, false, 42, "s", "child", "Worker", eventWorkdir),
+                    null);
+            final var finished = f.wire.getLast();
+            assertEquals("MCP failed", finished.get("rawOutput"));
+            assertTrue(f.mapper.toString(finished.get("content")).contains("private failure"));
+            assertEquals("failed", finished.get("status"));
+        }
+    }
+
+    @Test
     void eachCapabilityRequiresExplicitNestedObjectsIncludingEmptyObjects() {
         final List<Map<String, ?>> unsupported = Arrays.asList(
                 null,

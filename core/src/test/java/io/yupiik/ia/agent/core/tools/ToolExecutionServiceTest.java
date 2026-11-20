@@ -20,6 +20,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.fusion.framework.api.event.Emitter;
+import io.yupiik.ia.agent.core.agent.AgentEvent;
 import io.yupiik.ia.agent.core.agent.AgentEvent.ToolTimingEvent;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.TestConfigs;
@@ -99,9 +100,62 @@ class ToolExecutionServiceTest {
 
             @Override
             public ToolResult execute(final Map<String, Object> args, final ToolContext context) {
+                if (output == null) {
+                    throw new ToolDiagnosticException("MCP tool test failed", "UI-only quota detail");
+                }
                 return ToolResult.ok(output);
             }
         };
+    }
+
+    @Test
+    void uiFailureDetailIsNotInToolResultOrOptimizationHooks() {
+        final var events = new ArrayList<Object>();
+        final var service = new ToolExecutionService(
+                config("10"),
+                new Emitter() {
+                    @Override
+                    public <T> void emit(final T event) {
+                        events.add(event);
+                    }
+                },
+                List.of());
+        final var result = service.execute(tool("test", null), Map.of(), context(List.of()));
+        assertFalse(result.success());
+        assertEquals("MCP tool test failed", result.output());
+        final var diagnostic = events.stream()
+                .filter(AgentEvent.ToolDiagnostic.class::isInstance)
+                .map(AgentEvent.ToolDiagnostic.class::cast)
+                .findFirst()
+                .orElseThrow();
+        assertEquals("UI-only quota detail", diagnostic.detail());
+        assertEquals("s1", diagnostic.sessionId());
+        assertEquals(testWorkdir, diagnostic.workdir());
+        assertFalse(diagnostic.toString().contains("UI-only quota detail"));
+        assertTrue(events.stream()
+                .filter(AfterToolExecutionEvent.class::isInstance)
+                .map(AfterToolExecutionEvent.class::cast)
+                .allMatch(event -> event.output().equals(result.output())));
+        assertTrue(events.stream().noneMatch(event -> event.toString().contains("UI-only quota detail")));
+    }
+
+    @Test
+    void diagnosticObserverFailureDoesNotLeakIntoToolResult() {
+        final var service = new ToolExecutionService(
+                config("10"),
+                new Emitter() {
+                    @Override
+                    public <T> void emit(final T event) {
+                        if (event instanceof AgentEvent.ToolDiagnostic diagnostic) {
+                            throw new IllegalStateException(diagnostic.detail());
+                        }
+                    }
+                },
+                List.of());
+        assertEquals(
+                "MCP tool test failed",
+                service.execute(tool("test", null), Map.of(), context(List.of()))
+                        .output());
     }
 
     @Test

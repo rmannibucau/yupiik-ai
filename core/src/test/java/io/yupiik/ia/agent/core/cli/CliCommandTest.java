@@ -62,6 +62,17 @@ class CliCommandTest {
     }
 
     @Test
+    void diagnosticIsVisibleEvenWithHiddenTools(final JsonMapper mapper) {
+        final var dispatcher = dispatcher("compact", ToolOutputVisibility.HIDDEN, mapper);
+        dispatcher.accept(new AgentEvent.ToolDiagnostic(
+                "mcp_example", "private failure\nsecond line", 42, "s1", "child", "Worker", eventWorkdir));
+        final var stderr = err.toString(StandardCharsets.UTF_8);
+        assertTrue(stderr.contains("private failure\nsecond line"), stderr);
+        assertTrue(stderr.contains("[Worker]"), stderr);
+        assertTrue(stderr.contains("#42"), stderr);
+    }
+
+    @Test
     void verbosePrintsFullOutputForNonStreamedTool(final JsonMapper mapper) throws Exception {
         final var dispatcher = dispatcher("verbose", ToolOutputVisibility.SHOWN, mapper);
 

@@ -1579,6 +1579,20 @@ public class TuiCommand implements Runnable {
     }
 
     private void onEvent(final AgentEvent event, final UiState state) {
+        if (event instanceof AgentEvent.ToolDiagnostic diagnostic) {
+            // Keep private failure detail in the in-memory error modal only, not the transcript
+            // or ToolOutputStore (which is populated from model-visible tool results).
+            final var scope = diagnostic.subagentId() == null
+                    ? ""
+                    : "[" + (diagnostic.subagentName() == null ? diagnostic.subagentId() : diagnostic.subagentName())
+                            + "] ";
+            modelError(
+                    state,
+                    scope + diagnostic.name()
+                            + (diagnostic.ordinal() > 0 ? " #" + diagnostic.ordinal() : "")
+                            + " diagnostic:\n" + diagnostic.detail());
+            return;
+        }
         if (event instanceof AgentEvent.Status status) {
             // informational progress (output optimization, graph refresh, provider pauses,
             // stale-read invalidations...): appended to the trailing notification slot instead

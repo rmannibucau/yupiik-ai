@@ -20,9 +20,11 @@ import io.yupiik.fusion.json.JsonMapper;
 import java.io.IOException;
 import java.io.InputStream;
 import java.net.URI;
+import java.net.URLDecoder;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.net.http.HttpTimeoutException;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.format.DateTimeFormatter;
@@ -204,23 +206,34 @@ abstract class RemoteMcpClient implements McpClient {
     @Override
     public final String callTool(final String toolName, final Map<String, Object> arguments)
             throws IOException, InterruptedException {
-        return operation(op -> {
-            final Object result;
-            final var requestedSession = sessionId;
-            try {
-                result = request(op, "tools/call", Map.of("name", toolName, "arguments", arguments));
-            } catch (final McpHttpException e) {
-                if (e.statusCode() == 404 && requestedSession != null) {
-                    try {
-                        recover(op, requestedSession);
-                    } catch (final IOException recovery) {
-                        e.addSuppressed(recovery);
+        try {
+            return operation(op -> {
+                final Object result;
+                final var requestedSession = sessionId;
+                try {
+                    result = request(op, "tools/call", Map.of("name", toolName, "arguments", arguments));
+                } catch (final McpHttpException e) {
+                    if (e.statusCode() == 404 && requestedSession != null) {
+                        try {
+                            recover(op, requestedSession);
+                        } catch (final IOException recovery) {
+                            e.addSuppressed(recovery);
+                        }
                     }
+                    throw e; // Never replay a potentially mutating call.
                 }
-                throw e; // Never replay a potentially mutating call.
+                return McpWire.text(mapper, McpWire.payload(mapper, result, McpWire.Result.class));
+            });
+        } catch (final McpFailure failure) {
+            final var credentials = new ArrayList<>(headers);
+            if (uri.getRawQuery() != null) {
+                for (final var parameter : uri.getRawQuery().split("&")) {
+                    credentials.add(parameter);
+                    credentials.add(URLDecoder.decode(parameter, StandardCharsets.UTF_8));
+                }
             }
-            return McpWire.text(mapper, McpWire.payload(mapper, result, McpWire.Result.class));
-        });
+            throw failure.sanitized(apiKey, credentials, sessionId);
+        }
     }
 
     private void recover(final Operation op, final String expiredSession) throws IOException, InterruptedException {
@@ -348,7 +361,10 @@ abstract class RemoteMcpClient implements McpClient {
             throw new IOException("MCP " + name + ": invalid JSON-RPC response ID or result/error");
         }
         if (message.containsKey("error")) {
-            throw new RpcException("MCP request returned an error");
+            final var error = (Map<?, ?>) message.get("error");
+            throw new RpcException(
+                    "MCP request returned an error",
+                    "JSON-RPC error " + error.get("code") + ": " + error.get("message"));
         }
         return message.get("result");
     }
@@ -641,9 +657,9 @@ abstract class RemoteMcpClient implements McpClient {
         }
     }
 
-    private static final class RpcException extends IOException {
-        private RpcException(final String message) {
-            super(message);
+    private static final class RpcException extends McpFailure {
+        private RpcException(final String message, final String detail) {
+            super(message, detail);
         }
     }
 }

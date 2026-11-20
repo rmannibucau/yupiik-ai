@@ -213,7 +213,7 @@ public class McpManager {
                                 Thread.currentThread().interrupt();
                                 return ToolResult.error("Client MCP call interrupted");
                             } catch (final IOException | RuntimeException e) {
-                                return ToolResult.error("Client MCP tool " + qualified + " failed: " + e.getMessage());
+                                throw McpFailure.forUi(qualified, e);
                             }
                         }
                     });

@@ -2219,6 +2219,8 @@ public class AcpServer {
                                 new AcpUpdates.ToolSnapshot(event.workdir(), null, List.of(), List.of()));
                     } else if (event instanceof AgentEvent.ToolStream tool) {
                         updates.tool(canonical(tool.subagentId(), tool.ordinal(), tool.name()), event, null);
+                    } else if (event instanceof AgentEvent.ToolDiagnostic tool) {
+                        updates.tool(canonical(tool.subagentId(), tool.ordinal(), tool.name()), event, null);
                     } else if (event instanceof AgentEvent.ToolFilesChanged tool) {
                         updates.files(canonical(tool.subagentId(), tool.ordinal(), tool.name()), tool, this::safe);
                     } else if (event instanceof AgentEvent.ToolFinished tool) {

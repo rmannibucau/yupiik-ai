@@ -30,6 +30,7 @@ import java.io.IOException;
 import java.io.PrintWriter;
 import java.io.StringWriter;
 import java.nio.charset.StandardCharsets;
+import java.util.List;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -38,6 +39,60 @@ import org.junit.jupiter.params.provider.ValueSource;
 
 @ExtendWith(TestJsonMapper.class)
 class RemoteMcpValidationTest {
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void toolAndRpcErrorsHaveSanitizedUiOnlyDetail(final boolean rpc, final JsonMapper mapper) throws Exception {
+        try (final var server = new RemoteMcpTestServer(mapper, exchange -> {
+                    final var message = request(mapper, exchange);
+                    if ("initialize".equals(message.get("method"))) {
+                        result(mapper, exchange, message.get("id"), Map.of("protocolVersion", "2025-06-18"));
+                    } else if ("tools/call".equals(message.get("method"))) {
+                        final var detail = "Quota exceeded: secret custom legacy \u001b[31mred\u001b[0m";
+                        if (rpc) {
+                            json(
+                                    exchange,
+                                    mapper.toString(Map.of(
+                                            "jsonrpc",
+                                            "2.0",
+                                            "id",
+                                            message.get("id"),
+                                            "error",
+                                            Map.of("code", -32001, "message", detail))));
+                        } else {
+                            result(
+                                    mapper,
+                                    exchange,
+                                    message.get("id"),
+                                    Map.of(
+                                            "isError",
+                                            true,
+                                            "content",
+                                            List.of(Map.of("type", "text", "text", detail))));
+                        }
+                    } else {
+                        empty(exchange, 202);
+                    }
+                });
+                final var client = new HttpMcpClient(
+                        "test",
+                        server.url("/mcp"),
+                        "secret",
+                        List.of("X-Test=custom", "Authorization=Bearer legacy"),
+                        10,
+                        mapper,
+                        server.http)) {
+            client.initialize();
+            final var failure = assertThrows(McpFailure.class, () -> client.callTool("test", Map.of()));
+            assertEquals(
+                    (rpc ? "JSON-RPC error -32001: " : "") + "Quota exceeded: [redacted] [redacted] [redacted] red",
+                    failure.detail());
+            final var ui = McpFailure.forUi("test", failure);
+            assertEquals(failure.detail(), ui.detail());
+            assertEquals("MCP tool test failed", ui.getMessage());
+            assertFalse(failure.toString().contains("Quota exceeded"));
+        }
+    }
+
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
     void structuredContentFallbackAndTextPrecedence(final boolean sse, final JsonMapper mapper) throws Exception {

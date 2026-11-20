@@ -34,6 +34,22 @@ import java.util.Objects;
  * Workdirs are resolved at the session/invocation boundary, never inferred by observers.
  */
 public sealed interface AgentEvent {
+    /** Ephemeral frontend-only detail. Never use in model messages, history, hooks, or logs. */
+    record ToolDiagnostic(
+            String name,
+            String detail,
+            long ordinal,
+            String sessionId,
+            String subagentId,
+            String subagentName,
+            Path workdir)
+            implements AgentEvent {
+        @Override
+        public String toString() {
+            return "ToolDiagnostic[name=" + name + ", ordinal=" + ordinal + ", sessionId=" + sessionId + "]";
+        }
+    }
+
     /**
      * @return the session (tab) that owns the turn this event belongs to. Always
      *         set by the producers: the registry routes strictly on it and drops

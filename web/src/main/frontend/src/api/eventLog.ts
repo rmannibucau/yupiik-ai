@@ -289,6 +289,15 @@ export function eventsToBlocks(events: WebEvent[], idFor?: (event: WebEvent, kin
       } else {
         blocks.push({ id: idFor(ev, 'thought'), kind: 'thought', content: ev.message ?? '', writing: true, ...timing });
       }
+    } else if (ev.type === 'tool-diagnostic') {
+      // A separate live display block, never a tool result or provider message.
+      settle();
+      const scope = ev.subagentId ? `[${ev.subagentName ?? ev.subagentId}] ` : '';
+      const ordinal = typeof ev.data?.ordinal === 'number' && ev.data.ordinal > 0 ? ` #${ev.data.ordinal}` : '';
+      blocks.push({
+        id: idFor(ev, 'notice'), kind: 'notice',
+        content: `${scope}${ev.message ?? 'Tool'}${ordinal} diagnostic:\n${String(ev.data?.detail ?? '')}`,
+      });
     } else if (ev.type === 'tool-started') {
       settle();
       const name = ev.message ?? ev.type;

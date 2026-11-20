@@ -48,6 +48,7 @@ public record WebEventDto(
             case AgentEvent.ThinkingDelta _ -> "thinking-delta";
             case AgentEvent.ToolStarted _ -> "tool-started";
             case AgentEvent.ToolStream _ -> "tool-stream";
+            case AgentEvent.ToolDiagnostic _ -> "tool-diagnostic";
             case AgentEvent.ToolFinished _ -> "tool-finished";
             case AgentEvent.ToolFilesChanged _ -> "tool-files-changed";
             case AgentEvent.UsageUpdated _ -> "usage-updated";
@@ -78,6 +79,7 @@ public record WebEventDto(
             case AgentEvent.ThinkingDelta t -> t.delta();
             case AgentEvent.ToolStarted t -> t.name();
             case AgentEvent.ToolStream t -> t.name();
+            case AgentEvent.ToolDiagnostic t -> t.name();
             case AgentEvent.ToolFinished t -> t.name();
             case AgentEvent.ToolFilesChanged _ -> null; // UI-only file data is not part of this transport.
             case AgentEvent.UsageUpdated t -> t.model();
@@ -105,6 +107,8 @@ public record WebEventDto(
             case AgentEvent.FeedbackStarted t -> Map.of("startedAt", t.startedAt(), "kind", t.kind());
             case AgentEvent.Phase t -> Map.of("phase", t.name());
             case AgentEvent.ToolStarted t -> Map.of("args", t.args(), "ordinal", t.ordinal());
+            case AgentEvent.ToolDiagnostic t ->
+                Map.of("detail", t.detail() == null ? "" : t.detail(), "ordinal", t.ordinal());
             case AgentEvent.ToolStream t ->
                 Map.of("stream", true, "fragment", t.fragment() == null ? "" : t.fragment(), "ordinal", t.ordinal());
             case AgentEvent.ToolFinished t ->

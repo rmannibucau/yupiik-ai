@@ -153,6 +153,8 @@ public final class AcpUpdates implements AutoCloseable {
             name = started.name();
         } else if (event instanceof AgentEvent.ToolStream stream) {
             name = stream.name();
+        } else if (event instanceof AgentEvent.ToolDiagnostic diagnostic) {
+            name = diagnostic.name();
         } else if (event instanceof AgentEvent.ToolFinished finished) {
             name = finished.name();
         } else if (event instanceof AgentEvent.ToolFilesChanged changed) {
@@ -204,6 +206,18 @@ public final class AcpUpdates implements AutoCloseable {
             final var content = new ArrayList<Map<String, Object>>();
             content.add(toolText(state.stream.toString()));
             content.addAll(state.fileContent);
+            content.addAll(state.diagnostics);
+            update.put("content", List.copyOf(content));
+            tools.put(id, state);
+        } else if (event instanceof AgentEvent.ToolDiagnostic diagnostic) {
+            // Display-only content, never rawOutput or the stream/result buffer.
+            state.diagnostics.add(toolText(diagnostic.detail()));
+            final var content = new ArrayList<Map<String, Object>>();
+            if (!state.stream.isEmpty()) {
+                content.add(toolText(state.stream.toString()));
+            }
+            content.addAll(state.fileContent);
+            content.addAll(state.diagnostics);
             update.put("content", List.copyOf(content));
             tools.put(id, state);
         } else if (event instanceof AgentEvent.ToolFilesChanged changed) {
@@ -235,6 +249,7 @@ public final class AcpUpdates implements AutoCloseable {
                 content.add(toolText(state.stream.toString()));
             }
             content.addAll(state.fileContent);
+            content.addAll(state.diagnostics);
             update.put("content", List.copyOf(content));
             update.put("locations", List.copyOf(state.fileLocations));
             tools.put(id, state);
@@ -256,6 +271,7 @@ public final class AcpUpdates implements AutoCloseable {
                 }
             }
             content.addAll(state.fileContent);
+            content.addAll(state.diagnostics);
             update.put("content", List.copyOf(content));
             final var locations = new ArrayList<>(state.fileLocations);
             for (final var location : locations(name, null, snapshot)) {
@@ -416,6 +432,7 @@ public final class AcpUpdates implements AutoCloseable {
         }
         if (event instanceof AgentEvent.ToolStarted
                 || event instanceof AgentEvent.ToolStream
+                || event instanceof AgentEvent.ToolDiagnostic
                 || event instanceof AgentEvent.ToolFinished
                 || event instanceof AgentEvent.ToolFilesChanged) {
             throw new IllegalArgumentException("use tool() with the server's canonical tool id");
@@ -572,6 +589,7 @@ public final class AcpUpdates implements AutoCloseable {
                 content.add(toolText(entry.getValue().stream.toString()));
             }
             content.addAll(entry.getValue().fileContent);
+            content.addAll(entry.getValue().diagnostics);
             content.add(toolText(
                     cancelled
                             ? "Tool interrupted before a final result was reported."
@@ -823,6 +841,7 @@ public final class AcpUpdates implements AutoCloseable {
         private final String subagentId;
         private final StringBuilder stream = new StringBuilder();
         private final List<Map<String, Object>> fileContent = new ArrayList<>();
+        private final List<Map<String, Object>> diagnostics = new ArrayList<>();
         private final List<Map<String, Object>> fileLocations = new ArrayList<>();
 
         private ToolState(final String name, final String subagentId) {

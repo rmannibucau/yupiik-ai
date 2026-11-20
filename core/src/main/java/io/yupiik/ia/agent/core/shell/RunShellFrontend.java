@@ -136,6 +136,11 @@ public class RunShellFrontend implements ShellFrontend {
                     LOGGER.info(prefix + call.header() + " output: " + line);
                 }
             }
+        } else if (event instanceof final AgentEvent.ToolDiagnostic t) {
+            ensureStderrNewline();
+            final var call = toolCalls.find(t.name(), t.ordinal(), t.sessionId(), t.subagentId());
+            // Private display data: bypass JUL and never append to the call's output buffer.
+            System.err.println(prefix + call.header() + " diagnostic:\n" + t.detail());
         } else if (event instanceof final AgentEvent.ToolFinished t) {
             final var call = toolCalls.find(t.name(), t.ordinal(), t.sessionId(), t.subagentId());
             final var failure = !t.success() && !t.pending();
@@ -260,6 +265,9 @@ public class RunShellFrontend implements ShellFrontend {
                 AgentEvent.ToolFinished(var _, var _, var _, var _, var _, var _, String id, String name, var _)) {
             subagentId = id;
             subagentName = name;
+        } else if (event instanceof AgentEvent.ToolDiagnostic t) {
+            subagentId = t.subagentId();
+            subagentName = t.subagentName();
         } else if (event instanceof AgentEvent.Compacted(var _, var _, var _, String id, String name, var _, var _)) {
             subagentId = id;
             subagentName = name;

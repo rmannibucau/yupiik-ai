@@ -7,6 +7,20 @@ function ev(partial: Partial<WebEvent> & { type: string; sessionId: string }): W
 }
 
 describe('eventsToBlocks', () => {
+  it('renders private diagnostics separately without contaminating tool results or completion', () => {
+    const blocks = eventsToBlocks([
+      ev({ type: 'tool-started', sessionId: 's', message: 'mcp_example', data: { ordinal: 42 } }),
+      ev({ type: 'tool-diagnostic', sessionId: 's', subagentId: 'child', subagentName: 'Worker', message: 'mcp_example', data: { ordinal: 42, detail: 'private failure\nsecond line' } }),
+      ev({ type: 'tool-finished', sessionId: 's', message: 'mcp_example', data: { ordinal: 42, output: 'MCP failed', success: false } }),
+      ev({ type: 'turn-done', sessionId: 's', message: 'final answer' }),
+    ]);
+    expect(blocks.find(b => b.kind === 'notice')).toMatchObject({
+      content: '[Worker] mcp_example #42 diagnostic:\nprivate failure\nsecond line',
+    });
+    expect(blocks.find(b => b.kind === 'tool')).toMatchObject({ state: 'done', output: 'MCP failed', success: false });
+    expect(blocks.filter(b => b.kind === 'text').map(b => b.content).join('')).not.toContain('private failure');
+  });
+
   it('freezes captured feedback labels across deltas and final reconciliation without using them as identity', () => {
     const start = ev({ type: 'feedback-started', sessionId: 's1', message: 'text', data: { startedAt: 1000, speakerLabel: '[one] model' } });
     const text = ev({ type: 'text-delta', sessionId: 's1', message: 'answer' });

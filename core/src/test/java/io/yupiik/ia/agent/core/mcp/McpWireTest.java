@@ -16,15 +16,78 @@
 package io.yupiik.ia.agent.core.mcp;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.test.TestJsonMapper;
+import java.util.List;
+import java.util.Map;
+import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
 @ExtendWith(TestJsonMapper.class)
 class McpWireTest {
+    @Test
+    void failedResultsJoinTextAndUseStructuredFallback(final JsonMapper mapper) throws Exception {
+        assertFailureDetail(
+                mapper,
+                "{\"content\":[{\"type\":\"text\",\"text\":\"Rate limited\"},{\"type\":\"text\",\"text\":\"Retry later\"}],\"isError\":true}",
+                "Rate limited\nRetry later");
+        assertFailureDetail(
+                mapper,
+                "{\"content\":[],\"structuredContent\":{\"reason\":\"Quota exceeded\"},\"isError\":true}",
+                "{\"reason\":\"Quota exceeded\"}");
+        assertFailureDetail(mapper, "{\"content\":[],\"isError\":true}", "");
+    }
+
+    private void assertFailureDetail(final JsonMapper mapper, final String json, final String expected)
+            throws Exception {
+        final var decoded = McpWire.decode(mapper, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":" + json + "}");
+        final var result = McpWire.payload(mapper, decoded.get("result"), McpWire.Result.class);
+        assertEquals(
+                expected,
+                assertThrows(McpFailure.class, () -> McpWire.text(mapper, result))
+                        .detail());
+    }
+
+    @Test
+    void errorDetailUsesTextThenStructuredContentThenGenericFallback(final JsonMapper mapper) {
+        final var text = new McpWire.Result(
+                true,
+                List.of(
+                        new McpWire.Content("text", "one"),
+                        new McpWire.Content("image", null),
+                        new McpWire.Content("text", "two")),
+                Map.of("reason", "ignored"));
+        assertEquals(
+                "one\ntwo",
+                assertThrows(McpFailure.class, () -> McpWire.text(mapper, text)).detail());
+        final var structured = new McpWire.Result(true, List.of(), Map.of("reason", "Unavailable"));
+        assertEquals(
+                "{\"reason\":\"Unavailable\"}",
+                assertThrows(McpFailure.class, () -> McpWire.text(mapper, structured))
+                        .detail());
+        final var empty = new McpWire.Result(true, List.of(), null);
+        final var failure = assertThrows(McpFailure.class, () -> McpWire.text(mapper, empty));
+        assertEquals(
+                "MCP tool returned an error", McpFailure.forUi("test", failure).detail());
+    }
+
+    @Test
+    void failedResultRetainsDetailOutsideExceptionMessage(final JsonMapper mapper) throws Exception {
+        final var decoded = McpWire.decode(
+                mapper,
+                "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"isError\":true,\"content\":[{\"type\":\"text\",\"text\":\"Library unavailable\"}]}}");
+        final var result = McpWire.payload(mapper, decoded.get("result"), McpWire.Result.class);
+        final var failure = assertThrows(McpFailure.class, () -> McpWire.text(mapper, result));
+        assertEquals("MCP tool returned an error", failure.getMessage());
+        assertEquals("Library unavailable", failure.detail());
+        assertFalse(failure.toString().contains("Library unavailable"));
+    }
+
     @ParameterizedTest
     @ValueSource(
             strings = {

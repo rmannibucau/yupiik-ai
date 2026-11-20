@@ -16,6 +16,7 @@
 package io.yupiik.ia.agent.web;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 
 import io.yupiik.ia.agent.core.agent.AgentEvent;
@@ -30,6 +31,20 @@ import org.junit.jupiter.api.io.TempDir;
 
 /** Mapping of the tool lifecycle events to the flat SSE DTO the browser consumes. */
 class WebEventDtoTest {
+    @Test
+    void diagnosticUsesDedicatedDisplayPayload() {
+        final var dto = WebEventDto.of(new AgentEvent.ToolDiagnostic(
+                "mcp_example", "private failure", 42, "s", "child", "Worker", eventWorkdir));
+        assertEquals("tool-diagnostic", dto.type());
+        assertEquals("mcp_example", dto.message());
+        assertEquals("s", dto.sessionId());
+        assertEquals("child", dto.subagentId());
+        assertEquals("Worker", dto.subagentName());
+        assertEquals("private failure", dto.data().get("detail"));
+        assertEquals(42L, dto.data().get("ordinal"));
+        assertFalse(dto.data().containsKey("output"));
+    }
+
     @TempDir
     private static Path eventWorkdir;
 

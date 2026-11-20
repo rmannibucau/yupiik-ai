@@ -72,9 +72,7 @@ class McpEmbeddedTool implements EmbeddedTool {
         try {
             return ToolResult.ok(manager.call(serverName, tool.name(), args));
         } catch (final RuntimeException e) {
-            return ToolResult.error("MCP tool " + qualifiedName + " failed: " + e.getMessage());
-        } catch (final Exception e) {
-            return ToolResult.error("MCP tool " + qualifiedName + " failed: " + e.getMessage());
+            throw McpFailure.forUi(qualifiedName, e);
         }
     }
 }

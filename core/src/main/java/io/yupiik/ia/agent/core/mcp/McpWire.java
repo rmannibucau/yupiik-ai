@@ -113,9 +113,6 @@ public final class McpWire {
     }
 
     static String text(final JsonMapper mapper, final Result result) throws IOException {
-        if (Boolean.TRUE.equals(result.isError())) {
-            throw new IOException("MCP tool returned an error");
-        }
         final var text = new StringBuilder();
         boolean hasText = false;
         for (final var part : result.content()) {
@@ -129,6 +126,9 @@ public final class McpWire {
         }
         if (text.isEmpty() && result.structuredContent() != null) {
             text.append(json(mapper, result.structuredContent()));
+        }
+        if (Boolean.TRUE.equals(result.isError())) {
+            throw new McpFailure("MCP tool returned an error", text.toString());
         }
         return text.toString();
     }

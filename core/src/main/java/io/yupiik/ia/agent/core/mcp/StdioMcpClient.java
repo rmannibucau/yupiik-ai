@@ -205,7 +205,12 @@ class StdioMcpClient implements McpClient {
     @Override
     public String callTool(final String toolName, final Map<String, Object> arguments)
             throws IOException, InterruptedException {
-        return McpWire.text(mapper, request("tools/call", new McpWire.Call(toolName, arguments), McpWire.Result.class));
+        try {
+            return McpWire.text(
+                    mapper, request("tools/call", new McpWire.Call(toolName, arguments), McpWire.Result.class));
+        } catch (final McpFailure failure) {
+            throw failure.sanitized(null, env, null);
+        }
     }
 
     private <T> T request(final String method, final Object params, final Class<T> type)
@@ -227,7 +232,13 @@ class StdioMcpClient implements McpClient {
             }
             send(new McpWire.Envelope("2.0", id, method, params, null, null), deadline);
             final var response = future.get(remaining(deadline), TimeUnit.NANOSECONDS);
-            if (response.error() != null || response.result() == null) {
+            if (response.error() != null) {
+                throw new McpFailure(
+                        "MCP request failed: " + method,
+                        "JSON-RPC error " + response.error().code() + ": "
+                                + response.error().message());
+            }
+            if (response.result() == null) {
                 throw new IOException("MCP request failed: " + method);
             }
             try {
@@ -236,7 +247,10 @@ class StdioMcpClient implements McpClient {
                 close();
                 throw e;
             }
-        } catch (final ExecutionException | TimeoutException e) {
+        } catch (final TimeoutException e) {
+            close();
+            throw new McpFailure("MCP request timed out", "MCP request timed out: " + method);
+        } catch (final ExecutionException e) {
             close();
             throw new IOException("MCP request failed: " + method);
         } catch (final InterruptedException e) {

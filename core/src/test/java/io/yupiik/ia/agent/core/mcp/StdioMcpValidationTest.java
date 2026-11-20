@@ -47,6 +47,25 @@ class StdioMcpValidationTest {
     @ParameterizedTest
     @ValueSource(
             strings = {
+                "{\"error\":{\"code\":-32001,\"message\":\"Quota exceeded\"}}",
+                "{\"result\":{\"isError\":true,\"content\":[{\"type\":\"text\",\"text\":\"Quota exceeded\"}]}}"
+            })
+    void serverFailureDetailIsAvailableOnlyThroughUiChannel(
+            final String body, @TempDir final Path tmp, final JsonMapper mapper) throws Exception {
+        Files.writeString(tmp.resolve("reply.jsonl"), "{\"jsonrpc\":\"2.0\",\"id\":$id," + body.substring(1));
+        try (final var client = client(tmp, mapper, null)) {
+            client.initialize();
+            final var failure = assertThrows(McpFailure.class, () -> client.callTool("invalid", Map.of()));
+            assertEquals(
+                    (body.contains("error") ? "JSON-RPC error -32001: " : "") + "Quota exceeded", failure.detail());
+            assertFalse(failure.toString().contains("Quota exceeded"));
+            assertNull(failure.getCause());
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(
+            strings = {
                 "{\"jsonrpc\":\"2.0\",\"id\":$id,\"method\":\"ping\",\"result\":{}}",
                 "{\"jsonrpc\":\"2.0\",\"id\":$id,\"method\":null,\"result\":{}}",
                 "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{},\"error\":null}",

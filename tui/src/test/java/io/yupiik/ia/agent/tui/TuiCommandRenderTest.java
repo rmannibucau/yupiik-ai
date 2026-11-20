@@ -896,6 +896,23 @@ class TuiCommandRenderTest {
     }
 
     @Test
+    void toolDiagnosticLivesOnlyInErrorModal() throws Exception {
+        final var command = command(testRegistry(), stubAgentLoop());
+        final var state = new UiState(new ThinkTagSplitter(), Clock.systemUTC());
+        final var onEvent = TuiCommand.class.getDeclaredMethod("onEvent", AgentEvent.class, UiState.class);
+        onEvent.setAccessible(true);
+        onEvent.invoke(
+                command,
+                new AgentEvent.ToolDiagnostic(
+                        "mcp_example", "private failure\nsecond line", 42, "s", "child", "Worker", eventWorkdir),
+                state);
+        assertTrue(state.errorMessage.contains("[Worker] mcp_example #42"));
+        assertTrue(state.errorDetail.message().contains("private failure\nsecond line"));
+        assertFalse(state.model.markdown("You", "Assistant").contains("private failure"));
+        assertNull(state.toolOutputs.get(42));
+    }
+
+    @Test
     void sameNameToolsFinishingInReverseKeepTheirOwnArgumentsAndCleanAliases() throws Exception {
         final var command = command(testRegistry(), stubAgentLoop());
         final var state = new UiState(new ThinkTagSplitter(), Clock.systemUTC());

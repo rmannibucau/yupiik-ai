@@ -107,6 +107,20 @@ public class ToolExecutionService {
             // never saw the real value). Only registry-tracked fakes are restored.
             emitter.emit(new ToolExecutionPrepare(tool.name(), args, ctx.sessionId()));
             result = tool.execute(args, ctx);
+        } catch (final ToolDiagnosticException e) {
+            result = ToolResult.error(e.getMessage());
+            try {
+                emitter.emit(new AgentEvent.ToolDiagnostic(
+                        tool.name(),
+                        e.detail(),
+                        ctx.ordinal(),
+                        ctx.sessionId(),
+                        ctx.subagentId(),
+                        ctx.subagentName(),
+                        ctx.projectDir()));
+            } catch (final RuntimeException | Error ignored) {
+                // UI observers must never leak diagnostics through logs or change the tool result.
+            }
         } catch (final RuntimeException | Error e) {
             result = ToolResult.error("Tool " + tool.name() + " failed: " + e);
         }

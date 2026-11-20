@@ -553,6 +553,12 @@ public class AnsiShellFrontend implements ShellFrontend {
                     printlnErr(prefix + "  " + call.header() + " output: " + line);
                 }
             }
+        } else if (event instanceof final AgentEvent.ToolDiagnostic t) {
+            stopSpinner();
+            closeThinkingRound();
+            ensureStderrNewline();
+            final var call = toolCalls.find(t.name(), t.ordinal(), t.sessionId(), t.subagentId());
+            printlnErr(prefix + call.header() + " diagnostic:\n" + t.detail());
         } else if (event instanceof final AgentEvent.ToolFinished t) {
             stats.incToolsRun();
             stopSpinner();
@@ -691,6 +697,9 @@ public class AnsiShellFrontend implements ShellFrontend {
                 AgentEvent.ToolFinished(var _, var _, var _, var _, var _, var _, String id, String name, var _)) {
             subagentId = id;
             subagentName = name;
+        } else if (event instanceof AgentEvent.ToolDiagnostic t) {
+            subagentId = t.subagentId();
+            subagentName = t.subagentName();
         } else if (event instanceof AgentEvent.Compacted(var _, var _, var _, String id, String name, var _, var _)) {
             subagentId = id;
             subagentName = name;
