@@ -471,6 +471,7 @@ public class OpenAIResponsesDialect extends AbstractDialect {
         private final Map<Integer, MutableToolCall> calls = new LinkedHashMap<>();
         private Usage usage;
         private String finishReason = "stop";
+        private String errorMessage;
 
         private LlmResponseAssembler(final CompletableFuture<LlmResponse> future) {
             this.future = future;
@@ -497,12 +498,15 @@ public class OpenAIResponsesDialect extends AbstractDialect {
                 if (arguments != null) {
                     mutable.arguments.append(arguments);
                 }
-            } else if (event instanceof LlmStreamEvent.End(String reason, Usage usage1)) {
+            } else if (event instanceof LlmStreamEvent.End(String reason, Usage usage1, String error)) {
                 if (usage1 != null) {
                     usage = usage1;
                 }
                 if (reason != null) {
                     finishReason = reason;
+                }
+                if (error != null && !error.isBlank()) {
+                    errorMessage = error;
                 }
             }
         }
@@ -523,7 +527,13 @@ public class OpenAIResponsesDialect extends AbstractDialect {
             final var message = new LlmMessage(
                     "assistant", text.toString(), null, toolCalls.isEmpty() ? null : toolCalls, null, Map.of());
             final var choice = new LlmResponse.LlmChoice(0, message, finishReason);
-            future.complete(new LlmResponse(null, null, null, List.of(choice), usage, Map.of()));
+            future.complete(new LlmResponse(
+                    null,
+                    null,
+                    null,
+                    List.of(choice),
+                    usage,
+                    errorMessage == null ? Map.of() : Map.of("error", Map.of("message", errorMessage))));
         }
     }
 
@@ -946,10 +956,9 @@ public class OpenAIResponsesDialect extends AbstractDialect {
                 case "response.failed", "response.error", "error" -> {
                     // An HTTP-layer/backend failure is not output-token exhaustion: map it to "error"
                     // (a never-truncating reason) so it is not retried through the truncation path.
-                    // The empty-completion retry is bounded separately (emptyCompletionRetriesMax) and
-                    // surfaces the real failure to the user instead of pretending it was truncation.
+                    // Keep optional provider details without changing the bounded empty-completion retry.
                     streamArgState.clear();
-                    result.add(new LlmStreamEvent.End("error", null));
+                    result.add(new LlmStreamEvent.End("error", null, streamErrorMessage(root)));
                 }
                 default -> {
                     // ignore unknown event types
@@ -960,6 +969,17 @@ public class OpenAIResponsesDialect extends AbstractDialect {
             warnMapEventFailure("responses", event.data() == null ? null : event.data(), e);
             return List.of();
         }
+    }
+
+    private static String streamErrorMessage(final Map<String, Object> root) {
+        final var source = root.get("response") instanceof Map<?, ?> response ? response : root;
+        final var error = source.get("error") instanceof Map<?, ?> details ? details : root;
+        final var message = error.get("message") instanceof String text && !text.isBlank() ? text : null;
+        final var code = error.get("code") instanceof String text && !text.isBlank() ? text : null;
+        if (message == null) {
+            return code;
+        }
+        return code == null ? message : code + ": " + message;
     }
 
     /**

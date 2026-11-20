@@ -2148,6 +2148,70 @@ class AgentLoopTest {
         assertInstanceOf(AgentEvent.TurnDone.class, events.getLast());
     }
 
+    @Test
+    void emptyCompletionNoticesPreserveOptionalProviderError() {
+        final var calls = new AtomicInteger();
+        final var client = new ChatClient() {
+            @Override
+            public Message stream(
+                    final ChatCompletionRequest request,
+                    final Consumer<PauseEvent> pauseListener,
+                    final Consumer<LlmStreamEvent> onDelta,
+                    final BooleanSupplier cancelled) {
+                calls.incrementAndGet();
+                onDelta.accept(new End("error", null, "unsupported_value: reasoning effort is not supported"));
+                // A trailing usage-only event must not erase the cause.
+                onDelta.accept(new End(null, null));
+                return Message.assistant("", null);
+            }
+        };
+        assertEquals(
+                "",
+                loop(client, null, configuration(true, Map.of("yca.llm.emptyCompletionRetriesMax", "1")))
+                        .run("do it", null, "s1", null, () -> false));
+        assertEquals(2, calls.get());
+        final var notices = events.stream()
+                .filter(AgentEvent.Notice.class::isInstance)
+                .map(AgentEvent.Notice.class::cast)
+                .toList();
+        assertEquals(2, notices.size());
+        assertEquals(AgentEvent.Notice.Level.WARN, notices.getFirst().level());
+        assertEquals(AgentEvent.Notice.Level.ERROR, notices.getLast().level());
+        for (final var notice : notices) {
+            assertTrue(notice.message().contains("finish_reason=error"));
+            assertTrue(
+                    notice.message().contains("provider error: unsupported_value: reasoning effort is not supported"));
+        }
+    }
+
+    @Test
+    void emptyCompletionDoesNotReusePreviousProviderError() {
+        final var calls = new AtomicInteger();
+        final var client = new ChatClient() {
+            @Override
+            public Message stream(
+                    final ChatCompletionRequest request,
+                    final Consumer<PauseEvent> pauseListener,
+                    final Consumer<LlmStreamEvent> onDelta,
+                    final BooleanSupplier cancelled) {
+                onDelta.accept(new End("error", null, calls.incrementAndGet() == 1 ? "first failure" : " "));
+                return Message.assistant("", null);
+            }
+        };
+        assertEquals(
+                "",
+                loop(client, null, configuration(true, Map.of("yca.llm.emptyCompletionRetriesMax", "1")))
+                        .run("do it", null, "s1", null, () -> false));
+        final var notices = events.stream()
+                .filter(AgentEvent.Notice.class::isInstance)
+                .map(AgentEvent.Notice.class::cast)
+                .toList();
+        assertEquals(2, notices.size());
+        assertTrue(notices.getFirst().message().contains("first failure"));
+        assertFalse(notices.getLast().message().contains("provider error"));
+        assertTrue(notices.getLast().message().contains("gave up after 1 retries"));
+    }
+
     /** After the configured budget the empty-completion retry gives up with an error notice, not a blank stop. */
     @Test
     void emptyCompletionGivesUpAfterTheBudgetWithAnErrorNotice() {

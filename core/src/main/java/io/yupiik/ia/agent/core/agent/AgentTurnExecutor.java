@@ -353,7 +353,10 @@ public class AgentTurnExecutor {
     }
 
     private void dispatch(
-            final LlmStreamEvent delta, final io.yupiik.ia.agent.core.llm.Usage[] usage, final String[] finishReason) {
+            final LlmStreamEvent delta,
+            final io.yupiik.ia.agent.core.llm.Usage[] usage,
+            final String[] finishReason,
+            final String[] errorMessage) {
         if (delta instanceof TextDelta(final String text)) {
             if (host.turnState.thinkingActive) {
                 host.turnState.thinkingMs +=
@@ -376,7 +379,7 @@ public class AgentTurnExecutor {
             // capture the opaque encrypted_content blob for multi-turn reasoning replay; it never
             // produces visible output (the summary deltas did) and is not re-emitted as a delta
             host.streamReasoning.addReasoningItem(item);
-        } else if (delta instanceof End(final String reason, final Usage upper)) {
+        } else if (delta instanceof End(final String reason, final Usage upper, final String error)) {
             // drain whatever the inline splitter still held for this generation (a trailing
             // inline-code backtick, a fence tail or an unclosed think delimiter split across the
             // last chunks), so no partial answer tail is lost at stream end
@@ -388,6 +391,9 @@ public class AgentTurnExecutor {
             }
             if (reason != null) {
                 finishReason[0] = reason;
+            }
+            if (error != null && !error.isBlank()) {
+                errorMessage[0] = error;
             }
             // a chunk may carry usage and a choice finish reason on the same stream line, which
             // the dialect splits into two End events; only overwrite usage when this End actually
@@ -1194,6 +1200,7 @@ public class AgentTurnExecutor {
                 final var usage = new io.yupiik.ia.agent.core.llm.Usage[] {io.yupiik.ia.agent.core.llm.Usage.EMPTY};
                 final var sentPayload = new AtomicReference<>(host.contextPayload(request));
                 final var finishReason = new String[] {null};
+                final var errorMessage = new String[] {null};
                 Message assistant;
                 host.emitPhase(AgentEvent.Phase.REQUEST_SENT);
                 final long llmStartNanos = host.precisionDurationMarker.now();
@@ -1207,7 +1214,7 @@ public class AgentTurnExecutor {
                                     usage,
                                     cancelled,
                                     host.pauseListener,
-                                    delta -> dispatch(delta, usage, finishReason),
+                                    delta -> dispatch(delta, usage, finishReason, errorMessage),
                                     new ModelRoundProcessor.Observer() {
                                         @Override
                                         public void begin() {
@@ -1220,6 +1227,7 @@ public class AgentTurnExecutor {
                                         public void resetText() {
                                             usage[0] = io.yupiik.ia.agent.core.llm.Usage.EMPTY;
                                             finishReason[0] = null;
+                                            errorMessage[0] = null;
                                             // a retry is a fresh generation: rebuild the inline splitter (dropping the
                                             // failed attempt's stale, possibly half-consumed carry) and drop the stale
                                             // partial reasoning text + opaque blobs so nothing leaks into the persisted
@@ -1498,13 +1506,14 @@ public class AgentTurnExecutor {
                         return content;
                     }
                     if (content.isBlank()) {
+                        final var cause = errorMessage[0] == null ? "" : "; provider error: " + errorMessage[0];
                         final var maxRetries = host.configuration.llm().emptyCompletionRetriesMax();
                         if (maxRetries > 0 && emptyCompletionRetries < maxRetries) {
                             emptyCompletionRetries++;
                             host.emit(host.notice(
                                     AgentEvent.Notice.Level.WARN,
                                     "model returned an empty completion (finish_reason=" + reason + "); retrying ("
-                                            + emptyCompletionRetries + '/' + maxRetries + ')'));
+                                            + emptyCompletionRetries + '/' + maxRetries + ')' + cause));
                             // An empty completion after reasoning means the model burned its whole
                             // output budget thinking (reasoning tokens are not part of the request):
                             // re-asking the identical context would re-derive the same thoughts and
@@ -1523,7 +1532,8 @@ public class AgentTurnExecutor {
                                 "model returned an empty completion (finish_reason=" + reason + ')'
                                         + (maxRetries <= 0
                                                 ? " (yca.llm.emptyCompletionRetriesMax is 0, no retry)"
-                                                : "; gave up after " + emptyCompletionRetries + " retries")));
+                                                : "; gave up after " + emptyCompletionRetries + " retries")
+                                        + cause));
                         host.emitTurnMetrics(content, turnStartNanos);
                         return content;
                     }

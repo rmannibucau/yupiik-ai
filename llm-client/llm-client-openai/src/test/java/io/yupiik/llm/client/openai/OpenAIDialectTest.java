@@ -1244,6 +1244,71 @@ class OpenAIDialectTest {
                 .findFirst()
                 .orElseThrow();
         assertEquals("error", end.finishReason());
+        assertEquals("server_error: boom", end.errorMessage());
+    }
+
+    @Test
+    void responsesStreamErrorDetailsAreOptional(final JsonMapper mapper) throws Exception {
+        final var payload = new AtomicReference<String>();
+        server.createContext("/v1/responses", exchange -> respond(exchange, 200, "text/event-stream", payload.get()));
+        server.start();
+        final var dialect = new OpenAIResponsesDialect(
+                mapper,
+                client,
+                ProviderSpec.of("http://localhost:" + server.getAddress().getPort() + "/v1/responses", "sk-test"));
+        final var errors = List.of(
+                "{\"message\":\"boom\",\"code\":\"server_error\"}",
+                "{\"message\":\"boom\"}",
+                "{\"code\":\"server_error\"}",
+                "{}",
+                "null",
+                "[]",
+                "42",
+                "\"unexpected\"",
+                "{\"message\":null,\"code\":null}",
+                "{\"message\":\"  \",\"code\":\"\"}",
+                "{\"message\":{},\"code\":[]}");
+        for (final var type : List.of("response.failed", "response.error", "error")) {
+            for (final var error : errors) {
+                final var details = "\"error\":" + error;
+                final var body = "response.failed".equals(type) ? "\"response\":{" + details + "}" : details;
+                payload.set("event: " + type + "\ndata: {\"type\":\"" + type + "\"," + body + "}\n\n");
+                final var publisher = dialect.stream(request(true), () -> false)
+                        .toCompletableFuture()
+                        .get(5, TimeUnit.SECONDS);
+                final var end = collect(publisher).stream()
+                        .filter(LlmStreamEvent.End.class::isInstance)
+                        .map(LlmStreamEvent.End.class::cast)
+                        .findFirst()
+                        .orElseThrow();
+                assertEquals("error", end.finishReason());
+                final var expected =
+                        switch (errors.indexOf(error)) {
+                            case 0 -> "server_error: boom";
+                            case 1 -> "boom";
+                            case 2 -> "server_error";
+                            default -> null;
+                        };
+                assertEquals(expected, end.errorMessage(), type + ": " + error);
+                final var assembled = dialect.assemble(request(false), () -> false)
+                        .toCompletableFuture()
+                        .get(5, TimeUnit.SECONDS);
+                assertEquals("error", assembled.first().finishReason());
+                assertEquals(
+                        expected == null ? Map.of() : Map.of("error", Map.of("message", expected)),
+                        assembled.extensions());
+            }
+        }
+        // Some gateways put message/code directly on the error event.
+        payload.set("event: error\ndata: {\"type\":\"error\",\"message\":\"boom\",\"code\":\"server_error\"}\n\n");
+        final var publisher =
+                dialect.stream(request(true), () -> false).toCompletableFuture().get(5, TimeUnit.SECONDS);
+        final var end = collect(publisher).stream()
+                .filter(LlmStreamEvent.End.class::isInstance)
+                .map(LlmStreamEvent.End.class::cast)
+                .findFirst()
+                .orElseThrow();
+        assertEquals("server_error: boom", end.errorMessage());
     }
 
     @Test

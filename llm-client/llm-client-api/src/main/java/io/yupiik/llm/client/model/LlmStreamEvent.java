@@ -83,6 +83,12 @@ public sealed interface LlmStreamEvent
      *
      * @param finishReason why the stream stopped.
      * @param usage aggregated token usage.
+     * @param errorMessage optional provider error details, absent when not supplied.
      */
-    record End(String finishReason, Usage usage) implements LlmStreamEvent {}
+    record End(String finishReason, Usage usage, String errorMessage) implements LlmStreamEvent {
+        /** Terminal event without provider error details. */
+        public End(final String finishReason, final Usage usage) {
+            this(finishReason, usage, null);
+        }
+    }
 }
