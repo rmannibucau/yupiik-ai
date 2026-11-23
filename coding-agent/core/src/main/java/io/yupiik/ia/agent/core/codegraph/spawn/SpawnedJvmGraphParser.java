@@ -199,44 +199,58 @@ public class SpawnedJvmGraphParser implements GraphParser {
             if (javaLauncher == null) {
                 return empty(files);
             }
-            final var tmpOut = Files.createTempFile(scratchDir, "scg-", ".bin");
-            try {
-                final var command = new ArrayList<String>();
-                command.add(javaLauncher.toAbsolutePath().toString());
-                command.addAll(javacOptions); // JVM startup flags before -cp (short-lived child: cut boot cost)
-                command.add("-cp");
-                command.add(scratchDir.resolve(PARSER_JAR_NAME).toString());
-                command.add(mainClass);
-                command.add(tmpOut.toString());
-                for (final var file : files) {
-                    command.add(file.toAbsolutePath().toString());
+            for (var attempt = 0; attempt < 2; attempt++) {
+                try {
+                    return parseBatchOnce(files, javaLauncher);
+                } catch (final IOException e) {
+                    // Scratch files can be removed while availability remains cached. Only check after failure.
+                    if (attempt != 0 || !Files.notExists(scratchDir.resolve(PARSER_JAR_NAME))) {
+                        throw e;
+                    }
+                    assembleParserJar();
                 }
-                final var process = new ProcessBuilder(command).start();
-                final boolean done = process.waitFor(spawnTimeoutSeconds, TimeUnit.SECONDS);
-                final String err = new String(process.getErrorStream().readAllBytes(), UTF_8);
-                if (!done) {
-                    process.destroyForcibly();
-                    warnSkipped("timed out after " + spawnTimeoutSeconds + "s" + suffix(err));
-                    return empty(files);
-                }
-                if (process.exitValue() != 0) {
-                    warnSkipped("the parser JVM exited with " + process.exitValue() + suffix(err));
-                    return empty(files);
-                }
-                if (!Files.isRegularFile(tmpOut) || Files.size(tmpOut) == 0) {
-                    warnSkipped("the parser JVM produced no output" + suffix(err));
-                    return empty(files);
-                }
-                return readOutput(tmpOut);
-            } finally {
-                Files.deleteIfExists(tmpOut);
             }
+            return empty(files);
         } catch (final IOException | InterruptedException e) {
             if (e instanceof InterruptedException) {
                 Thread.currentThread().interrupt();
             }
             LOGGER.log(Level.WARNING, e, () -> "Spawned-JVM parser failed: " + e.getMessage());
             return empty(files);
+        }
+    }
+
+    private Map<Path, GraphModel> parseBatchOnce(final List<Path> files, final Path javaLauncher)
+            throws IOException, InterruptedException {
+        final var tmpOut = Files.createTempFile(scratchDir, "scg-", ".bin");
+        try {
+            final var command = new ArrayList<String>();
+            command.add(javaLauncher.toAbsolutePath().toString());
+            command.addAll(javacOptions); // JVM startup flags before -cp (short-lived child: cut boot cost)
+            command.add("-cp");
+            command.add(scratchDir.resolve(PARSER_JAR_NAME).toString());
+            command.add(mainClass);
+            command.add(tmpOut.toString());
+            for (final var file : files) {
+                command.add(file.toAbsolutePath().toString());
+            }
+            final var process = new ProcessBuilder(command).start();
+            final boolean done = process.waitFor(spawnTimeoutSeconds, TimeUnit.SECONDS);
+            final String err = new String(process.getErrorStream().readAllBytes(), UTF_8);
+            if (!done) {
+                process.destroyForcibly();
+                warnSkipped("timed out after " + spawnTimeoutSeconds + "s" + suffix(err));
+                return empty(files);
+            }
+            if (process.exitValue() != 0) {
+                throw new IOException("the parser JVM exited with " + process.exitValue() + suffix(err));
+            }
+            if (!Files.isRegularFile(tmpOut) || Files.size(tmpOut) == 0) {
+                throw new IOException("the parser JVM produced no output" + suffix(err));
+            }
+            return readOutput(tmpOut);
+        } finally {
+            Files.deleteIfExists(tmpOut);
         }
     }
 

@@ -32,10 +32,13 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Function;
 import java.util.jar.JarFile;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 class SpawnedJvmGraphParserTest {
 
@@ -175,6 +178,64 @@ class SpawnedJvmGraphParserTest {
                 parsed.get(src).symbols().stream().anyMatch(s -> s.fqn().equals("demo.Demo")),
                 "expected the Demo type symbol");
         assertNotNull(parsed.get(helper), "helper file must have a model");
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void recreatesDeletedScratchArtifacts(final boolean deleteDirectory) throws IOException {
+        final var scratch = tempDir.resolve("scratch");
+        final var repoRoot = repoRoot();
+        final var jars = ParserJars.classResource(
+                repoRoot.resolve("core/target/classes"), repoRoot.resolve("code-graph-index/target/classes"));
+        final var parser = configured(singleJdkLocator(), scratch, jars, 30L, ParserJars.classes(), false);
+        final var src = tempDir.resolve("Demo.java");
+        Files.writeString(src, "public class Demo {}\n");
+        assertTrue(parser.available());
+        assertTrue(parser.parse(src).symbols().stream().anyMatch(s -> s.fqn().equals("Demo")));
+
+        Files.delete(scratch.resolve("parser.jar"));
+        if (deleteDirectory) {
+            Files.delete(scratch.resolve("generate.scgn.lock"));
+            Files.delete(scratch);
+        }
+
+        assertTrue(parser.parse(src).symbols().stream().anyMatch(s -> s.fqn().equals("Demo")));
+        assertTrue(Files.isRegularFile(scratch.resolve("parser.jar")));
+        try (final var entries = Files.list(scratch)) {
+            assertFalse(entries.anyMatch(p -> p.getFileName().toString().startsWith("scg-")));
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void failingChildOnlyReassemblesMissingArtifactsOnce(final boolean deleteJar) throws Exception {
+        final var scratch = tempDir.resolve("scratch");
+        final var repoRoot = repoRoot();
+        final var jars = ParserJars.classResource(
+                repoRoot.resolve("core/target/classes"), repoRoot.resolve("code-graph-index/target/classes"));
+        final var resourceReads = new AtomicInteger();
+        final var parser = configured(
+                singleJdkLocator(),
+                scratch,
+                path -> {
+                    resourceReads.incrementAndGet();
+                    return jars.apply(path);
+                },
+                30L,
+                ParserJars.classes(),
+                false);
+        assertTrue(parser.available());
+        final int initialReads = resourceReads.get();
+        if (deleteJar) {
+            Files.delete(scratch.resolve("parser.jar"));
+        }
+        set(parser, "javacOptions", List.of("-XX:NotARealJvmOption"));
+        final var src = tempDir.resolve("Demo.java");
+        Files.writeString(src, "public class Demo {}\n");
+
+        assertTrue(parser.parse(src).symbols().isEmpty());
+        assertEquals(initialReads * (deleteJar ? 2 : 1), resourceReads.get());
+        assertTrue(Files.isRegularFile(scratch.resolve("parser.jar")));
     }
 
     @Test
