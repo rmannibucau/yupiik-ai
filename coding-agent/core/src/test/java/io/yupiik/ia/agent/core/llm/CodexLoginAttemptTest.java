@@ -72,6 +72,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 /** All issuer/enrollment I/O is fake; the browser callback tests use loopback only. */
 @ExtendWith(TestJsonMapper.class)
@@ -409,6 +410,7 @@ class CodexLoginAttemptTest {
     }
 
     @Test
+    @ResourceLock("codex-oauth-default-callback-port")
     void browserCancellationReleasesLoopbackListener(final JsonMapper mapper) throws Exception {
         final var authorizeUrl = new CompletableFuture<String>();
         try (final var executor = Executors.newVirtualThreadPerTaskExecutor()) {
@@ -438,6 +440,7 @@ class CodexLoginAttemptTest {
     }
 
     @Test
+    @ResourceLock("codex-oauth-default-callback-port")
     void browserExchangeRunsOnOwnedWorkerAndDrainWaitsForIt(final JsonMapper mapper) throws Exception {
         final var block = new Block(true);
         final var callbackUrl = new CompletableFuture<String>();
@@ -485,6 +488,7 @@ class CodexLoginAttemptTest {
     }
 
     @Test
+    @ResourceLock("codex-oauth-default-callback-port")
     void cancellationDuringOptionalApiKeyExchangeCannotSave(final JsonMapper mapper) throws Exception {
         final var block = new Block(true);
         final var authorizeUrl = new CompletableFuture<String>();
