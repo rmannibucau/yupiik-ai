@@ -1,0 +1,302 @@
+/*
+ * Copyright (c) 2026 - Yupiik SAS - https://yupiik.io/
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *  http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+package io.yupiik.ia.agent.core.tools.builtin;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+import io.yupiik.fusion.json.JsonMapper;
+import io.yupiik.ia.agent.core.configuration.AgentMode;
+import io.yupiik.ia.agent.core.configuration.TestConfigs;
+import io.yupiik.ia.agent.core.permissions.PermissionService;
+import io.yupiik.ia.agent.core.runtime.Cancellations;
+import io.yupiik.ia.agent.core.todo.TodoItem;
+import io.yupiik.ia.agent.core.todo.TodoStore;
+import io.yupiik.ia.agent.core.tools.ToolContext;
+import io.yupiik.ia.agent.test.TestJsonMapper;
+import java.nio.file.Path;
+import java.util.List;
+import java.util.Map;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.api.io.TempDir;
+
+@ExtendWith(TestJsonMapper.class)
+class WriteTodoToolTest {
+    @TempDir
+    private static Path testWorkdir;
+
+    @TempDir
+    Path storageHome;
+
+    private JsonMapper mapper;
+
+    @BeforeEach
+    void bindMapper(final JsonMapper mapper) {
+        this.mapper = mapper;
+    }
+
+    private TodoStore todoStore() {
+        return new TodoStore(TestConfigs.codingAgent(Map.of("yca.storageHome", storageHome.toString())), mapper);
+    }
+
+    private PermissionService permissions(final AgentMode mode) {
+        final var service = new PermissionService(
+                TestConfigs.codingAgent(Map.of("yca.storageHome", storageHome.toString())),
+                (TestConfigs.codingAgent(Map.of("yca.storageHome", storageHome.toString()))).resolveWorkingDir());
+        service.setMode(mode);
+        return service;
+    }
+
+    /** The tool is stateless: the session's todo list and permissions arrive through the context. */
+    private ToolContext context(final TodoStore todos, final PermissionService permissions) {
+        return new ToolContext(
+                "s1",
+                null,
+                null,
+                permissions,
+                null,
+                todos,
+                null,
+                null,
+                null,
+                Cancellations.NEVER,
+                null,
+                null,
+                testWorkdir);
+    }
+
+    @Test
+    void planModeNormalizesNewlyCompletedTodo() {
+        final var store = todoStore();
+        final var tool = new WriteTodoTool();
+        final var result = tool.execute(
+                Map.of(
+                        "todos",
+                        List.of(
+                                Map.of("content", "step 1", "status", "completed"),
+                                Map.of("content", "step 2", "status", "pending"))),
+                context(store, permissions(AgentMode.PLAN)));
+        assertTrue(result.success(), result.output());
+        assertTrue(
+                store.render().contains("[ ] step 1"),
+                "completed new item must be normalized to pending: " + store.render());
+        assertTrue(store.render().contains("[ ] step 2"), store.render());
+        assertTrue(
+                result.output().contains("kept as pending"),
+                "the tool must report the plan-mode normalization: " + result.output());
+    }
+
+    @Test
+    void planModeNormalizesNewlyInProgressTodo() {
+        final var store = todoStore();
+        final var tool = new WriteTodoTool();
+        final var result = tool.execute(
+                Map.of("todos", List.of(Map.of("content", "step 1", "status", "in_progress"))),
+                context(store, permissions(AgentMode.PLAN)));
+        assertTrue(result.success(), result.output());
+        assertTrue(
+                store.render().contains("[ ] step 1"),
+                "in_progress new item must be normalized to pending: " + store.render());
+        assertTrue(result.output().contains("kept as pending"), result.output());
+    }
+
+    @Test
+    void planModeAllowsAllPendingPlan() {
+        final var store = todoStore();
+        final var tool = new WriteTodoTool();
+        final var result = tool.execute(
+                Map.of(
+                        "todos",
+                        List.of(
+                                Map.of("content", "step 1", "status", "pending"),
+                                Map.of("content", "step 2", "status", "pending"))),
+                context(store, permissions(AgentMode.PLAN)));
+        assertTrue(result.success(), result.output());
+        assertTrue(store.render().contains("[ ] step 1"), store.render());
+    }
+
+    @Test
+    void planModeToleratesItemsAlreadyAdvancedInBuildMode() {
+        final var store = todoStore();
+        store.replace(List.of(new TodoItem("step 1", "completed")));
+        final var tool = new WriteTodoTool();
+        final var result = tool.execute(
+                Map.of(
+                        "todos",
+                        List.of(
+                                Map.of("content", "step 1", "status", "completed"),
+                                Map.of("content", "step 2", "status", "pending"))),
+                context(store, permissions(AgentMode.PLAN)));
+        assertTrue(result.success(), result.output());
+        assertTrue(store.render().contains("[x] step 1"), store.render());
+    }
+
+    @Test
+    void planModeKeepsAdvancedItemWhenReemissionContentDrifts() {
+        // regression: a legitimately-advanced item must survive an otherwise-identical re-emission with
+        // cosmetic text drift (trailing whitespace, capitalisation), instead of being thrown back to pending
+        // and recreating the "progress then reverts" loop.
+        final var store = todoStore();
+        store.replace(List.of(new TodoItem("step 1", "completed")));
+        final var tool = new WriteTodoTool();
+        final var result = tool.execute(
+                Map.of("todos", List.of(Map.of("content", "  Step 1 ", "status", "completed"))),
+                context(store, permissions(AgentMode.PLAN)));
+        assertTrue(result.success(), result.output());
+        assertTrue(
+                store.render().startsWith("[x] "),
+                "drifted re-emission must keep the advanced status marker: " + store.render());
+        assertTrue(
+                store.render().contains("Step 1"),
+                "the drifted content itself must be preserved verbatim: " + store.render());
+    }
+
+    @Test
+    void planModeRoundTripDoesNotFlipAnAlreadyAdvancedItemBackToPending() {
+        // the full loop: seed advanced as a build-mode carry-over, then re-emit the same state through a
+        // plan-mode write - the item must stay advanced and the tool must not report a re-normalization.
+        final var store = todoStore();
+        store.replace(List.of(new TodoItem("step 1", "completed"), new TodoItem("step 2", "pending")));
+        final var tool = new WriteTodoTool();
+        final var again = tool.execute(
+                Map.of(
+                        "todos",
+                        List.of(
+                                Map.of("content", "step 1", "status", "completed"),
+                                Map.of("content", "step 2", "status", "pending"))),
+                context(store, permissions(AgentMode.PLAN)));
+        assertTrue(again.success(), again.output());
+        assertTrue(store.render().contains("[x] step 1"), "round-trip must keep the advanced item: " + store.render());
+        assertFalse(
+                again.output().contains("kept as pending"),
+                "no re-normalization after a stable re-emission: " + again.output());
+    }
+
+    @Test
+    void buildModeAcceptsCompletedTodos() {
+        final var store = todoStore();
+        final var tool = new WriteTodoTool();
+        final var result = tool.execute(
+                Map.of("todos", List.of(Map.of("content", "step 1", "status", "completed"))),
+                context(store, permissions(AgentMode.BUILD)));
+        assertTrue(result.success(), result.output());
+        assertTrue(store.render().contains("[x] step 1"), store.render());
+    }
+
+    @Test
+    void buildModeAcceptsCancelledTodos() {
+        final var store = todoStore();
+        final var tool = new WriteTodoTool();
+        final var result = tool.execute(
+                Map.of("todos", List.of(Map.of("content", "step 1", "status", "cancelled"))),
+                context(store, permissions(AgentMode.BUILD)));
+        assertTrue(result.success(), result.output());
+        assertTrue(store.render().contains("[-] step 1"), store.render());
+    }
+
+    @Test
+    void planModeKeepsNewlyCancelledTodoAsScopeDecision() {
+        final var store = todoStore();
+        final var tool = new WriteTodoTool();
+        final var result = tool.execute(
+                Map.of(
+                        "todos",
+                        List.of(
+                                Map.of("content", "step 1", "status", "cancelled"),
+                                Map.of("content", "step 2", "status", "pending"))),
+                context(store, permissions(AgentMode.PLAN)));
+        assertTrue(result.success(), result.output());
+        assertTrue(
+                store.render().contains("[-] step 1"),
+                "cancelled new item is kept as a scope decision, not normalized: " + store.render());
+        assertTrue(store.render().contains("[ ] step 2"), store.render());
+    }
+
+    @Test
+    void planModeToleratesItemsAlreadyCancelledInBuildMode() {
+        final var store = todoStore();
+        store.replace(List.of(new TodoItem("step 1", "cancelled")));
+        final var tool = new WriteTodoTool();
+        final var result = tool.execute(
+                Map.of(
+                        "todos",
+                        List.of(
+                                Map.of("content", "step 1", "status", "cancelled"),
+                                Map.of("content", "step 2", "status", "pending"))),
+                context(store, permissions(AgentMode.PLAN)));
+        assertTrue(result.success(), result.output());
+        assertTrue(store.render().contains("[-] step 1"), store.render());
+    }
+
+    @Test
+    void rejectsStringTodosWithCleanError() {
+        final var store = todoStore();
+        final var tool = new WriteTodoTool();
+        final var result = tool.execute(Map.of("todos", "not an array"), context(store, permissions(AgentMode.BUILD)));
+        assertFalse(result.success(), result.output());
+        assertTrue(result.output().contains("got String"), result.output());
+    }
+
+    @Test
+    void descriptionCarriesPlanModeRuleAndParallelBuildStatuses() {
+        final var tool = new WriteTodoTool();
+        final var description = tool.description(storageHome);
+        assertTrue(
+                description.contains("In PLAN mode"),
+                "the description must carry the plan-mode contract (plan is the default mode): " + description);
+        assertTrue(
+                description.contains("(the list IS the plan)"),
+                "the description must state that the plan-mode list is the plan: " + description);
+        assertTrue(
+                description.contains("new items stay 'pending'"),
+                "the description must state the all-pending plan rule: " + description);
+        assertTrue(
+                description.contains("mark in_progress as you start"),
+                "the description must allow in_progress items in build mode: " + description);
+        assertFalse(
+                description.contains("exactly one in_progress"),
+                "the description must not carry the relaxed single-in_progress rule anymore: " + description);
+    }
+
+    @Test
+    void schemaStatusIsAnEnumWithPlanHint() {
+        final var tool = new WriteTodoTool();
+        @SuppressWarnings("unchecked")
+        final var todos = (Map<String, Object>) tool.schema().get("properties");
+        @SuppressWarnings("unchecked")
+        final var items = (Map<String, Object>) ((Map<String, Object>) todos.get("todos")).get("items");
+        @SuppressWarnings("unchecked")
+        final var status = (Map<String, Object>) ((Map<String, Object>) items.get("properties")).get("status");
+        assertEquals("string", status.get("type"));
+        assertEquals(List.of("pending", "in_progress", "completed", "cancelled"), status.get("enum"));
+        assertTrue(
+                String.valueOf(status.get("description")).contains("PLAN mode new items"),
+                "the status schema must carry the plan-mode hint");
+    }
+
+    @Test
+    void withoutSessionContextTheToolFailsCleanly() {
+        final var tool = new WriteTodoTool();
+        final var result = tool.execute(
+                Map.of("todos", List.of(Map.of("content", "step 1", "status", "pending"))),
+                ToolContext.empty(storageHome));
+        assertFalse(result.success(), result.output());
+        assertTrue(result.output().contains("session"), result.output());
+    }
+}

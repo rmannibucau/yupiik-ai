@@ -1,0 +1,18 @@
+= Tools
+:minisite-breadcrumb: Home[index.html] > Tools
+:minisite-nav-prev-link: features/tools.html
+:minisite-nav-prev-label: Built-in tools guide
+
+This is the generated reference for the built-in tools the model can call.
+For a tour of file inspection, editing, shell execution and memory, start with xref:features/tools.adoc[Built-in tools].
+
+Tools marked *read-only* do not modify the working copy.
+Read-only is not a sandbox boundary; see xref:features/permissions.adoc[Permissions] and xref:features/sandboxes.adoc[External sandboxes] before running untrusted work.
+
+Use xref:features/mcp.adoc[MCP support] to add remote tools, or xref:features/maven-knowledge.adoc[Maven repository knowledge] to reuse local dependency knowledge.
+
+== Built-in tool reference
+
+The build generates the entries below from the application's tool definitions.
+
+include::content/coding-agent/_partials/generated/embedded-tools.adoc[]

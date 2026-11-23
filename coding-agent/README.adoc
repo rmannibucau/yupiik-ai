@@ -1,0 +1,17 @@
+= Yupiik AI - Coding agent
+
+This component is built and released from the root Yupiik AI reactor.
+It contains the agent runtime, CLI, terminal UI, browser UI, automation and the coding-agent ACP adapter.
+The LLM clients, generic testing support and reusable A2A/MCP/ACP libraries are independent root components.
+
+See link:../README.adoc[the standalone build and distributions], link:../MIGRATION.adoc[migration and acceptance evidence], and https://yupiik.github.io/yupiik-ai/coding-agent/index.html[the coding-agent guides].
+
+From the monorepo root:
+
+[source,shell]
+----
+mvn -B -ntp -T2 -pl :yca-bin -am verify
+java -jar coding-agent/yca/target/yca-bin-1.0.0-SNAPSHOT-fatjar.jar completion bash
+----
+
+For the complete site, examples, release sources and native packaging, use the root build instructions.
