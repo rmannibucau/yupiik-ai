@@ -4069,10 +4069,7 @@ class TuiCommandRenderTest {
                 providerManager,
                 new AgentProvider(configuration),
                 agentSessionService,
-                new TurnRunner(
-                        mavenKnowledgeService,
-                        Executors.newVirtualThreadPerTaskExecutor(),
-                        agentSessionService),
+                new TurnRunner(mavenKnowledgeService, Executors.newVirtualThreadPerTaskExecutor(), agentSessionService),
                 new ThinkTagSplitter(),
                 factory,
                 tuiSlashCommands,

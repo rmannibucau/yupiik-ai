@@ -73,6 +73,8 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 /**
  * Unit tests for {@link WebSessionManager#submit}: every accepted prompt (fresh submit on an idle
@@ -713,8 +715,9 @@ class WebSessionManagerPromptTest {
         assertTrue(broker.frames.stream().noneMatch(frame -> frame.contains("\"type\":\"user\"")));
     }
 
-    @Test
-    void inputRpcReturnsRoutingDisposition() {
+    @ParameterizedTest
+    @ValueSource(strings = {"accepted", "correct", "cancel"})
+    void inputRpcReturnsRoutingDisposition(final String disposition) throws Exception {
         final var rpc = new WebJsonRpc(
                 sessionStore,
                 null,
@@ -729,12 +732,29 @@ class WebSessionManagerPromptTest {
                 null,
                 null,
                 runtimeFactory);
-        final var result = rpc.input("s1", "/unknown");
-        assertFalse(result.isDone());
-        final var request = (Map<?, ?>) broker.requests.remove();
-        manager.resolve("s1", String.valueOf(request.get("id")), null);
-        assertEquals(Map.of("disposition", "cancel"), result.join());
-        assertNull(turnRunner.lastPrompt);
+        try (final var bindings = WebBindings.create(rpc, mapper);
+                final var methods = bindings.lookups(JsonRpcMethod.class)) {
+            final var method = methods.instance().stream()
+                    .filter(candidate -> "session.input".equals(candidate.name()))
+                    .findFirst()
+                    .orElseThrow();
+            final var result = method.invoke(new JsonRpcMethod.Context(null, Map.of("id", "s1", "text", "/unknown")))
+                    .toCompletableFuture();
+            assertFalse(result.isDone());
+            final var request = (Map<?, ?>) broker.requests.remove();
+            final var options = (List<?>) ((Map<?, ?>) request.get("params")).get("options");
+            final var selection =
+                    switch (disposition) {
+                        case "accepted" -> options.getFirst();
+                        case "correct" -> options.get(1);
+                        default -> null;
+                    };
+            manager.resolve("s1", String.valueOf(request.get("id")), selection);
+            final var response = result.get(5, TimeUnit.SECONDS);
+            assertEquals(new WebJsonRpc.InputResult(disposition), response);
+            assertEquals(mapper.toString(Map.of("disposition", disposition)), mapper.toString(response));
+            assertEquals("accepted".equals(disposition) ? "/unknown" : null, turnRunner.lastPrompt);
+        }
     }
 
     @Test

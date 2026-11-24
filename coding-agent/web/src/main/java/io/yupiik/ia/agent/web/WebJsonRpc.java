@@ -310,11 +310,11 @@ public class WebJsonRpc {
     @JsonRpc(
             value = "session.input",
             documentation = "Routes composer input, returning accepted, correct, or cancel after any routing picker.")
-    public CompletableFuture<Map<String, String>> input(
+    public CompletableFuture<InputResult> input(
             @JsonRpcParam(required = true, documentation = "Session id.") final String id,
             @JsonRpcParam(required = true, documentation = "The composer input.") final String text) {
         sessions.attach(id);
-        return sessions.input(id, text).thenApply(disposition -> Map.of("disposition", disposition));
+        return sessions.input(id, text).thenApply(InputResult::new);
     }
 
     @JsonRpc(
@@ -930,6 +930,9 @@ public class WebJsonRpc {
     private static String blankToNull(final String value) {
         return value == null || value.isBlank() ? null : value;
     }
+
+    @JsonModel
+    public record InputResult(String disposition) {}
 
     /** Lightweight session summary for the sessions list. */
     @JsonModel

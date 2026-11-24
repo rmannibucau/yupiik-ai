@@ -2540,7 +2540,8 @@ public class TuiCommand implements Runnable {
     private void submit(final String text, final TuiRunner runner, final UiState state, final boolean pinToBottom) {
         dismissCompletion(state);
         state.inputRoutingPending = true;
-        final var routing = ShellInputRouting.resolve(text, slashRegistry, io(runner, state)).toCompletableFuture();
+        final var routing = ShellInputRouting.resolve(text, slashRegistry, io(runner, state))
+                .toCompletableFuture();
         // Ordinary input and known commands already resolve on the UI thread. Do not defer
         // their dispatch behind subsequent key events (which can start new completion lookups).
         final var resolvedOnUiThread = routing.isDone();
