@@ -1,7 +1,7 @@
 = Output optimization
 :minisite-breadcrumb: Home[../index.html] > Features[../features.html] > Output optimization
-:minisite-nav-prev-link: sessions.html
-:minisite-nav-prev-label: Sessions and memory
+:minisite-nav-prev-link: tray-companion.html
+:minisite-nav-prev-label: Tray companion
 :minisite-nav-next-link: provider-tuning.html
 :minisite-nav-next-label: Provider tuning
 

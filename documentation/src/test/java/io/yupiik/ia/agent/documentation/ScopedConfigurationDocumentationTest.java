@@ -30,6 +30,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.regex.Pattern;
 import javax.xml.parsers.DocumentBuilderFactory;
 import javax.xml.xpath.XPathConstants;
@@ -49,6 +50,53 @@ class ScopedConfigurationDocumentationTest {
     private final Path base = Path.of("").toAbsolutePath().normalize();
     private final Path source = base.resolve("src/main/minisite");
     private final Path generated = source.resolve("content/coding-agent/_partials/generated");
+
+    @Test
+    void companionReferenceContainsOnlyServerConfiguration(@TempDir final Path temp) throws Exception {
+        final var output = generated.resolve("configuration-notifications-service.adoc");
+        final var matching = actions().stream()
+                .filter(it -> output.toString().equals(it.get("output")))
+                .toList();
+        assertEquals(1, matching.size(), "Exactly one companion configuration producer");
+        final var action = matching.getFirst();
+        assertEquals("notifications-service", action.get("module"));
+        assertEquals("notification-service.", action.get("namePrefix"));
+        assertEquals("true", action.get("includeEnvironmentNames"));
+        assertEquals("definitionlist", action.get("formatter"));
+        assertEquals(
+                base
+                        + "/../coding-agent/extensions/notifications-service/target/classes/META-INF/fusion/configuration/documentation.json",
+                action.get("urls"));
+        final var actual = generate(temp, action, temp.resolve("companion.adoc"));
+        final var entries = entries(actual);
+        assertEquals(4, entries.size());
+        assertEquals(
+                Set.of(
+                        "notification-service.port",
+                        "notification-service.token",
+                        "notification-service.token-file",
+                        "notification-service.blink"),
+                new HashSet<>(entries.stream().map(this::key).toList()));
+        for (final var entry : entries) {
+            final var key = key(entry);
+            final var env = ENV_SEPARATOR.matcher(key).replaceAll("_").toUpperCase(Locale.ROOT);
+            assertTrue(entry.startsWith('`' + key + "` (env: `" + env + "`)::\n"), entry);
+            if (key.equals("notification-service.port")) {
+                assertTrue(entry.contains(" Default: `11026`."), entry);
+            } else if (key.equals("notification-service.blink")) {
+                assertTrue(entry.contains(" Default: `true`."), entry);
+            }
+        }
+        assertFalse(actual.contains("yca.notification."), "Event payload roots are not server settings");
+    }
+
+    @Test
+    void companionPageIncludesServerReference() throws Exception {
+        assertTrue(
+                Files.readString(source.resolve("content/coding-agent/features/tray-companion.adoc"))
+                        .contains(
+                                "include::content/coding-agent/_partials/generated/configuration-notifications-service.adoc[]"));
+    }
 
     @Test
     void scopedReferencesContainEveryMatchingEntry(@TempDir final Path temp) throws Exception {

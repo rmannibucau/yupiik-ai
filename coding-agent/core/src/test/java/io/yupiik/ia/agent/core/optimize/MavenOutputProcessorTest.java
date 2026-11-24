@@ -40,6 +40,73 @@ class MavenOutputProcessorTest {
     }
 
     @Test
+    void preservesVersionOutput() {
+        final var banner = List.of(
+                "Apache Maven 4.0.0-rc-7 (6d8f301b38af7399b36b862969d520974944f0b9)",
+                "Maven home: /home/yupiik/.sdkman/candidates/maven/current",
+                "Java version: 25.0.4, vendor: Eclipse Adoptium, runtime: /home/yupiik/.sdkman/candidates/java/25.0.4-tem",
+                "Default locale: fr_FR, platform encoding: UTF-8, time zone: Europe/Paris",
+                "OS name: \"linux\", version: \"7.3.0-10-generic\", arch: \"amd64\", family: \"unix\"",
+                "Exit code: 0");
+        for (final var command : List.of("mvn -v", "mvn --version", "mvnd\t--version", "mvn -q -v")) {
+            assertEquals(
+                    banner,
+                    processor
+                            .process(command, banner.stream().map(line -> "\u001B[1m" + line + "\u001B[0m"))
+                            .toList(),
+                    command);
+        }
+    }
+
+    @Test
+    void preservesHelpOutput() {
+        final var help = List.of(
+                "",
+                "usage: mvn [options] [<goal(s)>] [<phase(s)>]",
+                "",
+                "Options:",
+                " -h,--help                     Display help information",
+                " -v,--version                  Display version information",
+                " -V,--show-version             Display version information WITHOUT stopping build",
+                "Exit code: 0");
+        for (final var command : List.of("mvn -h", "mvn --help", "cd /tmp && mvn --help")) {
+            assertEquals(
+                    help,
+                    processor
+                            .process(command, help.stream().map(line -> "\u001B[0m" + line))
+                            .toList(),
+                    command);
+        }
+    }
+
+    @Test
+    void compactsBuildsWithShowVersionAndFlagNearMisses() {
+        final var lines = List.of(
+                "Apache Maven 4.0.0-rc-5",
+                "Maven home: /opt/maven",
+                "[INFO] Scanning for projects...",
+                "[INFO] Building core 1.0.0-SNAPSHOT",
+                "[INFO] BUILD SUCCESS",
+                "Exit code: 0");
+        for (final var command : List.of(
+                "mvn -V verify",
+                "mvn --show-version verify",
+                "mvn -Dmessage=--version verify",
+                "mvn -Dmessage=-v verify",
+                "mvn -Dmessage=--help verify",
+                "mvn -Dmessage=-h verify",
+                "mvn --version-extra verify",
+                "mvn --help-extra verify",
+                "mvn -verify",
+                "mvn -hello")) {
+            assertEquals(
+                    List.of("[INFO] BUILD SUCCESS", "Exit code: 0"),
+                    processor.process(command, lines.stream()).toList(),
+                    command);
+        }
+    }
+
+    @Test
     void collapsesBuildOutput() {
         final var out = processor
                 .process(

@@ -18,6 +18,7 @@ package io.yupiik.ia.agent.documentation;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import io.yupiik.fusion.documentation.CliDocumentationGenerator;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Map;
@@ -25,6 +26,21 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 class CodingAgentDocumentationGeneratorTest {
+    @Test
+    void cliDiscoveryDoesNotIncludeCompanionCommands(@TempDir final Path root) throws Exception {
+        new CliDocumentationGenerator(root, Map.of("outputBase", root.toString())).run();
+
+        final var index = Files.readString(root.resolve("index.adoc"));
+        for (final var command : new String[] {"cli", "run", "tui", "web", "acp"}) {
+            assertTrue(index.contains("== " + command + "\n"), index);
+            assertTrue(Files.isRegularFile(root.resolve(command + ".adoc")), command);
+        }
+        for (final var command : new String[] {"serve", "publish"}) {
+            assertFalse(index.contains("== " + command + "\n"), index);
+            assertFalse(Files.exists(root.resolve(command + ".adoc")), command);
+        }
+    }
+
     @Test
     void generatesToolDescriptionsAndOtherReferencesUnderExplicitSourceRoot(@TempDir final Path root) throws Exception {
         final var source = Files.createDirectory(root.resolve("site"));

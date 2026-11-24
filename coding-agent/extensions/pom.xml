@@ -16,5 +16,6 @@
     <module>maven-repository-indexer-parent</module>
     <module>bot-parent</module>
     <module>nono-notifications</module>
+    <module>notifications-service</module>
   </modules>
 </project>

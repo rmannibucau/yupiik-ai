@@ -15,6 +15,14 @@
     <maven.deploy.skip>true</maven.deploy.skip>
   </properties>
   <dependencies>
+    <!-- Order metadata generation in the reactor without exposing companion commands to CLI discovery. -->
+    <dependency>
+      <groupId>io.yupiik.ai</groupId>
+      <artifactId>notifications-service</artifactId>
+      <version>${project.version}</version>
+      <type>pom</type>
+      <scope>provided</scope>
+    </dependency>
     <dependency>
       <groupId>com.networknt</groupId>
       <artifactId>json-schema-validator</artifactId>
@@ -247,6 +255,17 @@ pre.mermaid svg {
 dt.hdlist1 { font-weight: 600; }
 &lt;/style&gt;</customScripts>
           <preActions>
+            <preAction>
+              <type>io.yupiik.fusion.documentation.DocumentationGenerator</type>
+              <configuration>
+                <urls>${project.basedir}/../coding-agent/extensions/notifications-service/target/classes/META-INF/fusion/configuration/documentation.json</urls>
+                <module>notifications-service</module>
+                <includeEnvironmentNames>true</includeEnvironmentNames>
+                <formatter>definitionlist</formatter>
+                <namePrefix>notification-service.</namePrefix>
+                <output>${project.basedir}/src/main/minisite/content/coding-agent/_partials/generated/configuration-notifications-service.adoc</output>
+              </configuration>
+            </preAction>
             <preAction>
               <type>io.yupiik.fusion.documentation.CliDocumentationGenerator</type>
               <configuration>

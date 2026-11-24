@@ -2,8 +2,8 @@
 :minisite-breadcrumb: Home[../index.html] > Features[../features.html] > Sessions and memory
 :minisite-nav-prev-link: memory.html
 :minisite-nav-prev-label: Memory
-:minisite-nav-next-link: output.html
-:minisite-nav-next-label: Output optimization
+:minisite-nav-next-link: tray-companion.html
+:minisite-nav-next-label: Tray companion
 
 Resume a session to continue its conversation, todo list and editable plan.
 yca records sessions as JSONL transcripts.
@@ -156,6 +156,20 @@ For the web UI these are OS notifications on the *server host*, not browser push
 Delivery depends on an available desktop notification service (often absent on SSH/headless hosts), and the desktop can suppress or shorten alerts.
 Notifications neither focus a window nor answer a prompt, and resolving a prompt does not retract an already delivered alert.
 Same-session alerts keep the existing Linux replacement hint; custom commands remain responsible for their own delivery and replacement behavior.
+
+=== Optional tray companion (separate installation)
+
+For persistent unread-activity reminders, `coding-agent/extensions/notifications-service` provides an optional, separately installed Java 25 desktop tray application with native-image packaging.
+It reuses YCA's icon and receives activity from a short-lived `publish` command while a separate `serve` process keeps the tray alive.
+The companion is not bundled with YCA or started by enabling notifications; install and start it separately, for example with a graphical-session systemd user service on Linux.
+Reminders live only in memory and are lost when the companion stops or restarts.
+The custom publisher replaces YCA's built-in desktop popups rather than supplementing them.
+
+IMPORTANT: The tray shows unread activity, not an authoritative list of pending approvals.
+Acknowledgment only clears reminders; it never approves a tool or answers a question.
+Review and answer prompts in YCA itself.
+
+See xref:tray-companion.adoc[Tray companion setup] for native binary installation in `generated/bin`, private authentication, the systemd user service, `configuration.json`, the generated server configuration reference, platform requirements and diagnostics.
 
 == Memory across sessions
 

@@ -1,0 +1,72 @@
+= YCA notifications service
+
+An optional, separately installed Java 25 desktop tray companion for YCA, with FFM-based native backends and an optional GraalVM native-image build.
+It is not bundled with YCA or started automatically; it shows in-memory unread-activity reminders, not an authoritative pending-approval list.
+
+See the https://yupiik.github.io/yupiik-ai/coding-agent/features/tray-companion.html[canonical tray companion guide] for installation, `serve`/`publish` setup, authentication, configuration, native builds, platform limits and diagnostics.
+Both commands optionally accept `--notification-service-token-file /absolute/path/to/token` (or `NOTIFICATION_SERVICE_TOKEN_FILE`) to read a private UTF-8 file with surrounding whitespace stripped, instead of `NOTIFICATION_SERVICE_TOKEN`.
+Do not set both sources to nonblank values; restrict the file to your user.
+This keeps credentials off argv and lets YCA's JSON command invoke the native binary directly without an environment wrapper; see the guide for the JSON example.
+
+Build the runnable JAR from the repository root with JDK 25 and Maven:
+
+[source,shell]
+----
+mvn -pl coding-agent/extensions/notifications-service -am package
+----
+
+The JAR is `coding-agent/extensions/notifications-service/target/notifications-service-1.0.0-SNAPSHOT-fatjar.jar`.
+Follow the published guide to install a separate launcher or build a native executable and configure YCA to invoke its publisher.
+
+== Build and manually test the binary
+
+The following commands are for a POSIX shell with JDK 25, Maven, GraalVM 25's `native-image` on `PATH`, and the target platform's native compiler prerequisites.
+Build on the OS/architecture on which the binary will run.
+For the Arthur Maven build alternative and desktop library requirements, see the canonical guide linked above.
+
+[source,shell]
+----
+mvn -pl coding-agent/extensions/notifications-service -am package
+native-image --no-fallback --enable-native-access=ALL-UNNAMED \
+  -march=compatibility \
+  -jar coding-agent/extensions/notifications-service/target/notifications-service-1.0.0-SNAPSHOT-fatjar.jar \
+  -o coding-agent/extensions/notifications-service/target/yca-notifications
+----
+
+The JAR includes the foreign-call metadata and native-image properties enabling GraalVM 25's shared-arena support, required for thread-safe wakeups and cleanup.
+
+In a terminal in your graphical desktop session, create a random test secret and start the binary in the background.
+This example uses OpenSSL only to generate a manual-test secret; OpenSSL is not an application dependency.
+
+[source,shell]
+----
+export NOTIFICATION_SERVICE_TOKEN="$(openssl rand -hex 32)"
+export NOTIFICATION_SERVICE_PORT=11026
+binary="$PWD/coding-agent/extensions/notifications-service/target/yca-notifications"
+"$binary" serve &
+companion_pid=$!
+----
+
+Wait for the tray-initialized message before running the next command in the same terminal, so the publisher inherits the same secret and port.
+The Windows executable uses the `.exe` suffix; use equivalent PowerShell environment assignments when testing there.
+
+[source,shell]
+----
+YCA_NOTIFICATION_SESSION=native-demo \
+YCA_NOTIFICATION_TITLE='Manual native tray test' \
+YCA_NOTIFICATION_TYPE=approval_required \
+YCA_NOTIFICATION_SOURCE=main \
+  "$binary" publish
+----
+
+Check that the persistent YCA icon changes to its attention state and alternates about once per second, and that its menu/tooltip identifies the test session's unread activity.
+Desktop policy can hide the icon or suppress particular visual effects; Linux needs a tray host such as GNOME's AppIndicator extension.
+Choose *Acknowledge unread* and check that the normal icon/no-unread state returns.
+This is a synthetic reminder, not a real approval request, and acknowledging it never answers a YCA prompt.
+Publish again, choose *Quit*, then run `wait "$companion_pid"` to check clean termination.
+A later `publish` must fail promptly rather than start another companion or leave a disk-backed queue.
+Restart with `"$binary" serve --notification-service-blink false` to check the steady attention state and that old reminders are forgotten.
+
+For an end-to-end check, configure YCA's notification command to `["/absolute/path/to/yca-notifications", "publish"]`, ensure YCA inherits the same private token/port, and cause a real tool approval or input request.
+Answer the request in YCA, not in the tray.
+Remove the custom command afterwards if you want YCA's built-in popup delivery again.

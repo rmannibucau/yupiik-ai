@@ -301,6 +301,37 @@ class ToolExecutionServiceTest {
     }
 
     @Test
+    void mavenInformationalOutputSurvivesCommandWrapperUnwrapping() {
+        final var service = serviceWithScrambled(config("100"));
+        final var version = String.join(
+                "\n",
+                "Apache Maven 4.0.0-rc-5",
+                "Maven home: /opt/maven",
+                "Java version: 25.0.2, vendor: Oracle Corporation, runtime: /opt/java",
+                "Default locale: en_US, platform encoding: UTF-8",
+                "OS name: \"linux\", arch: \"amd64\", family: \"unix\"",
+                "Exit code: 0");
+        final var help = String.join(
+                "\n",
+                "usage: mvn [options] [<goal(s)>] [<phase(s)>]",
+                "Options:",
+                " -h,--help       Display help information",
+                " -v,--version    Display version information",
+                "Exit code: 0");
+        for (final var entry : Map.of(
+                        "sudo timeout 120 mvn -v", version,
+                        "env MAVEN_OPTS=-Xmx1g mvn --version", version,
+                        "command mvn -h", help,
+                        "sh -c 'mvn --help'", help)
+                .entrySet()) {
+            final var result = service.execute(
+                    tool("bash", entry.getValue()), Map.of("command", entry.getKey()), context(new ArrayList<>()));
+            assertTrue(result.success(), entry.getKey());
+            assertEquals(entry.getValue(), result.output(), entry.getKey());
+        }
+    }
+
+    @Test
     void commandWrapperUnwrappingCanBeDisabled() {
         // without the wrapper stripping the head stays `sudo` and maven's supports() is false, so the
         // output is left unoptimized (no processable command matches, no reduction is reported)

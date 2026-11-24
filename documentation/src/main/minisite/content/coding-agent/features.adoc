@@ -44,6 +44,7 @@ For repository automation, see the xref:github-bot/index.adoc[GitHub bot guides 
 |xref:features/context.adoc[Context management] |Understand usage gauges and when context is reduced.
 |xref:features/compaction.adoc[Compression and compaction] |Choose what to summarize and recover from context pressure.
 |xref:features/sessions.adoc[Sessions] |Resume conversations and manage saved state.
+|xref:features/tray-companion.adoc[Tray companion] |Install persistent unread-activity reminders and configure the systemd user service.
 |xref:features/memory.adoc[Memory] |Retain durable facts across sessions.
 |xref:features/output.adoc[Output optimization] |Reduce noisy command output without losing useful diagnostics.
 |xref:features/prefix-cache.adoc[Provider prefix cache] |Keep request prefixes stable for provider caching.

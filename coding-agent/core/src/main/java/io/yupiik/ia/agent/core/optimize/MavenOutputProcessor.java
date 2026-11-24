@@ -31,6 +31,7 @@ public class MavenOutputProcessor implements OutputProcessor {
     private static final Pattern FRAMEWORK_STACK_FRAME =
             Pattern.compile("\\s+at (org\\.junit|java\\.base|org\\.apache\\.maven)[^\n]*");
     private static final Pattern TEST_SUMMARY = Pattern.compile("Tests run: \\d+, Failures: \\d+, Errors: \\d+.*");
+    private static final Pattern INFORMATIONAL_OPTION = Pattern.compile("(?:^|\\s)(?:-v|--version|-h|--help)(?=\\s|$)");
 
     private final LogNoiseOutputProcessor logNoise;
     private final CommandOutputPostProcessor commandOutput;
@@ -84,6 +85,9 @@ public class MavenOutputProcessor implements OutputProcessor {
 
     @Override
     public Stream<String> process(final String command, final Stream<String> lines) {
+        if (INFORMATIONAL_OPTION.matcher(command).find()) {
+            return lines.map(commandOutput::stripAnsi);
+        }
         final var errors = new ArrayList<String>();
         final var warns = new ArrayList<String>();
         final var spotlessDirty = new ArrayList<String>();
