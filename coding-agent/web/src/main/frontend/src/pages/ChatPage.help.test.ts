@@ -7,11 +7,16 @@ describe('isHelpCommand', () => {
     expect(isHelpCommand('/help ')).toBe(true);
     expect(isHelpCommand('/help anything')).toBe(true);
     expect(isHelpCommand('  /help')).toBe(true);
+    expect(isHelpCommand('/HELP')).toBe(true);
   });
 
   it('rejects other slash commands and plain prompts', () => {
     expect(isHelpCommand('/memory')).toBe(false);
     expect(isHelpCommand('/tools')).toBe(false);
+    expect(isHelpCommand('/help.md')).toBe(false);
+    expect(isHelpCommand('/help/topic')).toBe(false);
+    expect(isHelpCommand('/help-extra')).toBe(false);
+    expect(isHelpCommand('//help')).toBe(false);
     expect(isHelpCommand('help me')).toBe(false);
     expect(isHelpCommand('help')).toBe(false);
     expect(isHelpCommand('')).toBe(false);

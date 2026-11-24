@@ -61,6 +61,21 @@ class PromptHistoryTest {
     }
 
     @Test
+    void slashCommandsKeepArgumentsAndOnlyConsecutiveExactDuplicatesAreSuppressed() {
+        final var history = new PromptHistory(10);
+        history.add("/btw explain this\nwith another line");
+        history.add("/btw explain this\nwith another line");
+        history.add("/mode build");
+        history.add("/mode plan");
+        history.add("/mode build");
+        assertEquals(
+                List.of("/mode build", "/mode plan", "/mode build", "/btw explain this\nwith another line"),
+                history.entries());
+        assertEquals("/mode build", history.olderPush("draft"));
+        assertEquals("/mode plan", history.olderPush("draft"));
+    }
+
+    @Test
     void ignoresBlank() {
         final var h = new PromptHistory(10);
         h.add("   ");

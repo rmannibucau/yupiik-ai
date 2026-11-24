@@ -613,11 +613,128 @@ class WebSessionManagerPromptTest {
     @Test
     void slashCommandIsNotBroadcastAsAUserEvent() {
         manager.attach("s1");
-        manager.submit("s1", "/model", null).join();
+        manager.submit("s1", "/help", null).join();
         // slash commands route to the lifecycle/slash path, never as a user turn
         assertTrue(
                 broker.frames.stream().noneMatch(frame -> frame.contains("\"type\":\"user\"")),
                 "slash commands must not broadcast a user event");
+    }
+
+    @Test
+    void slashPathsArePromptsForBothSubmitAndComposer() {
+        manager.attach("s1");
+        assertTrue(manager.submit("s1", "/tmp/file.txt inspect", "reviewer").join());
+        assertEquals("/tmp/file.txt inspect", turnRunner.lastPrompt);
+        assertEquals("reviewer", turnRunner.lastAgent);
+        assertEquals("accepted", manager.input("s1", "/help/topic inspect").join());
+        assertEquals("/help/topic inspect", turnRunner.lastPrompt);
+        assertTrue(broker.requests.isEmpty());
+    }
+
+    @Test
+    void composerDispatchesKnownCommandsWithoutSubmittingAPrompt() {
+        manager.attach("s1");
+        assertEquals("accepted", manager.input("s1", "/tabs").join());
+        assertNull(turnRunner.lastPrompt);
+        assertTrue(broker.frames.stream().noneMatch(frame -> frame.contains("\"type\":\"user\"")));
+        assertTrue(broker.frames.stream().anyMatch(frame -> frame.contains("\"command\":\"tabs\"")));
+    }
+
+    @Test
+    void composerWaitsForRoutingBeforeQueueingAndDoesNotReclassifyAcceptedInput() {
+        manager.attach("s1").env().session().busy(true);
+        final var future = manager.input("s1", "/unknown inspect");
+        assertFalse(future.isDone());
+        assertEquals(0, manager.queuedPromptCount("s1"));
+        assertTrue(broker.frames.stream().noneMatch(frame -> frame.contains("\"type\":\"user\"")));
+
+        final var request = (Map<?, ?>) broker.requests.remove();
+        final var params = (Map<?, ?>) request.get("params");
+        final var options = (List<?>) params.get("options");
+        assertTrue(manager.resolve("s1", String.valueOf(request.get("id")), options.getFirst()));
+        assertEquals("accepted", future.join());
+        assertEquals(List.of("/unknown inspect"), manager.queuedPrompts("s1"));
+        assertNull(turnRunner.lastPrompt);
+        assertTrue(broker.requests.isEmpty(), "accepted input must bypass a second routing picker");
+    }
+
+    @Test
+    void correctionAndCancellationDoNotMutatePromptState() {
+        manager.attach("s1").env().session().busy(true);
+        final var correction = manager.input("s1", "/unknown");
+        final var request = (Map<?, ?>) broker.requests.remove();
+        final var options = (List<?>) ((Map<?, ?>) request.get("params")).get("options");
+        manager.resolve("s1", String.valueOf(request.get("id")), options.get(1));
+        assertEquals("correct", correction.join());
+
+        final var cancellation = manager.input("s1", "/unknown");
+        final var cancelRequest = (Map<?, ?>) broker.requests.remove();
+        manager.resolve("s1", String.valueOf(cancelRequest.get("id")), null);
+        assertEquals("cancel", cancellation.join());
+        assertEquals(0, manager.queuedPromptCount("s1"));
+        assertNull(turnRunner.lastPrompt);
+        assertTrue(broker.frames.stream().noneMatch(frame -> frame.contains("\"type\":\"user\"")));
+    }
+
+    @Test
+    void submitAlsoWaitsForAmbiguousRoutingAndPreservesAgent() {
+        manager.attach("s1");
+        final var future = manager.submit("s1", "/unknown", "reviewer");
+        assertFalse(future.isDone());
+        assertNull(turnRunner.lastPrompt);
+        final var request = (Map<?, ?>) broker.requests.remove();
+        final var options = (List<?>) ((Map<?, ?>) request.get("params")).get("options");
+        manager.resolve("s1", String.valueOf(request.get("id")), options.getFirst());
+        assertTrue(future.join());
+        assertEquals("/unknown", turnRunner.lastPrompt);
+        assertEquals("reviewer", turnRunner.lastAgent);
+        assertTrue(broker.requests.isEmpty());
+    }
+
+    @Test
+    void composerAcceptsWithoutWaitingForTheAgentTurn() {
+        manager.attach("s1");
+        turnRunner.result = new CompletableFuture<>();
+        final var input = manager.input("s1", "inspect this");
+        assertTrue(input.isDone());
+        assertEquals("accepted", input.join());
+        assertEquals("inspect this", turnRunner.lastPrompt);
+        assertFalse(turnRunner.result.isDone());
+        turnRunner.result.complete(true);
+    }
+
+    @Test
+    void explicitSlashEndpointRemainsStrict() {
+        manager.attach("s1");
+        manager.slash("s1", "/unknown").join();
+        assertTrue(broker.requests.isEmpty(), "explicit slash dispatch must not ask how to route input");
+        assertNull(turnRunner.lastPrompt);
+        assertEquals(0, manager.queuedPromptCount("s1"));
+        assertTrue(broker.frames.stream().noneMatch(frame -> frame.contains("\"type\":\"user\"")));
+    }
+
+    @Test
+    void inputRpcReturnsRoutingDisposition() {
+        final var rpc = new WebJsonRpc(
+                sessionStore,
+                null,
+                manager,
+                null,
+                null,
+                null,
+                configuration,
+                null,
+                null,
+                null,
+                null,
+                null,
+                runtimeFactory);
+        final var result = rpc.input("s1", "/unknown");
+        assertFalse(result.isDone());
+        final var request = (Map<?, ?>) broker.requests.remove();
+        manager.resolve("s1", String.valueOf(request.get("id")), null);
+        assertEquals(Map.of("disposition", "cancel"), result.join());
+        assertNull(turnRunner.lastPrompt);
     }
 
     @Test
@@ -654,6 +771,7 @@ class WebSessionManagerPromptTest {
     /** Captures every {@link #broadcast} frame for assertions. */
     private static final class FakeSseBroker extends SseBroker {
         private final Queue<String> frames = new ConcurrentLinkedQueue<>();
+        private final Queue<Object> requests = new ConcurrentLinkedQueue<>();
 
         private FakeSseBroker(final JsonMapper mapper) {
             super(mapper);
@@ -663,11 +781,18 @@ class WebSessionManagerPromptTest {
         public void broadcast(final String sessionId, final String frame) {
             frames.add(frame);
         }
+
+        @Override
+        public void pushRpc(final String sessionId, final Object request) {
+            requests.add(request);
+        }
     }
 
     /** Records the latest {@link TurnRequest} prompt without running a real turn. */
     private static final class FakeTurnRunner extends TurnRunner {
         private volatile String lastPrompt;
+        private volatile String lastAgent;
+        private CompletableFuture<Boolean> result = CompletableFuture.completedFuture(true);
 
         private FakeTurnRunner() {
             super();
@@ -676,7 +801,8 @@ class WebSessionManagerPromptTest {
         @Override
         public CompletionStage<Boolean> submit(final TurnRequest request) {
             this.lastPrompt = request.prompt();
-            return CompletableFuture.completedFuture(Boolean.TRUE);
+            this.lastAgent = request.agentName();
+            return result;
         }
     }
 }

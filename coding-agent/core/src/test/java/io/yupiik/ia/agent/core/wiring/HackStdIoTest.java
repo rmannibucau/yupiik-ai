@@ -37,9 +37,12 @@ import java.util.Optional;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.Isolated;
 import org.junit.jupiter.api.parallel.ResourceLock;
 import org.junit.jupiter.api.parallel.Resources;
 
+// Resource locks do not exclude unrelated tests whose JUL handlers write to the captured streams.
+@Isolated("Captures JVM-wide streams, including output from unrelated JUL writers")
 @ResourceLock(Resources.SYSTEM_OUT)
 @ResourceLock(Resources.SYSTEM_ERR)
 @ResourceLock("java.util.logging")

@@ -81,7 +81,10 @@ import io.yupiik.ia.agent.core.shell.ThinkTagSplitter;
 import io.yupiik.ia.agent.core.shell.ToolOutputVisibility;
 import io.yupiik.ia.agent.core.shell.TurnRunner;
 import io.yupiik.ia.agent.core.shell.btw.BtwAnswerer;
+import io.yupiik.ia.agent.core.shell.btw.BtwSlashCommands;
 import io.yupiik.ia.agent.core.shell.slash.ConfigCommands;
+import io.yupiik.ia.agent.core.shell.slash.InspectCommands;
+import io.yupiik.ia.agent.core.shell.slash.MaintainCommands;
 import io.yupiik.ia.agent.core.shell.slash.SlashRegistry;
 import io.yupiik.ia.agent.core.style.ModelStyleService;
 import io.yupiik.ia.agent.core.todo.TodoStore;
@@ -2735,6 +2738,53 @@ class TuiCommandRenderTest {
     }
 
     @Test
+    void providerChangeRefreshesCompletionTypedBeforeTheCommandSettles() throws Exception {
+        tuiConfig = twoProviderConfiguration();
+        final var executor = new HoldingExecutor();
+        final var command = command(
+                testRegistry(),
+                stubAgentLoop(),
+                false,
+                newUsageTracker(),
+                new TodoStore(tuiConfig, formatMapper),
+                Clock.systemUTC(),
+                new SubagentRegistry(tuiConfig, new ProviderManager(tuiConfig, formatMapper)),
+                executor);
+        uiThread = new Thread(command, "tui-provider-change-pending-completion-test");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("yca coding agent");
+
+        tuiRef.get().dispatch(new PasteEvent("/model "));
+        tuiRef.get().dispatch(KeyEvent.ofChar('m'));
+        awaitText("> m01"); // warm prov0's model cache
+        tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ESCAPE));
+        tuiRef.get().dispatch(KeyEvent.ofChar('u', KeyModifiers.CTRL));
+
+        executor.hold();
+        try {
+            tuiRef.get().dispatch(new PasteEvent("/provider prov1"));
+            tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ESCAPE));
+            tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ENTER));
+            awaitText("/provider prov1"); // echoed before the command's background action runs
+            final var providerChange = executor.takeNextHeld();
+
+            tuiRef.get().dispatch(new PasteEvent("/model "));
+            tuiRef.get().dispatch(KeyEvent.ofChar('b'));
+            awaitText("/model b");
+            // Compute the next input against prov0, where no model matches "b".
+            // The actual provider command is kept out of this queue until after that lookup.
+            executor.releaseHeld();
+            providerChange.run();
+            awaitText("> b01"); // no further key event should be needed to refresh for prov1
+        } finally {
+            executor.releaseHeld();
+        }
+        quit();
+    }
+
+    @Test
     void tabSwitchLoadsModelsForTheActiveSessionProvider() throws Exception {
         // Regression: model suggestions follow the active session's provider, even after a tab
         // with a different provider has populated its own model list.
@@ -2820,6 +2870,65 @@ class TuiCommandRenderTest {
         awaitNoText("> b01");
 
         quit();
+    }
+
+    @Test
+    void acceptedAmbiguousQueuedPromptIsNotClassifiedAgainAfterTurnDone() throws Exception {
+        final var shellRegistry = testRegistry();
+        final var releaseFirstTurn = new CompletableFuture<Void>();
+        final var received = new LinkedBlockingQueue<String>();
+        final var literal = "/modle queued literal input";
+        final var agentLoop = new AgentLoop(testWorkdir) {
+            @Override
+            public String run(
+                    final String prompt,
+                    final String agentName,
+                    final String sessionId,
+                    final List<Message> history,
+                    final BooleanSupplier cancelled,
+                    final Supplier<String> queuedPrompt) {
+                received.add(prompt);
+                if ("hold first turn".equals(prompt)) {
+                    releaseFirstTurn.join();
+                    // Deliberately do not consume queuedPrompt: exercise the TUI's TurnDone fallback.
+                    shellRegistry.onEvent(new AgentEvent.TurnDone("first turn finished", sessionId, eventWorkdir));
+                } else {
+                    shellRegistry.onEvent(
+                            new AgentEvent.TextDelta("queued literal delivered", sessionId, eventWorkdir));
+                    shellRegistry.onEvent(new AgentEvent.TurnDone("queued literal delivered", sessionId, eventWorkdir));
+                }
+                return "ok";
+            }
+        };
+        final var command = command(shellRegistry, agentLoop);
+        uiThread = new Thread(command, "tui-queued-routing-test");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        try {
+            awaitTui();
+            awaitText("yca coding agent");
+            tuiRef.get().dispatch(new PasteEvent("hold first turn"));
+            tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ENTER));
+            assertEquals("hold first turn", received.poll(TIMEOUT_MS, TimeUnit.MILLISECONDS));
+
+            tuiRef.get().dispatch(new PasteEvent(literal));
+            tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ENTER));
+            awaitText("Send as normal input");
+            tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ENTER));
+            awaitTextGone("Send as normal input");
+            awaitText("queued prompt (1 pending)");
+            assertTrue(received.isEmpty(), "accepting while busy must enqueue, not start a concurrent turn");
+
+            releaseFirstTurn.complete(null);
+            awaitText("queued literal delivered");
+            awaitText("ready");
+            assertEquals(literal, received.poll(), "the accepted text must reach the loop verbatim");
+            assertTrue(received.isEmpty(), "the queued input must start exactly one turn");
+            assertFalse(backend.text().contains("Send as normal input"));
+        } finally {
+            releaseFirstTurn.complete(null);
+            quit();
+        }
     }
 
     @Test
@@ -3899,6 +4008,31 @@ class TuiCommandRenderTest {
                 null, // SecretSessionModes
                 null, // SecretRedactor
                 null); // CodexLoginService
+        final var btwAnswerer = new BtwAnswerer(
+                chatClient,
+                sessionStore,
+                configuration,
+                Executors.newVirtualThreadPerTaskExecutor(),
+                new InBandToolCallExtractor(new MarkupToolCallScanner()),
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                httpClient,
+                null);
+        final var mavenKnowledgeService = new MavenRepositoryKnowledgeService(
+                configuration, null, Executors.newVirtualThreadPerTaskExecutor(), null);
+        // Classification must see the real catalogs, including commands intercepted by TUI modals.
+        final var slashRegistry = new SlashRegistry(List.of(
+                tuiSlashCommands,
+                configCommands,
+                new BtwSlashCommands(btwAnswerer),
+                new InspectCommands(agentSessionService),
+                new MaintainCommands(agentSessionService, mcpManager, mavenKnowledgeService)));
         return new TuiCommand(
                 conf,
                 tuiConfiguration,
@@ -3936,33 +4070,17 @@ class TuiCommandRenderTest {
                 new AgentProvider(configuration),
                 agentSessionService,
                 new TurnRunner(
-                        new MavenRepositoryKnowledgeService(
-                                configuration, null, Executors.newVirtualThreadPerTaskExecutor(), null),
+                        mavenKnowledgeService,
                         Executors.newVirtualThreadPerTaskExecutor(),
                         agentSessionService),
                 new ThinkTagSplitter(),
                 factory,
                 tuiSlashCommands,
-                new SlashRegistry(List.of(tuiSlashCommands, configCommands)),
+                slashRegistry,
                 clock,
                 new AskUserCardRenderer(new AskUserAnswersFormatter(formatMapper)),
                 new ToolOutputFormat(formatMapper),
-                new BtwAnswerer(
-                        chatClient,
-                        sessionStore,
-                        configuration,
-                        Executors.newVirtualThreadPerTaskExecutor(),
-                        new InBandToolCallExtractor(new MarkupToolCallScanner()),
-                        null,
-                        null,
-                        null,
-                        null,
-                        null,
-                        null,
-                        null,
-                        null,
-                        httpClient,
-                        null),
+                btwAnswerer,
                 tabManager,
                 subagentRegistry,
                 new ScrollService(tuiConfiguration),
@@ -7183,9 +7301,13 @@ class TuiCommandRenderTest {
 
         /** Runs one task without releasing any work it submits in turn. */
         void runNextHeld() throws InterruptedException {
+            takeNextHeld().run();
+        }
+
+        private Runnable takeNextHeld() throws InterruptedException {
             final var task = held.poll(TIMEOUT_MS, TimeUnit.MILLISECONDS);
             assertNotNull(task, "no held task arrived");
-            task.run();
+            return task;
         }
 
         /**

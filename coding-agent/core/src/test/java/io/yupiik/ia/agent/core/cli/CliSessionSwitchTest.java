@@ -82,6 +82,10 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.BooleanSupplier;
 import java.util.function.Supplier;
 import org.junit.jupiter.api.Test;
@@ -96,6 +100,168 @@ import org.junit.jupiter.params.provider.ValueSource;
 class CliSessionSwitchTest {
     @TempDir
     private Path home;
+
+    @ParameterizedTest
+    @ValueSource(strings = {"correct", "cancel"})
+    void rejectedStartupCommandStopsTheScriptWithoutSendingLaterEntries(final String choice, final JsonMapper mapper)
+            throws Exception {
+        final var f = new Fixture(home, mapper);
+        f.initialPrompts = List.of("/hlep", "must not be submitted");
+        if ("correct".equals(choice)) {
+            f.answerOption("Mistyped command");
+        } else {
+            f.interactions.add(() -> "c");
+        }
+        f.input.add(() -> {
+            assertTrue(f.requests.isEmpty());
+            return "exit";
+        });
+        f.run();
+        assertTrue(f.requests.isEmpty());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"/tmp/file.txt", "//server/share", "/hello/world", "/tmp/file.txt /help"})
+    void slashPathsArePromptsWithoutAnInteraction(final String text, final JsonMapper mapper) throws Exception {
+        final var f = new Fixture(home, mapper);
+        f.line(text);
+        f.run();
+
+        assertEquals(
+                List.of(text),
+                f.requests.stream().map(TurnRunner.TurnRequest::prompt).toList());
+        f.assertDisposed();
+    }
+
+    @Test
+    void onlyTheFirstTokenDeterminesSlashRouting(final JsonMapper mapper) throws Exception {
+        final var f = new Fixture(home, mapper);
+        f.line("/help /tmp/file.txt");
+        f.run();
+
+        assertTrue(f.requests.isEmpty());
+        // CLI command results are rendered by AnsiShellFrontend, not added to conversation history.
+        assertTrue(f.output.toString().contains("/session-flush"), f.output::toString);
+    }
+
+    @Test
+    void confirmedSlashPromptIsNotClassifiedAgain(final JsonMapper mapper) throws Exception {
+        final var f = new Fixture(home, mapper);
+        f.line("/hlep");
+        f.answerOption("Send as normal input");
+        f.run();
+
+        assertEquals(
+                List.of("/hlep"),
+                f.requests.stream().map(TurnRunner.TurnRequest::prompt).toList());
+        assertTrue(f.interactions.isEmpty(), "the single picker answer must be consumed");
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"correct", "cancel"})
+    void correctingOrCancellingIsLocalAndPreservesTheOriginalInput(final String choice, final JsonMapper mapper)
+            throws Exception {
+        final var f = new Fixture(home, mapper);
+        final var original = "  /hlep  keep this draft  ";
+        final var before = new String[1];
+        f.input.add(() -> {
+            before[0] = f.coordinator.transcript().markdown("", "");
+            return original;
+        });
+        if ("correct".equals(choice)) {
+            f.answerOption("Mistyped command");
+        } else {
+            f.interactions.add(() -> "c");
+        }
+        f.input.add(() -> {
+            assertEquals(before[0], f.coordinator.transcript().markdown("", ""));
+            assertTrue(f.requests.isEmpty());
+            assertEquals(List.of(Message.projectDir(f.alpha.toString()), Message.user("history-A")), f.store.load("A"));
+            if ("correct".equals(choice)) {
+                assertTrue(f.output.toString().contains("re-enter the exact original input"));
+                assertTrue(f.output.toString().contains(original));
+            }
+            return "exit";
+        });
+        f.run();
+        assertTrue(f.requests.isEmpty());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"path", "prompt", "correct", "cancel"})
+    void busyRoutingChangesTheQueueOnlyForPrompts(final String choice, final JsonMapper mapper) throws Exception {
+        final var f = new Fixture(home, mapper);
+        f.deferred = new CompletableFuture<>();
+        f.line("running");
+        final var text = "path".equals(choice) ? "/tmp/file.txt" : "/hlep";
+        final var before = new String[1];
+        f.input.add(() -> {
+            before[0] = f.coordinator.transcript().markdown("", "");
+            return text;
+        });
+        if ("prompt".equals(choice) || "correct".equals(choice)) {
+            f.answerOption("prompt".equals(choice) ? "Send as normal input" : "Mistyped command");
+        } else if ("cancel".equals(choice)) {
+            f.interactions.add(() -> "c");
+        }
+        f.input.add(() -> {
+            assertEquals(1, f.requests.size());
+            final var queued = f.requests.getFirst().queuedPrompt();
+            if ("path".equals(choice) || "prompt".equals(choice)) {
+                assertEquals(text, queued.get());
+            } else {
+                assertEquals(before[0], f.coordinator.transcript().markdown("", ""));
+            }
+            assertNull(queued.get());
+            f.deferred.complete(true);
+            f.deferred = null;
+            return "exit";
+        });
+        f.run();
+        assertEquals(1, f.requests.size());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"/tmp/file.txt", "/hlep"})
+    void initialSlashPromptWaitsForItsActualTurnBeforeTheNextEntry(final String text, final JsonMapper mapper)
+            throws Exception {
+        final var f = new Fixture(home, mapper);
+        final var awaited = new AtomicBoolean();
+        // Completing on get makes the wait observable, with no worker, sleeps or timeout waits.
+        final var turn = new CompletableFuture<Boolean>() {
+            @Override
+            public <U> CompletableFuture<U> newIncompleteFuture() {
+                return new CompletableFuture<>() {
+                    @Override
+                    public U get(final long timeout, final TimeUnit unit)
+                            throws InterruptedException, ExecutionException, TimeoutException {
+                        awaited.set(true);
+                        f.deferred = null;
+                        completeTurn();
+                        return super.get(timeout, unit);
+                    }
+                };
+            }
+
+            private void completeTurn() {
+                complete(true);
+            }
+        };
+        f.deferred = turn;
+        f.initialPrompts = List.of(text, "/help", "next");
+        if ("/hlep".equals(text)) {
+            f.answerOption("Send as normal input");
+        }
+        f.input.add(() -> {
+            assertTrue(awaited.get());
+            assertEquals(
+                    List.of(text, "next"),
+                    f.requests.stream().map(TurnRunner.TurnRequest::prompt).toList());
+            return "exit";
+        });
+        f.run();
+        assertTrue(awaited.get());
+    }
 
     @Test
     void resumeABARebindsTurnsToolsPromptsHooksMemoryAndRouting(final JsonMapper mapper) throws Exception {
@@ -327,6 +493,8 @@ class CliSessionSwitchTest {
         private final List<Turn> turns = new ArrayList<>();
         private final List<TurnRunner.TurnRequest> requests = new ArrayList<>();
         private final Deque<Supplier<String>> input = new ArrayDeque<>();
+        private final Deque<Supplier<String>> interactions = new ArrayDeque<>();
+        private List<String> initialPrompts = List.of();
         private final StringBuilder output = new StringBuilder();
         private final FileSessionStore store;
         private final MemoryStore memory;
@@ -442,6 +610,16 @@ class CliSessionSwitchTest {
 
         private void line(final String line) {
             input.add(() -> line);
+        }
+
+        private void answerOption(final String label) {
+            interactions.add(() -> output.toString()
+                    .lines()
+                    .filter(line -> !line.isEmpty() && Character.isDigit(line.charAt(0)))
+                    .filter(line -> line.contains(label))
+                    .reduce((previous, next) -> next)
+                    .map(line -> line.substring(0, line.indexOf('.')))
+                    .orElseThrow(() -> new AssertionError("No picker option for " + label + ": " + output)));
         }
 
         @SuppressWarnings("try")
@@ -669,7 +847,10 @@ class CliSessionSwitchTest {
 
                 @Override
                 public Optional<String> readInteractionLine(final String text) {
-                    throw new AssertionError("unexpected inline interaction: " + text);
+                    if (interactions.isEmpty()) {
+                        throw new AssertionError("unexpected inline interaction: " + text);
+                    }
+                    return Optional.of(interactions.removeFirst().get());
                 }
 
                 @Override
@@ -698,7 +879,18 @@ class CliSessionSwitchTest {
                     handle.invoke(null, signal, handlerType.getField("SIG_DFL").get(null));
             try (final AutoCloseable restore = () -> handle.invoke(null, signal, previous)) {
                 new CliCommand(
-                                new CliCommand.CliConf("A", "", "", false, true, "compact", false, "hidden", false),
+                                new CliCommand.CliConf(
+                                        "A",
+                                        "",
+                                        "",
+                                        false,
+                                        true,
+                                        "compact",
+                                        false,
+                                        "hidden",
+                                        false,
+                                        true,
+                                        initialPrompts),
                                 lifecycle,
                                 store,
                                 factory,

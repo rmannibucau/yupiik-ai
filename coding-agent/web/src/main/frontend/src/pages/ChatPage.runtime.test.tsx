@@ -7,6 +7,7 @@ import type { WebEvent } from '../api/useSessionStream';
 
 const state = vi.hoisted(() => ({ events: [] as WebEvent[], busy: false, bootstrapped: true, queued: [] as string[], todos: [] as { content: string; status: string }[] }));
 const rpc = vi.hoisted(() => vi.fn(async (method: string, params: Record<string, unknown> = {}): Promise<unknown> => {
+  if (method === 'session.input') { return { disposition: 'accepted' }; }
   if (method === 'session.todos') { return state.todos; }
   if (method === 'session.metadata') { return { mode: 'plan', mcpServers: [{ name: 'Remote MCP', state: 'ENABLED', transport: 'http', url: 'https://mcp.example.test/api' }] }; }
   if (method === 'session.queuedList') { return { prompts: state.queued }; }
@@ -143,7 +144,7 @@ describe('mounted external-store chat integration', () => {
   it('dispatches a new prompt through YCA and still queues while busy', async () => {
     state.busy = true; render(); await settle(); type('additional prompt');
     await act(async () => button('Send').click());
-    expect(rpc).toHaveBeenCalledWith('session.prompt', { id: 'test', prompt: 'additional prompt' });
+    expect(rpc).toHaveBeenCalledWith('session.input', { id: 'test', text: 'additional prompt' });
     expect(host.querySelector('textarea')!.value).toBe('');
     await act(async () => button('■ Stop').click());
     expect(rpc).toHaveBeenCalledWith('session.cancel', { id: 'test' });
@@ -168,6 +169,27 @@ describe('mounted external-store chat integration', () => {
     expect(host.querySelector('[role="alert"]')?.textContent).toContain('offline');
     expect(host.querySelector('textarea')!.value).toBe('do not lose this');
   });
+  it.each(['correct', 'cancel'])('restores the original draft on routing disposition %s', async (disposition) => {
+    render(); await settle();
+    const draft = '  /hlep original spacing  ';
+    type(draft);
+    rpc.mockImplementationOnce(async () => ({ disposition }));
+    await act(async () => button('Send').click());
+    expect(rpc).toHaveBeenCalledWith('session.input', { id: 'test', text: draft.trim() });
+    expect(host.querySelector('textarea')!.value).toBe(draft);
+    expect(host.querySelector('[role="alert"]')).toBeNull();
+    expect(rpc).not.toHaveBeenCalledWith('session.slash', expect.anything());
+    expect(rpc).not.toHaveBeenCalledWith('session.prompt', expect.anything());
+  });
+  it.each(['/tmp/file.txt inspect this', '/help/topic', '/help-extra', '/executing-tools/list', '/executing-tools-extra', '/hlep']) (
+    'routes %s through unified input without opening command modals', async (text) => {
+      render(); await settle(); type(text);
+      await act(async () => button('Send').click());
+      expect(rpc).toHaveBeenCalledWith('session.input', { id: 'test', text });
+      expect(rpc).not.toHaveBeenCalledWith('session.slash', expect.anything());
+      expect(rpc).not.toHaveBeenCalledWith('session.prompt', expect.anything());
+      expect(host.querySelector('[role="dialog"]')).toBeNull();
+    });
   it('loads earlier display blocks without replacing the backend log', async () => {
     state.events = [event('user', 'first'), event('text-delta', 'first answer'), event('turn-done', ''), event('user', 'last'), event('text-delta', 'last answer')];
     render(); await settle();
@@ -184,10 +206,10 @@ describe('mounted external-store chat integration', () => {
     const input = host.querySelector('textarea')!;
     await act(async () => { input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true })); });
     expect(input.value).toBe('/help');
-    expect(rpc).not.toHaveBeenCalledWith('session.slash', expect.anything());
+    expect(rpc).not.toHaveBeenCalledWith('session.input', expect.anything());
     expect(host.querySelector('[role="listbox"]')).toBeNull();
     await act(async () => { input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true })); });
-    expect(rpc).toHaveBeenCalledWith('session.slash', { id: 'test', text: '/help' });
+    expect(rpc).toHaveBeenCalledWith('session.input', { id: 'test', text: '/help' });
   });
   it('dismisses completions on Escape until text changes and ignores IME Enter', async () => {
     render(); await settle(); type('/he');
@@ -196,7 +218,7 @@ describe('mounted external-store chat integration', () => {
     act(() => input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })));
     expect(host.querySelector('[role="listbox"]')).toBeNull();
     act(() => input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', isComposing: true, bubbles: true, cancelable: true })));
-    expect(rpc).not.toHaveBeenCalledWith('session.slash', expect.anything());
+    expect(rpc).not.toHaveBeenCalledWith('session.input', expect.anything());
   });
   it('defaults streaming reasoning to collapsed, preserves a manual fold and leaves the source unchanged', async () => {
     state.events = [event('user', 'question'), event('thinking-delta', 'private reasoning')];
@@ -254,7 +276,7 @@ describe('mounted external-store chat integration', () => {
     vi.stubGlobal('confirm', vi.fn(() => confirmed));
     render(); await settle(); type('unsent draft'); rpc.mockClear();
     await act(async () => host.querySelector<HTMLButtonElement>('[title="Remove this queued prompt"]')!.click());
-    expect(rpc).not.toHaveBeenCalledWith('session.prompt', expect.anything());
+    expect(rpc).not.toHaveBeenCalledWith('session.input', expect.anything());
     expect(host.querySelector('textarea')!.value).toBe('unsent draft');
     expect(rpc.mock.calls.some(([method]) => method === 'session.queuedRemove')).toBe(confirmed);
     vi.restoreAllMocks();

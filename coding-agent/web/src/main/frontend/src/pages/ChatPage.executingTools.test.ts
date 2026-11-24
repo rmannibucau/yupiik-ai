@@ -6,6 +6,8 @@ describe('isExecutingToolsCommand', () => {
     expect(isExecutingToolsCommand('/executing-tools')).toBe(true);
     expect(isExecutingToolsCommand('/executing-tools ')).toBe(true);
     expect(isExecutingToolsCommand('  /executing-tools')).toBe(true);
+    expect(isExecutingToolsCommand('/executing-tools details')).toBe(true);
+    expect(isExecutingToolsCommand('/EXECUTING-TOOLS')).toBe(true);
   });
 
   it('rejects other slash commands, partial matches and plain prompts', () => {
@@ -13,6 +15,9 @@ describe('isExecutingToolsCommand', () => {
     expect(isExecutingToolsCommand('/tools')).toBe(false);
     expect(isExecutingToolsCommand('/executing')).toBe(false);
     expect(isExecutingToolsCommand('/executing-toolsX')).toBe(false);
+    expect(isExecutingToolsCommand('/executing-tools.md')).toBe(false);
+    expect(isExecutingToolsCommand('/executing-tools/list')).toBe(false);
+    expect(isExecutingToolsCommand('/executing-tools-extra')).toBe(false);
     expect(isExecutingToolsCommand('executing-tools')).toBe(false);
     expect(isExecutingToolsCommand('')).toBe(false);
   });

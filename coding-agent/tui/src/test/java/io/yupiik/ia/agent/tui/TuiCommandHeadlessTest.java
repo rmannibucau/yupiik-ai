@@ -48,10 +48,12 @@ import io.yupiik.ia.agent.core.llm.MarkupToolCallScanner;
 import io.yupiik.ia.agent.core.question.Question;
 import io.yupiik.ia.agent.core.session.SessionEntry;
 import io.yupiik.ia.agent.core.shell.SessionRuntimeFactory;
+import io.yupiik.ia.agent.core.shell.ShellOutcome;
 import io.yupiik.ia.agent.core.shell.ShellRegistry;
 import io.yupiik.ia.agent.core.shell.SpeakerLabels;
 import io.yupiik.ia.agent.core.shell.TurnRunner;
 import io.yupiik.ia.agent.core.shell.btw.BtwAnswerer;
+import io.yupiik.ia.agent.core.shell.slash.SlashCommand;
 import io.yupiik.ia.agent.core.shell.slash.SlashRegistry;
 import io.yupiik.ia.agent.core.wiring.AutoLogConfigurer;
 import io.yupiik.ia.agent.test.TestJsonMapper;
@@ -68,6 +70,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.Callable;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
@@ -90,6 +93,9 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.api.parallel.ResourceLock;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 /**
  * Boots the real fusion bean graph through autodiscovery (core + json + tui modules)
@@ -725,6 +731,14 @@ class TuiCommandHeadlessTest {
     }
 
     private TuiCommand newUiCommand(final RuntimeContainer container, final TuiDeps d, final TuiCommand.TuiConf conf) {
+        return newUiCommand(container, d, conf, null);
+    }
+
+    private TuiCommand newUiCommand(
+            final RuntimeContainer container,
+            final TuiDeps d,
+            final TuiCommand.TuiConf conf,
+            final SlashRegistry recordingRegistry) {
         // share the container-managed instances with the SlashRegistry so "/tabs"
         // dispatched through it mutates the same TabManager the TUI renders from
         try (final var tabManagerInstance = container.lookup(TabManager.class);
@@ -766,7 +780,7 @@ class TuiCommandHeadlessTest {
                     d.thinkTags(),
                     headlessFactory(),
                     tuiSlashCommands,
-                    slashRegistry.instance(),
+                    recordingRegistry == null ? slashRegistry.instance() : recordingRegistry,
                     Clock.systemUTC(),
                     new AskUserCardRenderer(new AskUserAnswersFormatter(formatMapper)),
                     new ToolOutputFormat(formatMapper),
@@ -1007,6 +1021,292 @@ class TuiCommandHeadlessTest {
 
         tuiRef.get().dispatch(KeyEvent.ofChar('c', KeyModifiers.CTRL));
         uiThread.join(TIMEOUT_MS);
+    }
+
+    @ParameterizedTest
+    @CsvSource({"false,false", "false,true", "true,false", "true,true"})
+    void mistypedCommandRestoresInputWithoutSendingOrRecordingIt(final boolean initial, final boolean correct)
+            throws Exception {
+        final var sessionId = "routing-" + initial + "-" + correct;
+        final var original = "/modle keep-this-argument";
+        final var requestsBefore = llm.requests().size();
+        final var command = newUiCommand(
+                container,
+                deps,
+                new TuiCommand.TuiConf(
+                        sessionId,
+                        "",
+                        KeyBindingPreset.STANDARD,
+                        true,
+                        true,
+                        "dark",
+                        initial ? List.of(original, "must-not-release-startup-queue") : List.of()));
+        uiThread = new Thread(command::run, "tui-routing-restore");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        if (!initial) {
+            awaitText("yca coding agent");
+            tuiRef.get().dispatch(new PasteEvent(original));
+            tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ENTER));
+        }
+
+        awaitText("Unknown command /modle - did you mean");
+        awaitText("/model");
+        awaitText("Send as normal input");
+        awaitText("Mistyped command - I'll fix it");
+        assertEquals(requestsBefore, llm.requests().size(), "routing must wait for the picker before sending");
+        assertTrue(deps.sessionStore().load(sessionId).isEmpty(), "an unresolved input is not a session entry");
+        if (correct) {
+            tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.DOWN));
+            tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ENTER));
+            awaitText("fix the command and submit again");
+        } else {
+            tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ESCAPE));
+        }
+        awaitTextGone("Send as normal input");
+        awaitText(original);
+
+        // Editing proves that the original is in the input, with its cursor restored at the end.
+        tuiRef.get().dispatch(KeyEvent.ofChar('!'));
+        awaitText(original + "!");
+        tuiRef.get().dispatch(KeyEvent.ofChar('u', KeyModifiers.CTRL));
+        awaitTextGone(original);
+        if (!correct) {
+            assertFalse(backend.text().contains("fix the command and submit again"));
+        }
+        assertEquals(requestsBefore, llm.requests().size());
+        assertTrue(deps.sessionStore().load(sessionId).isEmpty());
+
+        // Cross a real turn boundary: a stopped startup queue must not resume afterwards,
+        // and neither the rejected text nor the local correction notification may leak to the model.
+        tuiRef.get().dispatch(new PasteEvent("routing recovery prompt"));
+        tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ENTER));
+        awaitText("hello from mock");
+        awaitText("ready");
+        final var sent = List.copyOf(
+                llm.requests().subList(requestsBefore, llm.requests().size()));
+        assertFalse(sent.isEmpty());
+        for (final var request : sent) {
+            assertTrue(request.contains("routing recovery prompt"));
+            assertFalse(request.contains(original));
+            assertFalse(request.contains("must-not-release-startup-queue"));
+            assertFalse(request.contains("fix the command and submit again"));
+        }
+        assertEquals(
+                List.of("routing recovery prompt"),
+                deps.sessionStore().load(sessionId).stream()
+                        .filter(entry -> "user".equals(entry.role()))
+                        .map(entry -> String.valueOf(entry.content()))
+                        .toList());
+        tuiRef.get().quit();
+        uiThread.join(TIMEOUT_MS);
+        assertFalse(uiThread.isAlive());
+        assertFalse(Files.readAllLines(temp.resolve("home/history")).contains(original));
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void ambiguousInputCanBeSentVerbatimAndStartupQueueContinues(final boolean initial) throws Exception {
+        final var sessionId = "routing-accept-" + initial;
+        final var original = "/modle explain this literally " + initial;
+        final var requestsBefore = llm.requests().size();
+        final var command = newUiCommand(
+                container,
+                deps,
+                new TuiCommand.TuiConf(
+                        sessionId,
+                        "",
+                        KeyBindingPreset.STANDARD,
+                        true,
+                        true,
+                        "dark",
+                        initial ? List.of(original, "accepted startup successor") : List.of()));
+        uiThread = new Thread(command::run, "tui-routing-accept");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        if (!initial) {
+            awaitText("yca coding agent");
+            tuiRef.get().dispatch(new PasteEvent(original));
+            tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ENTER));
+        }
+        awaitText("Send as normal input");
+        assertEquals(requestsBefore, llm.requests().size());
+        tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ENTER));
+        awaitTextGone("Send as normal input");
+        awaitText("hello from mock");
+        if (initial) {
+            awaitText("accepted startup successor");
+        }
+        awaitText("ready");
+
+        final var sent = List.copyOf(
+                llm.requests().subList(requestsBefore, llm.requests().size()));
+        assertFalse(sent.isEmpty());
+        assertTrue(sent.getFirst().contains(original));
+        assertFalse(sent.getFirst().contains("accepted startup successor"));
+        assertEquals(
+                initial ? List.of(original, "accepted startup successor") : List.of(original),
+                deps.sessionStore().load(sessionId).stream()
+                        .filter(entry -> "user".equals(entry.role()))
+                        .map(entry -> String.valueOf(entry.content()))
+                        .toList());
+        tuiRef.get().quit();
+        uiThread.join(TIMEOUT_MS);
+        assertFalse(uiThread.isAlive());
+        assertEquals(
+                1L,
+                Files.readAllLines(temp.resolve("home/history")).stream()
+                        .filter(original::equals)
+                        .count(),
+                "accepted input is recorded once, not again when its turn starts");
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"/tmp/project/file.txt explain this", "/123 is literal input", "/mode/config.json"})
+    void slashPathsAndNonCommandTokensReachTheModelWithoutAPicker(final String text) throws Exception {
+        final var requestsBefore = llm.requests().size();
+        final var command = newUiCommand(container, deps);
+        uiThread = new Thread(command::run, "tui-routing-path");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("yca coding agent");
+        tuiRef.get().dispatch(new PasteEvent(text));
+        tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ENTER));
+        awaitText("hello from mock");
+        awaitText("ready");
+        assertTrue(llm.requests().subList(requestsBefore, llm.requests().size()).stream()
+                .anyMatch(request -> request.contains(text)));
+        assertFalse(backend.text().contains("Send as normal input"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"/btw", "/btw history-only question"})
+    void modalCommandsAndShiftTabAreRecalledAndDeduplicatedInHistory(final String btw) throws Exception {
+        final var home = Files.createTempDirectory(temp, "routing-history-");
+        try (final var isolated = bootContainer(Map.of("yca.storageHome", home.toString()))) {
+            final var isolatedDeps = lookupDeps(isolated);
+            final var requestsBefore = llm.requests().size();
+            final var command = newUiCommand(
+                    isolated,
+                    isolatedDeps,
+                    new TuiCommand.TuiConf("routing-history", "", KeyBindingPreset.STANDARD, true, "dark"));
+            uiThread = new Thread(command::run, "tui-routing-history");
+            uiThread.setDaemon(true);
+            uiThread.start();
+            awaitTui();
+            awaitText("yca coding agent");
+
+            // Both a real /btw overlay and its usage early return must be in history.
+            tuiRef.get().dispatch(new PasteEvent(btw));
+            tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ENTER));
+            if ("/btw".equals(btw)) {
+                awaitText("usage: /btw <question>");
+            } else {
+                awaitText("hello from mock");
+                tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ESCAPE));
+                awaitTextGone("hello from mock");
+                assertFalse(
+                        backend.text().contains("history-only question"), "the side question is not a transcript turn");
+            }
+            tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.UP));
+            tuiRef.get().dispatch(KeyEvent.ofChar('!'));
+            awaitText(btw + "!");
+            tuiRef.get().dispatch(KeyEvent.ofChar('u', KeyModifiers.CTRL));
+            awaitTextGone(btw + "!");
+            tuiRef.get().dispatch(new PasteEvent("/executing-tools"));
+            tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ENTER));
+            awaitText("(no tool executing)");
+            tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ESCAPE));
+            awaitTextGone("(no tool executing)");
+            tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.UP));
+            awaitText("/executing-tools");
+            tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ENTER));
+            awaitText("(no tool executing)");
+            tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ESCAPE));
+            awaitTextGone("(no tool executing)");
+
+            // The modal-only command must not have been appended to the transcript.
+            assertFalse(backend.text().contains("/executing-tools"));
+            tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.TAB, KeyModifiers.SHIFT));
+            awaitText("mode: build");
+            tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.UP));
+            tuiRef.get().dispatch(KeyEvent.ofChar('!'));
+            awaitText("/mode build!");
+            tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.BACKSPACE));
+            awaitTextGone("/mode build!");
+            tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ENTER));
+            // A visible draft after resubmission is an event-loop barrier, not another history entry.
+            tuiRef.get().dispatch(new PasteEvent("history-dedup-draft"));
+            awaitText("history-dedup-draft");
+            final var sent = List.copyOf(
+                    llm.requests().subList(requestsBefore, llm.requests().size()));
+            if ("/btw".equals(btw)) {
+                assertTrue(sent.isEmpty(), "the usage early return must not invoke an LLM");
+            } else {
+                assertFalse(sent.isEmpty());
+                assertTrue(sent.stream().allMatch(request -> request.contains("history-only question")));
+            }
+            assertTrue(isolatedDeps.sessionStore().load("routing-history").isEmpty());
+
+            tuiRef.get().quit();
+            uiThread.join(TIMEOUT_MS);
+            assertFalse(uiThread.isAlive());
+            assertEquals(List.of("/mode build", "/executing-tools", btw), Files.readAllLines(home.resolve("history")));
+        }
+    }
+
+    @Test
+    void registeredCatalogRoutesToCommandsWithoutExecutingTheirRealActions() throws Exception {
+        final var received = new CopyOnWriteArrayList<String>();
+        try (final var registry = container.lookup(SlashRegistry.class)) {
+            final var catalog = registry.instance().specs();
+            final var recording = new SlashRegistry(List.of(() -> catalog.stream()
+                    .map(spec -> SlashCommand.of(spec, (arg, env) -> {
+                        final var input = spec.name() + " " + arg;
+                        received.add(input);
+                        return CompletableFuture.completedStage(ShellOutcome.status("recorded " + input));
+                    }))
+                    .toList()));
+            final var requestsBefore = llm.requests().size();
+            final var command = newUiCommand(
+                    container,
+                    deps,
+                    new TuiCommand.TuiConf("routing-catalog", "", KeyBindingPreset.STANDARD, true, "dark"),
+                    recording);
+            uiThread = new Thread(command::run, "tui-routing-catalog");
+            uiThread.setDaemon(true);
+            uiThread.start();
+            awaitTui();
+            awaitText("yca coding agent");
+
+            // These three are handled locally before registry dispatch; their real modal paths
+            // have dedicated tests. All other actions, including destructive ones, are replaced.
+            final var inputs = catalog.stream()
+                    .filter(spec ->
+                            !List.of("btw", "executing-tools", "editplan").contains(spec.command()))
+                    .map(spec -> spec.name() + " catalog/argument")
+                    .toList();
+            assertFalse(inputs.isEmpty());
+            for (final var input : inputs) {
+                tuiRef.get().dispatch(new PasteEvent(input));
+                tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ENTER));
+                awaitText("recorded " + input);
+                assertFalse(backend.text().contains("Send as normal input"));
+            }
+            assertEquals(inputs, received);
+            assertEquals(requestsBefore, llm.requests().size());
+            assertTrue(deps.sessionStore().load("routing-catalog").isEmpty());
+            tuiRef.get().quit();
+            uiThread.join(TIMEOUT_MS);
+            assertFalse(uiThread.isAlive());
+            final var history = Files.readAllLines(temp.resolve("home/history"));
+            for (final var input : inputs) {
+                assertEquals(1L, history.stream().filter(input::equals).count(), input);
+            }
+        }
     }
 
     @Test
