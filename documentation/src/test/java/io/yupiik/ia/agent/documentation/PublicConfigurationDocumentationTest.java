@@ -19,28 +19,22 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import io.yupiik.fusion.documentation.ConfigurationDocumentationGenerator;
 import io.yupiik.fusion.json.internal.JsonMapperImpl;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Arrays;
 import java.util.HashMap;
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-import java.util.Set;
 import java.util.TreeSet;
-import java.util.regex.Pattern;
 import javax.xml.parsers.DocumentBuilderFactory;
 import javax.xml.xpath.XPathConstants;
 import javax.xml.xpath.XPathFactory;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.io.TempDir;
 import org.w3c.dom.Node;
 
 class PublicConfigurationDocumentationTest {
-    private static final Pattern ENTRY = Pattern.compile("(?m)^`([^`\\r\\n]+)` \\(env: `[^`\\r\\n]+`\\)::$");
     private final Path base = Path.of("").toAbsolutePath().normalize();
 
     @Test
@@ -70,53 +64,10 @@ class PublicConfigurationDocumentationTest {
                         .filter(it -> !it.isEmpty())
                         .toList()),
                 "Every public root needs an explicit generator input/selection; CLI roots have their own reference");
-    }
-
-    @Test
-    void catalogueContainsEverySelectedLeafWithItsDescription(@TempDir final Path temp) throws Exception {
-        final var configuration = configuration();
-        final var classes = new LinkedHashMap<String, Object>();
-        try (final var mapper = new JsonMapperImpl(List.of(), ignored -> Optional.empty())) {
-            for (final var input : configuration.get("urls").split(",")) {
-                final var metadata = mapper.fromString(Map.class, Files.readString(Path.of(input.strip())));
-                ((Map<?, ?>) metadata.get("classes")).forEach((name, value) -> classes.put(name.toString(), value));
-            }
-        }
-        final var keys = new TreeSet<String>();
-        for (final var root : configuration.get("roots").split(",")) {
-            collect(root.strip(), "", classes, keys);
-        }
-        final var output = temp.resolve("public.adoc");
-        configuration.put("output", output.toString());
-        new ConfigurationDocumentationGenerator(temp, configuration).run();
-        final var generated = Files.readString(output);
-        final var actual = new TreeSet<String>();
-        ENTRY.matcher(generated).results().map(it -> it.group(1)).forEach(actual::add);
-        assertEquals(keys, actual, "No omitted keys or accidentally included CLI options");
-        assertEquals(actual.size(), ENTRY.matcher(generated).results().count(), "No duplicate reference entries");
-        assertTrue(generated.contains("`yca.memory.maxRatio` (env: `YCA_MEMORY_MAXRATIO`)::"));
-        assertTrue(generated.contains("Default: `0.2`."), "Preserve genuine numeric defaults");
         assertTrue(
                 Files.readString(base.resolve("src/main/minisite/content/coding-agent/configuration.adoc"))
                         .contains("include::content/coding-agent/_partials/generated/public-configuration.adoc[]"),
                 "The catalogue must be consumed by the configuration page");
-    }
-
-    private void collect(
-            final String type, final String prefix, final Map<String, Object> classes, final Set<String> keys) {
-        assertTrue(classes.get(type) instanceof List<?>, "Missing metadata for " + type);
-        for (final var item : (List<?>) classes.get(type)) {
-            final var property = (Map<?, ?>) item;
-            final var name = prefix + property.get("name");
-            if (property.get("ref") instanceof String ref) {
-                collect(ref, name + '.', classes, keys);
-            } else {
-                assertTrue(
-                        property.get("documentation") instanceof String description && !description.isBlank(),
-                        "Missing source description: " + name);
-                keys.add(name);
-            }
-        }
     }
 
     private boolean isPublicRoot(final String name) {

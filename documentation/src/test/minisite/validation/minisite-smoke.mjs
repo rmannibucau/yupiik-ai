@@ -5,8 +5,9 @@ import { readFile, readdir } from 'node:fs/promises';
 import { extname, resolve, relative, sep } from 'node:path';
 
 const { chromium } = await import(process.env.PLAYWRIGHT_MODULE || 'playwright');
-const root = resolve(process.argv[2] || 'documentation/target/documentation-1.0.0-SNAPSHOT');
-const base = '/fusion-coding-agent/';
+const root = resolve(process.argv[2] || 'documentation/target/site');
+const base = '/yupiik-ai/';
+const agentBase = `${base}coding-agent/`;
 const files = [];
 const walk = async directory => {
   for (const entry of await readdir(directory, { withFileTypes: true })) {
@@ -77,7 +78,7 @@ try {
     console.log(`Diagrams passed: ${relative(root, path)} (${count}, both themes and rapid toggles)`);
   }
 
-  await page.goto(`${origin}${base}configuration.html`);
+  await page.goto(`${origin}${agentBase}configuration.html`);
   const input = page.getByRole('searchbox', { name: 'Filter configuration options by key' });
   await input.focus();
   await page.keyboard.type('NO_SUCH_CONFIGURATION_KEY_12345');
@@ -93,7 +94,7 @@ try {
 
   await page.setViewportSize({ width: 390, height: 844 });
   for (const path of ['github-bot/index.html', 'github-bot/security.html', 'cli.html', 'features.html', 'libraries.html']) {
-    await page.goto(`${origin}${base}${path}`);
+    await page.goto(`${origin}${agentBase}${path}`);
     const metrics = await page.evaluate(() => ({
       width: innerWidth,
       scroll: document.documentElement.scrollWidth

@@ -42,30 +42,28 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.function.BiPredicate;
 import java.util.regex.Pattern;
+import javax.xml.parsers.DocumentBuilderFactory;
+import javax.xml.xpath.XPathFactory;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 class ConfigurationJsonSchemaGeneratorTest {
     @Test
-    void tuiSchemaKeepsExistingPropertiesAndNestedTheme(@TempDir final Path temp) throws Exception {
+    void schemaMatchesRuntimeConfigurationAndAuthoredExamples(@TempDir final Path temp) throws Exception {
+        final var factory = DocumentBuilderFactory.newInstance();
+        factory.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true);
+        final var pom = factory.newDocumentBuilder().parse(Path.of("pom.xml").toFile());
+        final var excludedRoots = XPathFactory.newInstance()
+                .newXPath()
+                .evaluate(
+                        "/project/build/plugins/plugin[artifactId='yupiik-tools-maven-plugin']/configuration/preActions/"
+                                + "preAction[type='io.yupiik.ia.agent.documentation.ConfigurationJsonSchemaGenerator']"
+                                + "/configuration/excludedRoots",
+                        pom);
+        assertFalse(excludedRoots.isBlank(), "Use the minisite's schema root selection");
         new ConfigurationJsonSchemaGenerator(
                         temp,
-                        Map.of(
-                                "output", "schema.json",
-                                "partialOutput", "copy.json",
-                                "excludedRoots",
-                                        "io.yupiik.fusion.jwt.JwtSignerConfiguration,io.yupiik.fusion.jwt.JwtValidatorConfiguration,io.yupiik.maven.knowledge.mcp.configuration.MavenKnowledgeConfiguration,io.yupiik.ia.agent.core.configuration.BootstrapConfiguration,io.yupiik.ai.http.server.HttpHostingConfiguration,"
-                                                + "io.yupiik.ia.agent.github.configuration.GithubBotConfiguration,"
-                                                + "io.yupiik.ia.agent.github.configuration.GithubExecutorConfiguration,"
-                                                + "io.yupiik.ia.agent.github.configuration.AgentContextConfiguration,"
-                                                + "io.yupiik.ia.agent.github.configuration.ContextConfiguration,"
-                                                + "io.yupiik.ia.agent.github.configuration.FixConfiguration,"
-                                                + "io.yupiik.ia.agent.github.configuration.PromptConfiguration,"
-                                                + "io.yupiik.ia.agent.github.configuration.ReviewPresentationConfiguration,"
-                                                + "io.yupiik.ia.agent.slack.command.TaskOptions,"
-                                                + "io.yupiik.ia.agent.slack.configuration.SlackExecutorConfiguration,"
-                                                + "io.yupiik.ia.agent.slack.configuration.SlackProviderConfiguration,"
-                                                + "io.yupiik.ia.agent.slack.configuration.SlackPrompts,io.yupiik.fusion.a2a.configuration.A2AConfiguration,io.yupiik.fusion.mcp.configuration.MCPConfiguration"))
+                        Map.of("output", "schema.json", "partialOutput", "copy.json", "excludedRoots", excludedRoots))
                 .run();
         try (final var container = ConfiguringContainer.of()
                         .register(new FusionModule() {

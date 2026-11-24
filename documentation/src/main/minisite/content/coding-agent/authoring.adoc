@@ -119,7 +119,7 @@ mvn install -DskipTests
 mvn -pl documentation io.yupiik.maven:yupiik-tools-maven-plugin:minisite
 ----
 
-The output directory is `documentation/target/${project.build.finalName}` (currently `documentation-1.0.0-SNAPSHOT`), not `target/minisite/site`.
+The output directory configured in the documentation POM is `documentation/target/site`.
 Serve that directory locally and review the rendered pages, not only the AsciiDoc source.
 
 Check paragraph lengths on narrow screens, keyboard navigation, command-reference links and diagram rendering in both themes.
@@ -127,8 +127,10 @@ Verify includes, tables, code blocks and old anchors before publishing.
 
 === Automated checks
 
-Run `mvn -pl documentation test` after compiling the reactor metadata for configuration generation regressions.
-The scoped-reference tests use the configured POM filters and actual metadata, check every matching option and environment name, reject output collisions, and verify that includes and producers agree.
+Run `mvn -pl documentation test` after compiling the reactor metadata.
+The tests check configuration include/producer wiring, public configuration root coverage, CLI classpath isolation and the behavior of this project's own generators, including schema compatibility with the authored configuration examples.
+They do not regenerate every Fusion configuration reference or pin the current option counts and defaults; the minisite preactions own that generation.
+Run `mvn -pl documentation verify` to build the site once and validate rendered local links, anchors, assets and navigation.
 After building the minisite, run the opt-in browser check with Playwright:
 
 [source,bash]
@@ -144,5 +146,5 @@ Pass the generated site directory as the script's first argument if the version 
 Set `CHROME_BIN` to use an existing Chrome/Chromium executable instead of Playwright's downloaded browser.
 The check discovers diagram pages in the generated HTML and validates Mermaid rendering, failure fallback, malformed-diagram isolation, theme changes, mobile layout, keyboard access and configuration filtering.
 It does not enforce page wording, command inventories or navigation layout.
-Local link and anchor validation belongs in the AsciiDoc/minisite layer and is not checked here.
+Local link and anchor validation is handled by the rendered-site verification, not the browser script.
 Diagram rendering requires access to the Mermaid CDN.

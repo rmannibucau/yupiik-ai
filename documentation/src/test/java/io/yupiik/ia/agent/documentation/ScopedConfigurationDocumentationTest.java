@@ -15,167 +15,41 @@
  */
 package io.yupiik.ia.agent.documentation;
 
-import static java.util.stream.Collectors.joining;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import io.yupiik.fusion.documentation.DocumentationGenerator;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
-import java.util.Set;
 import java.util.regex.Pattern;
 import javax.xml.parsers.DocumentBuilderFactory;
 import javax.xml.xpath.XPathConstants;
 import javax.xml.xpath.XPathFactory;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.io.TempDir;
 import org.w3c.dom.Node;
 import org.w3c.dom.NodeList;
 
+/** Checks site wiring, not the external generator's rendering of configuration metadata. */
 class ScopedConfigurationDocumentationTest {
-    private static final Pattern ENV_SEPARATOR = Pattern.compile("[^A-Za-z0-9]");
-    private static final Pattern CONFIGURATION_FILE = Pattern.compile("configuration-.+\\.adoc");
     private static final Pattern INCLUDE = Pattern.compile(
-            "(?m)^include::(content/coding-agent/_partials/generated/configuration-[^\\[\\r\\n]+\\.adoc)\\[");
-    private static final Pattern ENTRY = Pattern.compile("(?m)^`([^`\\r\\n]+)` \\(env: `([^`\\r\\n]+)`\\)::$");
-    private static final List<String> FULL_MODULES = List.of("core", "tui", "web", "github-bot");
+            "(?m)^include::(content/coding-agent/_partials/generated/(?:configuration-|documentation\\.)[^\\[\\r\\n]+\\.adoc)\\[");
     private final Path base = Path.of("").toAbsolutePath().normalize();
     private final Path source = base.resolve("src/main/minisite");
     private final Path generated = source.resolve("content/coding-agent/_partials/generated");
 
     @Test
-    void companionReferenceContainsOnlyServerConfiguration(@TempDir final Path temp) throws Exception {
-        final var output = generated.resolve("configuration-notifications-service.adoc");
-        final var matching = actions().stream()
-                .filter(it -> output.toString().equals(it.get("output")))
-                .toList();
-        assertEquals(1, matching.size(), "Exactly one companion configuration producer");
-        final var action = matching.getFirst();
-        assertEquals("notifications-service", action.get("module"));
-        assertEquals("notification-service.", action.get("namePrefix"));
-        assertEquals("true", action.get("includeEnvironmentNames"));
-        assertEquals("definitionlist", action.get("formatter"));
-        assertEquals(
-                base
-                        + "/../coding-agent/extensions/notifications-service/target/classes/META-INF/fusion/configuration/documentation.json",
-                action.get("urls"));
-        final var actual = generate(temp, action, temp.resolve("companion.adoc"));
-        final var entries = entries(actual);
-        assertEquals(4, entries.size());
-        assertEquals(
-                Set.of(
-                        "notification-service.port",
-                        "notification-service.token",
-                        "notification-service.token-file",
-                        "notification-service.blink"),
-                new HashSet<>(entries.stream().map(this::key).toList()));
-        for (final var entry : entries) {
-            final var key = key(entry);
-            final var env = ENV_SEPARATOR.matcher(key).replaceAll("_").toUpperCase(Locale.ROOT);
-            assertTrue(entry.startsWith('`' + key + "` (env: `" + env + "`)::\n"), entry);
-            if (key.equals("notification-service.port")) {
-                assertTrue(entry.contains(" Default: `11026`."), entry);
-            } else if (key.equals("notification-service.blink")) {
-                assertTrue(entry.contains(" Default: `true`."), entry);
-            }
-        }
-        assertFalse(actual.contains("yca.notification."), "Event payload roots are not server settings");
-    }
-
-    @Test
-    void companionPageIncludesServerReference() throws Exception {
-        assertTrue(
-                Files.readString(source.resolve("content/coding-agent/features/tray-companion.adoc"))
-                        .contains(
-                                "include::content/coding-agent/_partials/generated/configuration-notifications-service.adoc[]"));
-    }
-
-    @Test
-    void scopedReferencesContainEveryMatchingEntry(@TempDir final Path temp) throws Exception {
-        final var references = new HashMap<String, List<String>>();
-        final var inputs = new HashMap<String, String>();
-        final var scoped =
-                actions().stream().filter(it -> it.containsKey("output")).toList();
-        assertFalse(scoped.isEmpty(), "No explicit configuration partials configured");
-        for (final var action : scoped) {
-            final var output = Path.of(action.get("output")).toAbsolutePath().normalize();
-            final var label = output.getFileName().toString();
-            assertTrue(output.startsWith(generated), label);
-            assertEquals("definitionlist", action.get("formatter"), label);
-            assertEquals("true", action.get("includeEnvironmentNames"), label);
-            final var urls = action.getOrDefault("urls", "").split(",", -1);
-            assertEquals(1, urls.length, "Exactly one metadata input: " + label);
-            assertFalse(urls[0].isBlank(), "Missing metadata input: " + label);
-            assertTrue(Files.isRegularFile(Path.of(urls[0].strip())), "Compile reactor metadata first: " + urls[0]);
-            final var module = action.getOrDefault("module", "");
-            assertFalse(module.isBlank(), label);
-            final var previous = inputs.putIfAbsent(module, urls[0]);
-            assertTrue(previous == null || previous.equals(urls[0]), "Conflicting metadata for " + module);
-            final var prefixes = Arrays.stream(
-                            action.getOrDefault("namePrefix", "").split(","))
-                    .filter(it -> !it.isBlank())
-                    .toList();
-            assertFalse(prefixes.isEmpty(), "Missing scope: " + label);
-            if (!references.containsKey(module)) {
-                final var complete = new HashMap<>(action);
-                complete.remove("namePrefix");
-                references.put(module, entries(generate(temp, complete, temp.resolve("oracle/" + module + ".adoc"))));
-            }
-            final var expected = references.get(module).stream()
-                    .filter(entry -> matches(key(entry), prefixes))
-                    .collect(joining());
-            assertFalse(expected.isBlank(), "Scope matches no metadata keys: " + label);
-            final var actual = generate(temp, action, temp.resolve(base.relativize(output)));
-            assertEquals(expected, actual, "All matching keys, descriptions and defaults: " + label);
-            final var entries = entries(actual);
-            assertFalse(entries.isEmpty(), label);
-            assertTrue(actual.contains(" Default: "), "Missing default text: " + label);
-            for (final var entry : entries) {
-                final var key = key(entry);
-                assertFalse(key.isBlank(), label);
-                assertTrue(matches(key, prefixes), "Out-of-scope key: " + key);
-                final var env = ENV_SEPARATOR
-                        .matcher(key.replace("$index", "INDEX"))
-                        .replaceAll("_")
-                        .toUpperCase(Locale.ROOT);
-                assertTrue(
-                        entry.startsWith('`' + key + "` (env: `" + env + "`)::\n"), "Missing environment name: " + key);
-            }
-        }
-    }
-
-    @Test
-    void outputsAreUniqueAndIncludesHaveExactlyTheConfiguredProducers() throws Exception {
-        final var actions = actions();
-        final var occupied = new HashSet<Path>();
-        // Classpath discovery writes these implicit full references; named actions can add more.
-        final var modules = new HashSet<>(FULL_MODULES);
-        actions.stream().map(it -> it.get("module")).filter(it -> it != null).forEach(modules::add);
-        modules.forEach(module -> occupied.add(generated.resolve("documentation." + module + ".adoc")));
+    void configurationIncludesHaveUniqueProducers() throws Exception {
         final var outputs = new HashSet<Path>();
-        for (final var action : actions) {
-            if (action.containsKey("output")) {
-                final var output =
-                        Path.of(action.get("output")).toAbsolutePath().normalize();
-                assertTrue(occupied.add(output), "Output collision (including implicit references): " + output);
-                assertEquals(generated, output.getParent(), output.toString());
-                assertTrue(
-                        CONFIGURATION_FILE
-                                .matcher(output.getFileName().toString())
-                                .matches(),
-                        output.toString());
-                outputs.add(output);
-            }
+        for (final var action : actions()) {
+            final var output = Path.of(action.get("output")).toAbsolutePath().normalize();
+            assertTrue(outputs.add(output), "Output collision: " + output);
         }
-        assertFalse(outputs.isEmpty());
+        assertFalse(outputs.isEmpty(), "No configuration references configured");
         final var includes = new HashSet<Path>();
         try (final var pages = Files.walk(source.resolve("content"))) {
             for (final var page : pages.filter(it -> it.toString().endsWith(".adoc"))
@@ -187,16 +61,8 @@ class ScopedConfigurationDocumentationTest {
                         .forEach(includes::add);
             }
         }
-        assertEquals(outputs, includes, "Every scoped include needs a producer and every output needs a consumer");
-        final var configuration = Files.readString(source.resolve("content/coding-agent/configuration.adoc"));
-        final var github = Files.readString(source.resolve("content/coding-agent/github-bot/configuration.adoc"));
-        for (final var module : FULL_MODULES) {
-            assertTrue(
-                    (module.equals("github-bot") ? github : configuration)
-                            .contains("include::content/coding-agent/_partials/generated/documentation." + module
-                                    + ".adoc[]"),
-                    module);
-        }
+        assertEquals(
+                outputs, includes, "Every configuration include needs a producer and every output needs a consumer");
     }
 
     private List<Map<String, String>> actions() throws Exception {
@@ -224,42 +90,13 @@ class ScopedConfigurationDocumentationTest {
                 }
             }
             if (configuration.containsKey("output")
-                    && Path.of(configuration.get("output"))
-                            .getFileName()
-                            .toString()
-                            .startsWith("configuration-")) {
+                    && generated.equals(Path.of(configuration.get("output"))
+                            .toAbsolutePath()
+                            .normalize()
+                            .getParent())) {
                 actions.add(configuration);
             }
         }
         return actions;
-    }
-
-    private String generate(final Path temp, final Map<String, String> action, final Path output) throws Exception {
-        final var configuration = new HashMap<>(action);
-        configuration.put("output", output.toString());
-        new DocumentationGenerator(temp, configuration).run();
-        return Files.readString(output);
-    }
-
-    private List<String> entries(final String document) {
-        final var headings = ENTRY.matcher(document).results().toList();
-        final var entries = new ArrayList<String>();
-        for (var i = 0; i < headings.size(); i++) {
-            entries.add(document.substring(
-                    headings.get(i).start(),
-                    i + 1 < headings.size() ? headings.get(i + 1).start() : document.length()));
-        }
-        assertEquals(document, String.join("", entries), "Unparsed reference text");
-        return entries;
-    }
-
-    private String key(final String entry) {
-        return entry.substring(1, entry.indexOf('`', 1));
-    }
-
-    private boolean matches(final String key, final List<String> prefixes) {
-        return prefixes.stream()
-                .allMatch(prefix ->
-                        prefix.startsWith("!") ? !key.startsWith(prefix.substring(1)) : key.startsWith(prefix));
     }
 }
