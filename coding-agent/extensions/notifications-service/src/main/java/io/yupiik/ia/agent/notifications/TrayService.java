@@ -76,9 +76,16 @@ public class TrayService {
                     if (tray.acknowledged()) {
                         unread.acknowledge(displayed);
                     }
+                    final var dismissed = tray.dismissed();
+                    if (!dismissed.isEmpty()) {
+                        unread.acknowledge(dismissed);
+                    }
                     final var latest = unread.read();
                     final var now = clock.millis();
                     final var attention = !latest.isEmpty() && (!blink || Math.floorDiv(now, 1000) % 2 == 0);
+                    if (first || !latest.equals(displayed)) {
+                        tray.updateNotices(latest);
+                    }
                     if (first || !latest.equals(displayed) || attention != previousAttention) {
                         tray.update(summary(latest), attention);
                         displayed = latest;
@@ -103,19 +110,7 @@ public class TrayService {
     }
 
     public static String summary(final List<Notice> notices) {
-        if (notices.isEmpty()) {
-            return "YCA - no unread activity";
-        }
-        final var sessions = notices.stream().map(Notice::session).distinct().count();
-        final var latest = notices.getFirst();
-        final var kind =
-                switch (latest.type()) {
-                    case "approval_required" -> "Approval requested";
-                    case "input_required" -> "Input requested";
-                    default -> "Turn ended";
-                };
-        return "YCA - " + sessions + " unread session" + (sessions == 1 ? "" : "s") + ": " + kind + " - "
-                + latest.title();
+        return NotificationPresentation.summary(notices);
     }
 
     private NativeTray tray(final AppIcon icon) throws IOException {

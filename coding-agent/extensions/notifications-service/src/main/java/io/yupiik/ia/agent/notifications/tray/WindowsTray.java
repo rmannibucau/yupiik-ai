@@ -6,6 +6,8 @@
  */
 package io.yupiik.ia.agent.notifications.tray;
 
+import static io.yupiik.ia.agent.notifications.NotificationPresentation.details;
+import static io.yupiik.ia.agent.notifications.NotificationPresentation.preview;
 import static java.lang.foreign.MemoryLayout.PathElement.groupElement;
 import static java.lang.foreign.MemorySegment.NULL;
 import static java.lang.foreign.ValueLayout.ADDRESS;
@@ -13,6 +15,7 @@ import static java.lang.foreign.ValueLayout.JAVA_INT;
 import static java.lang.foreign.ValueLayout.JAVA_LONG;
 import static java.lang.foreign.ValueLayout.JAVA_SHORT;
 
+import io.yupiik.ia.agent.notifications.Notice;
 import java.lang.foreign.Arena;
 import java.lang.foreign.FunctionDescriptor;
 import java.lang.foreign.Linker;
@@ -24,8 +27,11 @@ import java.lang.foreign.ValueLayout;
 import java.lang.invoke.MethodHandle;
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.MethodType;
+import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Locale;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
@@ -89,6 +95,9 @@ public final class WindowsTray implements NativeTray {
     private static final int MWMO_INPUTAVAILABLE = 0x0004;
     private static final int ACKNOWLEDGE = 1;
     private static final int QUIT = 2;
+    private static final int FIRST_NOTICE = 3;
+    private static final int DISMISS = 100;
+    private static final int DETAILS = 101;
     private static final long RETRY_NANOS = 1_000_000_000L;
 
     private final Thread owner;
@@ -101,6 +110,11 @@ public final class WindowsTray implements NativeTray {
     private MemorySegment className = NULL;
     private MemorySegment window = NULL;
     private MemorySegment menu = NULL;
+    private MemorySegment dialog = NULL;
+    private MemorySegment dialogCallback = NULL;
+    private Notice dialogNotice;
+    private List<Notice> notices = List.of();
+    private final List<Notice> dismissals = new ArrayList<>();
     private MemorySegment normalIcon = NULL;
     private MemorySegment attentionIcon = NULL;
     private MemorySegment iconData;
@@ -187,13 +201,11 @@ public final class WindowsTray implements NativeTray {
             wakeupLock.unlock();
         }
         checkCallback();
-        menu = (MemorySegment) api.createPopupMenu.invokeExact();
-        requireHandle(menu, "CreatePopupMenu");
-        requireSuccess(
-                (int) api.appendMenu.invokeExact(menu, 0, (long) ACKNOWLEDGE, wide(arena, "Acknowledge unread")),
-                "AppendMenuW(acknowledge)");
-        requireSuccess(
-                (int) api.appendMenu.invokeExact(menu, 0, (long) QUIT, wide(arena, "Quit")), "AppendMenuW(quit)");
+        dialogCallback = api.linker.upcallStub(
+                MethodHandles.lookup().findStatic(WindowsTray.class, "dialogProc", WINDOW_PROC_TYPE),
+                WINDOW_PROC,
+                arena);
+        rebuildMenu(List.of());
         message = arena.allocate(MESSAGE);
         iconData = arena.allocate(NOTIFY_ICON);
         iconData.set(JAVA_INT, offset(NOTIFY_ICON, "cbSize"), (int) NOTIFY_ICON.byteSize());
@@ -205,6 +217,64 @@ public final class WindowsTray implements NativeTray {
         iconData.set(ADDRESS, offset(NOTIFY_ICON, "hIcon"), normalIcon);
         writeUtf16(tooltipBuffer(), "YCA notifications");
         addIcon(); // Explorer might not be running yet; poll retries until it is available.
+    }
+
+    @Override
+    public void updateNotices(final List<Notice> updated) {
+        checkThread();
+        if (closed || disposed) {
+            return;
+        }
+        try {
+            rebuildMenu(List.copyOf(updated));
+        } catch (final Throwable failure) {
+            throw failed("update Windows notification menu", failure);
+        }
+    }
+
+    private void rebuildMenu(final List<Notice> updated) throws Throwable {
+        // AppendMenu copies its strings. Neither menu text nor snapshots accumulate in the tray arena.
+        final var replacement = (MemorySegment) api.createPopupMenu.invokeExact();
+        requireHandle(replacement, "CreatePopupMenu");
+        try (final var scratch = Arena.ofConfined()) {
+            for (int i = 0; i < updated.size(); i++) {
+                // Ampersands are menu mnemonics in Win32, not literal text unless doubled.
+                requireSuccess(
+                        (int) api.appendMenu.invokeExact(
+                                replacement,
+                                0,
+                                (long) FIRST_NOTICE + i,
+                                wide(scratch, preview(updated.get(i)).replace("&", "&&"))),
+                        "AppendMenuW(notice)");
+            }
+            if (!updated.isEmpty()) {
+                requireSuccess(
+                        (int) api.appendMenu.invokeExact(replacement, 0x800, 0L, NULL), "AppendMenuW(separator)");
+            }
+            requireSuccess(
+                    (int) api.appendMenu.invokeExact(
+                            replacement, 0, (long) ACKNOWLEDGE, wide(scratch, "Acknowledge unread")),
+                    "AppendMenuW(acknowledge)");
+            requireSuccess(
+                    (int) api.appendMenu.invokeExact(replacement, 0, (long) QUIT, wide(scratch, "Quit")),
+                    "AppendMenuW(quit)");
+            if (menu.address() != 0) {
+                requireSuccess((int) api.destroyMenu.invokeExact(menu), "DestroyMenu");
+            }
+        } catch (final Throwable failure) {
+            final var destroyed = (int) api.destroyMenu.invokeExact(replacement);
+            throw failure;
+        }
+        menu = replacement;
+        notices = updated;
+    }
+
+    @Override
+    public List<Notice> dismissed() {
+        checkThread();
+        final var result = List.copyOf(dismissals);
+        dismissals.clear();
+        return result;
     }
 
     @Override
@@ -236,18 +306,25 @@ public final class WindowsTray implements NativeTray {
             return;
         }
         try {
-            // Filter on our HWND so unrelated windows on this thread keep their messages.
+            // Filter on our HWNDs so unrelated windows on this thread keep their messages.
             // A finite batch also prevents continuous native traffic starving the desktop loop.
             for (int count = 0; count < 256 && !closed; count++) {
-                if ((int) api.peekMessage.invokeExact(message, window, 0, 0, 1) == 0) { // PM_REMOVE
-                    break;
+                // Alternate preference so a busy dialog cannot starve shutdown/wakeup on the tray.
+                final var first = count % 2 == 0 || dialog.address() == 0 ? window : dialog;
+                final var second = first.address() == window.address() ? dialog : window;
+                if ((int) api.peekMessage.invokeExact(message, first, 0, 0, 1) == 0) { // PM_REMOVE
+                    if (second.address() == 0 || (int) api.peekMessage.invokeExact(message, second, 0, 0, 1) == 0) {
+                        break;
+                    }
                 }
                 if (message.get(JAVA_INT, offset(MESSAGE, "message")) == 0x12) { // WM_QUIT
                     closed = true;
                     break;
                 }
-                final var translated = (int) api.translateMessage.invokeExact(message);
-                final var dispatched = (long) api.dispatchMessage.invokeExact(message);
+                if (dialog.address() == 0 || (int) api.isDialogMessage.invokeExact(dialog, message) == 0) {
+                    final var translated = (int) api.translateMessage.invokeExact(message);
+                    final var dispatched = (long) api.dispatchMessage.invokeExact(message);
+                }
                 checkCallback();
             }
             if (menuRequested && !closed && !menuOpen) {
@@ -345,6 +422,7 @@ public final class WindowsTray implements NativeTray {
         wakeupWindow = NULL; // Stop posts before destroying the HWND or unloading its DLL.
         try {
             if (api != null) {
+                closeDialog();
                 if (iconData != null) {
                     // A false result is normal when Explorer has already exited.
                     final var removed = (int) api.notifyIcon.invokeExact(2, iconData); // NIM_DELETE
@@ -407,15 +485,160 @@ public final class WindowsTray implements NativeTray {
                 acknowledged = true; // Only a reminder acknowledgement, never an approval response.
             } else if (command == QUIT) {
                 closed = true;
+            } else if (command >= FIRST_NOTICE && command - FIRST_NOTICE < notices.size()) {
+                showDetails(notices.get(command - FIRST_NOTICE));
             }
             // Required for reliable dismissal/reopening of notification-area shortcut menus.
             final var posted = (int) api.postMessage.invokeExact(window, 0, 0L, 0L); // WM_NULL
-            if (iconAdded) {
+            if (iconAdded && dialog.address() == 0) {
                 final var focused = (int) api.notifyIcon.invokeExact(3, iconData); // NIM_SETFOCUS
             }
         } finally {
             menuOpen = false;
             menuRequested = false;
+        }
+    }
+
+    private void showDetails(final Notice selected) throws Throwable {
+        if (dialog.address() != 0) {
+            final var foreground = (int) api.setForegroundWindow.invokeExact(dialog);
+            return; // Never replace the snapshot behind an open Dismiss button.
+        }
+        dialogNotice = selected;
+        try (final var scratch = Arena.ofConfined()) {
+            final var template = dialogTemplate(scratch);
+            final var previous = CONSTRUCTING.get();
+            CONSTRUCTING.set(this);
+            try {
+                dialog = (MemorySegment) api.createDialog.invokeExact(instance, template, window, dialogCallback, 0L);
+            } finally {
+                if (previous == null) {
+                    CONSTRUCTING.remove();
+                } else {
+                    CONSTRUCTING.set(previous);
+                }
+            }
+            requireHandle(dialog, "CreateDialogIndirectParamW");
+            WINDOWS.put(dialog.address(), this);
+            checkCallback();
+            final var text =
+                    details(selected).replace("\r\n", "\n").replace('\r', '\n').replace("\n", "\r\n");
+            requireSuccess(
+                    (int) api.setDlgItemText.invokeExact(dialog, DETAILS, wide(scratch, text)), "SetDlgItemTextW");
+            final var shown = (int) api.showWindow.invokeExact(dialog, 5); // SW_SHOW, no nested modal loop
+            final var foreground = (int) api.setForegroundWindow.invokeExact(dialog);
+        } catch (final Throwable failure) {
+            try {
+                closeDialog();
+            } catch (final Throwable cleanup) {
+                failure.addSuppressed(cleanup);
+            }
+            throw failure;
+        }
+    }
+
+    private void closeDialog() throws Throwable {
+        if (dialog.address() != 0) {
+            final var handle = dialog;
+            requireSuccess((int) api.destroyWindow.invokeExact(handle), "DestroyWindow(details)");
+            WINDOWS.remove(handle.address(), this);
+            dialog = NULL;
+        }
+        dialogNotice = null;
+    }
+
+    // Standard dialog templates are WORD packed, with DWORD-aligned structure starts.
+    // The native dialog manager owns the font and controls, released by DestroyWindow.
+    private static MemorySegment dialogTemplate(final Arena scratch) {
+        final var buffer = ByteBuffer.allocate(1024).order(ByteOrder.LITTLE_ENDIAN);
+        buffer.putInt(0x80c800c0); // POPUP | CAPTION | SYSMENU | DS_MODALFRAME | DS_SETFONT
+        buffer.putInt(0);
+        buffer.putShort((short) 3);
+        buffer.putShort((short) 0).putShort((short) 0).putShort((short) 460).putShort((short) 280);
+        buffer.putShort((short) 0).putShort((short) 0); // no menu, default dialog class
+        templateText(buffer, "YCA notification details");
+        buffer.putShort((short) 9);
+        templateText(buffer, "Segoe UI");
+        // EDIT: CHILD | VISIBLE | BORDER | TABSTOP | VSCROLL | MULTILINE | READONLY | AUTOVSCROLL
+        // No horizontal scrolling: multiline edit controls must wrap long received text.
+        templateControl(buffer, 0x50a10844, 10, 10, 440, 230, DETAILS, 0x81, "");
+        templateControl(buffer, 0x50010000, 290, 250, 75, 20, DISMISS, 0x80, "Dismiss");
+        templateControl(buffer, 0x50010001, 375, 250, 75, 20, 2, 0x80, "Close"); // IDCANCEL, default button
+        final var result = scratch.allocate(buffer.position(), 4);
+        result.copyFrom(MemorySegment.ofArray(buffer.array()).asSlice(0, buffer.position()));
+        return result;
+    }
+
+    private static void templateControl(
+            final ByteBuffer buffer,
+            final int style,
+            final int x,
+            final int y,
+            final int width,
+            final int height,
+            final int id,
+            final int controlClass,
+            final String title) {
+        while (buffer.position() % 4 != 0) {
+            buffer.put((byte) 0);
+        }
+        buffer.putInt(style).putInt(0);
+        buffer.putShort((short) x).putShort((short) y).putShort((short) width).putShort((short) height);
+        buffer.putShort((short) id).putShort((short) 0xffff).putShort((short) controlClass);
+        templateText(buffer, title);
+        buffer.putShort((short) 0); // no creation data
+    }
+
+    private static void templateText(final ByteBuffer buffer, final String value) {
+        for (int i = 0; i < value.length(); i++) {
+            buffer.putChar(value.charAt(i));
+        }
+        buffer.putChar('\0');
+    }
+
+    // DLGPROC returns INT_PTR on Win64. FALSE delegates unhandled messages to the dialog manager.
+    private static long dialogProc(final MemorySegment hwnd, final int msg, final long wParam, final long lParam) {
+        WindowsTray tray = null;
+        try {
+            tray = WINDOWS.get(hwnd.address());
+            if (tray == null && msg == 0x110) { // WM_INITDIALOG
+                tray = CONSTRUCTING.get();
+                if (tray != null) {
+                    tray.dialog = hwnd;
+                    WINDOWS.put(hwnd.address(), tray);
+                }
+                return 1;
+            }
+            if (tray == null) {
+                return 0;
+            }
+            if (msg == 0x111 && (wParam >>> 16) == 0) { // WM_COMMAND / BN_CLICKED; Escape -> IDCANCEL
+                final var command = (int) (wParam & 0xffff);
+                if (command == DISMISS || command == 2) {
+                    if (command == DISMISS && tray.dialogNotice != null) {
+                        tray.dismissals.add(tray.dialogNotice); // exact snapshot, not a session lookup
+                        tray.dialogNotice = null;
+                    }
+                    tray.closeDialog();
+                    return 1;
+                }
+            }
+            if (msg == 0x10) { // WM_CLOSE (X/Alt+F4), never dismiss
+                tray.closeDialog();
+                return 1;
+            }
+            if (msg == 0x82) { // WM_NCDESTROY, including owner destruction
+                WINDOWS.remove(hwnd.address(), tray);
+                tray.dialog = NULL;
+                tray.dialogNotice = null;
+            }
+            return 0;
+        } catch (final Throwable failure) {
+            if (tray != null) {
+                tray.callbackFailure = failure;
+                tray.closed = true;
+            }
+            return 0; // Never unwind a Java exception through the native dialog manager.
         }
     }
 
@@ -444,6 +667,10 @@ public final class WindowsTray implements NativeTray {
                 return 0;
             }
             if (msg == WAKEUP_MESSAGE) {
+                if (tray.menuOpen) {
+                    // Leave the menu's native modal loop so the caller can process updates/shutdown.
+                    final var ended = (int) tray.api.endMenu.invokeExact();
+                }
                 return 0;
             }
             if (msg == 0x10 || msg == 0x2 || (msg == 0x16 && wParam != 0)) { // CLOSE / DESTROY / ENDSESSION
@@ -576,6 +803,17 @@ public final class WindowsTray implements NativeTray {
                 FunctionDescriptor.of(JAVA_INT, JAVA_INT, ADDRESS, JAVA_INT, JAVA_INT, JAVA_INT);
 
         private final Linker linker;
+        private static final FunctionDescriptor CREATE_DIALOG =
+                FunctionDescriptor.of(ADDRESS, ADDRESS, ADDRESS, ADDRESS, ADDRESS, JAVA_LONG);
+        private static final FunctionDescriptor SET_DLG_ITEM_TEXT =
+                FunctionDescriptor.of(JAVA_INT, ADDRESS, JAVA_INT, ADDRESS);
+        private static final FunctionDescriptor SHOW_WINDOW = FunctionDescriptor.of(JAVA_INT, ADDRESS, JAVA_INT);
+
+        private final MethodHandle createDialog;
+        private final MethodHandle isDialogMessage;
+        private final MethodHandle setDlgItemText;
+        private final MethodHandle showWindow;
+        private final MethodHandle endMenu;
         private final MethodHandle getModuleHandle;
         private final MethodHandle getLastError;
         private final MethodHandle registerClass;
@@ -628,6 +866,11 @@ public final class WindowsTray implements NativeTray {
             trackPopupMenu = bind(user, "TrackPopupMenuEx", TRACK_MENU);
             postMessage = bind(user, "PostMessageW", POST_MESSAGE);
             msgWait = bind(user, "MsgWaitForMultipleObjectsEx", MSG_WAIT);
+            createDialog = bind(user, "CreateDialogIndirectParamW", CREATE_DIALOG);
+            isDialogMessage = bind(user, "IsDialogMessageW", BOOL_TWO_POINTERS);
+            setDlgItemText = bind(user, "SetDlgItemTextW", SET_DLG_ITEM_TEXT);
+            showWindow = bind(user, "ShowWindow", SHOW_WINDOW);
+            endMenu = bind(user, "EndMenu", LAST_ERROR);
         }
 
         private MethodHandle bind(final SymbolLookup library, final String name, final FunctionDescriptor descriptor) {

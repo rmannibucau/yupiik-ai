@@ -6,22 +6,29 @@
  */
 package io.yupiik.ia.agent.notifications.tray;
 
+import static io.yupiik.ia.agent.notifications.NotificationPresentation.details;
+import static io.yupiik.ia.agent.notifications.NotificationPresentation.preview;
 import static java.lang.foreign.ValueLayout.ADDRESS;
 import static java.lang.foreign.ValueLayout.JAVA_BYTE;
 import static java.lang.foreign.ValueLayout.JAVA_DOUBLE;
 import static java.lang.foreign.ValueLayout.JAVA_INT;
 import static java.lang.foreign.ValueLayout.JAVA_LONG;
 
+import io.yupiik.ia.agent.notifications.Notice;
 import java.lang.foreign.Arena;
 import java.lang.foreign.FunctionDescriptor;
+import java.lang.foreign.GroupLayout;
 import java.lang.foreign.Linker;
+import java.lang.foreign.MemoryLayout;
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.SymbolLookup;
 import java.lang.invoke.MethodHandle;
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.MethodType;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
@@ -32,7 +39,7 @@ import java.util.concurrent.ConcurrentHashMap;
  * (or enable native access for the containing module).
  * No AppKit or FFM linker initialization happens merely by loading this class.
  *
- * <p>Uses only pointer/scalar Objective-C messages: CGFloat and NSUInteger are
+ * <p>CGFloat and NSUInteger are
  * double and 64-bit respectively on both supported macOS ABIs. BOOL is passed
  * as a single byte (0 or 1), covering both Intel's signed char and arm64's bool.
  * GraalVM 25 documents macOS FFM upcalls on AArch64, not macOS/x64; the latter
@@ -52,6 +59,16 @@ public final class MacTray implements NativeTray {
     private static final FunctionDescriptor VOID_ARGUMENT = FunctionDescriptor.ofVoid(ADDRESS, ADDRESS, ADDRESS);
     private static final FunctionDescriptor VOID_BYTE = FunctionDescriptor.ofVoid(ADDRESS, ADDRESS, JAVA_BYTE);
     private static final FunctionDescriptor VOID_LONG = FunctionDescriptor.ofVoid(ADDRESS, ADDRESS, JAVA_LONG);
+    private static final GroupLayout SIZE = MemoryLayout.structLayout(JAVA_DOUBLE, JAVA_DOUBLE);
+    private static final GroupLayout RECT = MemoryLayout.structLayout(SIZE, SIZE);
+    private static final FunctionDescriptor OBJECT_RECT = FunctionDescriptor.of(ADDRESS, ADDRESS, ADDRESS, RECT);
+    private static final FunctionDescriptor WINDOW =
+            FunctionDescriptor.of(ADDRESS, ADDRESS, ADDRESS, RECT, JAVA_LONG, JAVA_LONG, JAVA_BYTE);
+    private static final FunctionDescriptor VOID_SIZE = FunctionDescriptor.ofVoid(ADDRESS, ADDRESS, SIZE);
+    private static final FunctionDescriptor VOID_ARGUMENT_LONG =
+            FunctionDescriptor.ofVoid(ADDRESS, ADDRESS, ADDRESS, JAVA_LONG);
+    private static final FunctionDescriptor BOOL = FunctionDescriptor.of(JAVA_BYTE, ADDRESS, ADDRESS);
+
     private static final FunctionDescriptor BOOL_LONG = FunctionDescriptor.of(JAVA_BYTE, ADDRESS, ADDRESS, JAVA_LONG);
     private static final FunctionDescriptor ACTION = FunctionDescriptor.ofVoid(ADDRESS, ADDRESS, ADDRESS);
     private static final FunctionDescriptor IS_MAIN = FunctionDescriptor.of(JAVA_INT);
@@ -67,6 +84,15 @@ public final class MacTray implements NativeTray {
 
     private final Thread owner = Thread.currentThread();
     private final Cocoa cocoa;
+    private final Map<Long, Notice> noticeItems = new HashMap<>(); // Menu owns these native items.
+    private final List<Notice> dismissed = new ArrayList<>();
+    private Notice requestedNotice;
+    private Notice dialogNotice;
+    private MemorySegment dialog = MemorySegment.NULL; // alloc/init ownership, not released on close.
+    private MemorySegment dismissButton = MemorySegment.NULL; // Owned by dialog's content view.
+    private MemorySegment closeButton = MemorySegment.NULL;
+    private boolean dismissDialog;
+    private boolean closeDialog;
     private volatile MacEventWait eventWait;
     private Cocoa.Pool cleanupPool;
     private MemorySegment application = MemorySegment.NULL; // Shared, not owned.
@@ -125,6 +151,10 @@ public final class MacTray implements NativeTray {
                     "acknowledgeUnread:",
                     lookup.findStatic(MacTray.class, "acknowledgeUnread", ACTION_TYPE));
             cocoa.addAction(targetClass, "quitTray:", lookup.findStatic(MacTray.class, "quitTray", ACTION_TYPE));
+            cocoa.addAction(targetClass, "showNotice:", lookup.findStatic(MacTray.class, "showNotice", ACTION_TYPE));
+            cocoa.addAction(
+                    targetClass, "dismissNotice:", lookup.findStatic(MacTray.class, "dismissNotice", ACTION_TYPE));
+            cocoa.addAction(targetClass, "closeNotice:", lookup.findStatic(MacTray.class, "closeNotice", ACTION_TYPE));
         } catch (final NoSuchMethodException | IllegalAccessException failure) {
             throw new IllegalStateException(failure);
         }
@@ -155,6 +185,10 @@ public final class MacTray implements NativeTray {
     }
 
     private MemorySegment addMenuItem(final String title, final String action) {
+        return addMenuItem(title, action, -1);
+    }
+
+    private MemorySegment addMenuItem(final String title, final String action, final long index) {
         final var allocated = cocoa.object(cocoa.type("NSMenuItem"), "alloc");
         final var item = required((MemorySegment) cocoa.send(
                 OBJECT_THREE_ARGUMENTS,
@@ -165,12 +199,206 @@ public final class MacTray implements NativeTray {
                 cocoa.string("")));
         try {
             cocoa.send(VOID_ARGUMENT, item, "setTarget:", target);
-            cocoa.send(VOID_ARGUMENT, menu, "addItem:", item);
+            if (index < 0) {
+                cocoa.send(VOID_ARGUMENT, menu, "addItem:", item);
+            } else {
+                cocoa.send(VOID_ARGUMENT_LONG, menu, "insertItem:atIndex:", item, index);
+            }
             return item;
         } finally {
             // The menu retains the item. Keep only a borrowed pointer for detaching its target.
             cocoa.send(VOID, item, "release");
         }
+    }
+
+    @Override
+    public void updateNotices(final List<Notice> notices) {
+        checkThread();
+        if (closed()) {
+            return;
+        }
+        final var snapshot = List.copyOf(notices);
+        try (final var pool = cocoa.pool()) {
+            clearNoticeItems();
+            var index = 0L;
+            for (final var notice : snapshot) {
+                final var item = addMenuItem(preview(notice), "showNotice:", index++);
+                noticeItems.put(item.address(), notice);
+            }
+        }
+    }
+
+    @Override
+    public List<Notice> dismissed() {
+        checkThread();
+        final var result = List.copyOf(dismissed);
+        dismissed.clear();
+        return result;
+    }
+
+    private void clearNoticeItems() {
+        final var entries = noticeItems.entrySet().iterator();
+        while (entries.hasNext()) {
+            final var item = MemorySegment.ofAddress(entries.next().getKey());
+            cocoa.send(VOID_ARGUMENT, item, "setTarget:", MemorySegment.NULL);
+            cocoa.send(VOID_ARGUMENT, menu, "removeItem:", item);
+            entries.remove();
+        }
+    }
+
+    // Run outside upcalls, after AppKit has finished dispatching the action.
+    private void processDialogRequests() {
+        if (dialog.address() != 0
+                && (closeDialog || dismissDialog || (byte) cocoa.send(BOOL, dialog, "isVisible") == 0)) {
+            final var dismissedNotice = dismissDialog ? dialogNotice : null;
+            disposeDialog();
+            if (dismissedNotice != null) {
+                dismissed.add(dismissedNotice);
+            }
+        }
+        final var notice = requestedNotice;
+        requestedNotice = null;
+        if (notice != null && !quitRequested) {
+            // Keep the viewed snapshot stable, matching the other native backends.
+            if (dialog.address() == 0) {
+                openDialog(notice);
+            }
+            cocoa.send(VOID_BYTE, application, "activateIgnoringOtherApps:", (byte) 1);
+            cocoa.send(VOID_ARGUMENT, dialog, "makeKeyAndOrderFront:", MemorySegment.NULL);
+        }
+    }
+
+    private void openDialog(final Notice notice) {
+        try (final var geometry = Arena.ofConfined()) {
+            // Fixed, bounded native window: long content grows vertically in the scroll view.
+            dialog = required((MemorySegment) cocoa.send(
+                    WINDOW,
+                    cocoa.object(cocoa.type("NSWindow"), "alloc"),
+                    "initWithContentRect:styleMask:backing:defer:",
+                    rect(geometry, 0, 0, 640, 450),
+                    3L,
+                    2L,
+                    (byte) 0));
+            cocoa.send(VOID_BYTE, dialog, "setReleasedWhenClosed:", (byte) 0);
+            dialogNotice = notice;
+            cocoa.send(VOID_ARGUMENT, dialog, "setTitle:", cocoa.string("Notification details"));
+            final var content = cocoa.object(dialog, "contentView");
+            final var scroll = view(geometry, "NSScrollView", 20, 70, 600, 360);
+            try {
+                cocoa.send(VOID_BYTE, scroll, "setHasVerticalScroller:", (byte) 1);
+                cocoa.send(VOID_BYTE, scroll, "setHasHorizontalScroller:", (byte) 0);
+                cocoa.send(VOID_BYTE, scroll, "setAutohidesScrollers:", (byte) 1);
+                final var text = view(geometry, "NSTextView", 0, 0, 580, 360);
+                try {
+                    cocoa.send(VOID_BYTE, text, "setEditable:", (byte) 0);
+                    cocoa.send(VOID_BYTE, text, "setSelectable:", (byte) 1);
+                    cocoa.send(VOID_BYTE, text, "setRichText:", (byte) 0);
+                    cocoa.send(VOID_BYTE, text, "setVerticallyResizable:", (byte) 1);
+                    cocoa.send(VOID_BYTE, text, "setHorizontallyResizable:", (byte) 0);
+                    cocoa.send(VOID_SIZE, text, "setMinSize:", size(geometry, 0, 360));
+                    cocoa.send(VOID_SIZE, text, "setMaxSize:", size(geometry, Double.MAX_VALUE, Double.MAX_VALUE));
+                    cocoa.send(VOID_LONG, text, "setAutoresizingMask:", 2L); // NSViewWidthSizable.
+                    final var container = cocoa.object(text, "textContainer");
+                    cocoa.send(VOID_SIZE, container, "setContainerSize:", size(geometry, 580, Double.MAX_VALUE));
+                    cocoa.send(VOID_BYTE, container, "setWidthTracksTextView:", (byte) 1);
+                    cocoa.send(VOID_LONG, container, "setLineBreakMode:", 0L); // NSLineBreakByWordWrapping.
+                    cocoa.send(
+                            VOID_ARGUMENT,
+                            text,
+                            "setFont:",
+                            cocoa.send(OBJECT_DOUBLE, cocoa.type("NSFont"), "systemFontOfSize:", 13d));
+                    cocoa.send(VOID_ARGUMENT, text, "setString:", cocoa.string(details(notice)));
+                    cocoa.send(VOID_ARGUMENT, scroll, "setDocumentView:", text);
+                } finally {
+                    cocoa.send(VOID, text, "release");
+                }
+                cocoa.send(VOID_ARGUMENT, content, "addSubview:", scroll);
+            } finally {
+                cocoa.send(VOID, scroll, "release");
+            }
+            dismissButton = dialogButton(geometry, content, 390, "Dismiss", "dismissNotice:", "");
+            closeButton = dialogButton(geometry, content, 510, "Close", "closeNotice:", "\u001b");
+            cocoa.send(VOID, dialog, "center");
+        } catch (final RuntimeException | Error failure) {
+            try {
+                disposeDialog();
+            } catch (final RuntimeException | Error cleanupFailure) {
+                failure.addSuppressed(cleanupFailure);
+            }
+            throw failure;
+        }
+    }
+
+    private MemorySegment dialogButton(
+            final Arena geometry,
+            final MemorySegment content,
+            final double x,
+            final String title,
+            final String action,
+            final String key) {
+        final var button = view(geometry, "NSButton", x, 20, 110, 32);
+        try {
+            cocoa.send(VOID_ARGUMENT, button, "setTitle:", cocoa.string(title));
+            cocoa.send(VOID_LONG, button, "setBezelStyle:", 1L);
+            cocoa.send(VOID_ARGUMENT, button, "setTarget:", target);
+            cocoa.send(VOID_ARGUMENT, button, "setAction:", cocoa.selector(action));
+            cocoa.send(VOID_ARGUMENT, button, "setKeyEquivalent:", cocoa.string(key));
+            cocoa.send(VOID_LONG, button, "setKeyEquivalentModifierMask:", 0L);
+            cocoa.send(VOID_ARGUMENT, content, "addSubview:", button);
+            return button;
+        } finally {
+            cocoa.send(VOID, button, "release");
+        }
+    }
+
+    private MemorySegment view(
+            final Arena arena,
+            final String type,
+            final double x,
+            final double y,
+            final double width,
+            final double height) {
+        return required((MemorySegment) cocoa.send(
+                OBJECT_RECT,
+                cocoa.object(cocoa.type(type), "alloc"),
+                "initWithFrame:",
+                rect(arena, x, y, width, height)));
+    }
+
+    private static MemorySegment rect(
+            final Arena arena, final double x, final double y, final double width, final double height) {
+        final var value = arena.allocate(RECT);
+        value.set(JAVA_DOUBLE, 0, x);
+        value.set(JAVA_DOUBLE, 8, y);
+        value.set(JAVA_DOUBLE, 16, width);
+        value.set(JAVA_DOUBLE, 24, height);
+        return value;
+    }
+
+    private static MemorySegment size(final Arena arena, final double width, final double height) {
+        final var value = arena.allocate(SIZE);
+        value.set(JAVA_DOUBLE, 0, width);
+        value.set(JAVA_DOUBLE, 8, height);
+        return value;
+    }
+
+    private void disposeDialog() {
+        if (dismissButton.address() != 0) {
+            cocoa.send(VOID_ARGUMENT, dismissButton, "setTarget:", MemorySegment.NULL);
+            dismissButton = MemorySegment.NULL;
+        }
+        if (closeButton.address() != 0) {
+            cocoa.send(VOID_ARGUMENT, closeButton, "setTarget:", MemorySegment.NULL);
+            closeButton = MemorySegment.NULL;
+        }
+        if (dialog.address() != 0) {
+            cocoa.send(VOID, dialog, "close");
+            cocoa.send(VOID, dialog, "release");
+            dialog = MemorySegment.NULL;
+        }
+        dialogNotice = null;
+        dismissDialog = false;
+        closeDialog = false;
     }
 
     @Override
@@ -211,6 +439,7 @@ public final class MacTray implements NativeTray {
                     break;
                 }
                 cocoa.send(VOID_ARGUMENT, application, "sendEvent:", event);
+                processDialogRequests();
             }
             cocoa.send(VOID, application, "updateWindows");
         }
@@ -264,6 +493,9 @@ public final class MacTray implements NativeTray {
             }
         });
         if (cleanupPool != null) {
+            requestedNotice = null;
+            failure = cleanup(failure, this::disposeDialog);
+            failure = cleanup(failure, this::clearNoticeItems);
             if (acknowledgeItem.address() != 0) {
                 failure = cleanup(failure, () -> {
                     cocoa.send(VOID_ARGUMENT, acknowledgeItem, "setTarget:", MemorySegment.NULL);
@@ -300,7 +532,8 @@ public final class MacTray implements NativeTray {
             if (menu.address() != 0
                     && acknowledgeItem.address() == 0
                     && quitItem.address() == 0
-                    && statusItem.address() == 0) {
+                    && statusItem.address() == 0
+                    && noticeItems.isEmpty()) {
                 failure = cleanup(failure, () -> {
                     cocoa.send(VOID, menu, "release");
                     menu = MemorySegment.NULL;
@@ -313,6 +546,7 @@ public final class MacTray implements NativeTray {
                 });
             }
             if (target.address() != 0
+                    && dialog.address() == 0
                     && menu.address() == 0
                     && statusItem.address() == 0
                     && acknowledgeItem.address() == 0
@@ -396,6 +630,41 @@ public final class MacTray implements NativeTray {
             final var tray = TARGETS.get(self.address());
             if (tray != null) {
                 tray.quitRequested = true;
+            }
+        } catch (final Throwable ignored) {
+            // Keep the native callback boundary exception-free.
+        }
+    }
+
+    private static void showNotice(final MemorySegment self, final MemorySegment selector, final MemorySegment sender) {
+        try {
+            final var tray = TARGETS.get(self.address());
+            if (tray != null && !tray.quitRequested) {
+                tray.requestedNotice = tray.noticeItems.get(sender.address());
+            }
+        } catch (final Throwable ignored) {
+            // Keep the native callback boundary exception-free.
+        }
+    }
+
+    private static void dismissNotice(
+            final MemorySegment self, final MemorySegment selector, final MemorySegment sender) {
+        try {
+            final var tray = TARGETS.get(self.address());
+            if (tray != null && tray.dialogNotice != null && sender.address() == tray.dismissButton.address()) {
+                tray.dismissDialog = true;
+            }
+        } catch (final Throwable ignored) {
+            // Keep the native callback boundary exception-free.
+        }
+    }
+
+    private static void closeNotice(
+            final MemorySegment self, final MemorySegment selector, final MemorySegment sender) {
+        try {
+            final var tray = TARGETS.get(self.address());
+            if (tray != null && sender.address() == tray.closeButton.address()) {
+                tray.closeDialog = true;
             }
         } catch (final Throwable ignored) {
             // Keep the native callback boundary exception-free.

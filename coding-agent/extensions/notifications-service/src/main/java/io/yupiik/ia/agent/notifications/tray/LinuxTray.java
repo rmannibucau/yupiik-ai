@@ -10,6 +10,8 @@ import static java.lang.foreign.ValueLayout.ADDRESS;
 import static java.lang.foreign.ValueLayout.JAVA_INT;
 import static java.lang.foreign.ValueLayout.JAVA_LONG;
 
+import io.yupiik.ia.agent.notifications.Notice;
+import io.yupiik.ia.agent.notifications.NotificationPresentation;
 import java.lang.foreign.Arena;
 import java.lang.foreign.FunctionDescriptor;
 import java.lang.foreign.Linker;
@@ -19,7 +21,9 @@ import java.lang.invoke.MethodHandle;
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.MethodType;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.locks.ReentrantLock;
 
@@ -34,6 +38,13 @@ public final class LinuxTray implements NativeTray {
     private static final FunctionDescriptor VOID_POINTER_INT = FunctionDescriptor.ofVoid(ADDRESS, JAVA_INT);
     private static final FunctionDescriptor VOID_POINTER_POINTER = FunctionDescriptor.ofVoid(ADDRESS, ADDRESS);
     private static final FunctionDescriptor VOID_POINTER = FunctionDescriptor.ofVoid(ADDRESS);
+    private static final FunctionDescriptor VOID_POINTER_POINTER_INT =
+            FunctionDescriptor.ofVoid(ADDRESS, ADDRESS, JAVA_INT);
+    private static final FunctionDescriptor VOID_POINTER_INT_INT =
+            FunctionDescriptor.ofVoid(ADDRESS, JAVA_INT, JAVA_INT);
+    private static final FunctionDescriptor VOID_POINTER_INT_POINTER =
+            FunctionDescriptor.ofVoid(ADDRESS, JAVA_INT, ADDRESS);
+    private static final FunctionDescriptor POINTER_POINTER_POINTER = FunctionDescriptor.of(ADDRESS, ADDRESS, ADDRESS);
     private static final FunctionDescriptor INT = FunctionDescriptor.of(JAVA_INT);
     private static final FunctionDescriptor INT_INT = FunctionDescriptor.of(JAVA_INT, JAVA_INT);
     private static final FunctionDescriptor INT_POINTER = FunctionDescriptor.of(JAVA_INT, ADDRESS);
@@ -48,6 +59,8 @@ public final class LinuxTray implements NativeTray {
     private static final MethodHandle ACKNOWLEDGE;
     private static final MethodHandle QUIT;
     private static final MethodHandle TICK;
+    private static final MethodHandle OPEN;
+    private static final MethodHandle RESPONSE;
 
     static {
         try {
@@ -55,6 +68,8 @@ public final class LinuxTray implements NativeTray {
             ACKNOWLEDGE = lookup.findStatic(LinuxTray.class, "acknowledge", ACTION_TYPE);
             QUIT = lookup.findStatic(LinuxTray.class, "quit", ACTION_TYPE);
             TICK = lookup.findStatic(LinuxTray.class, "tick", TICK_TYPE);
+            OPEN = lookup.findStatic(LinuxTray.class, "open", ACTION_TYPE);
+            RESPONSE = lookup.findStatic(LinuxTray.class, "response", VOID_POINTER_INT_POINTER.toMethodType());
         } catch (final ReflectiveOperationException e) {
             throw new ExceptionInInitializerError(e);
         }
@@ -75,6 +90,15 @@ public final class LinuxTray implements NativeTray {
     private MemorySegment indicator = MemorySegment.NULL;
     private MemorySegment menu = MemorySegment.NULL;
     private MemorySegment heading = MemorySegment.NULL;
+    private MemorySegment openStub = MemorySegment.NULL;
+    private MemorySegment responseStub = MemorySegment.NULL;
+    private MemorySegment dialog = MemorySegment.NULL;
+    private final Map<Long, Notice> menuNotices = new HashMap<>();
+    private final List<MemorySegment> noticeItems = new ArrayList<>();
+    private final List<Notice> dismissed = new ArrayList<>();
+    private Notice requested;
+    private Notice viewed;
+    private Throwable callbackFailure;
     private final String iconPath;
     private boolean menuDestroyed;
     private boolean acknowledged;
@@ -105,6 +129,8 @@ public final class LinuxTray implements NativeTray {
                                     () -> new IllegalStateException("Missing native symbol: g_main_context_wakeup")),
                     VOID_POINTER);
             tickStub = linker.upcallStub(TICK, INT_POINTER, arena);
+            openStub = linker.upcallStub(OPEN, VOID_POINTER_POINTER, arena);
+            responseStub = linker.upcallStub(RESPONSE, VOID_POINTER_INT_POINTER, arena);
             indicator = (MemorySegment) call(
                     indicatorLibrary,
                     "app_indicator_new",
@@ -141,6 +167,37 @@ public final class LinuxTray implements NativeTray {
     }
 
     @Override
+    public void updateNotices(final List<Notice> notices) {
+        for (final var widget : noticeItems) {
+            call(gtk, "gtk_widget_destroy", VOID_POINTER, widget);
+        }
+        noticeItems.clear();
+        menuNotices.clear();
+        try (final var strings = Arena.ofConfined()) {
+            int position = 1;
+            for (final var notice : notices) {
+                final var widget = (MemorySegment) call(
+                        gtk,
+                        "gtk_menu_item_new_with_label",
+                        POINTER_POINTER,
+                        strings.allocateFrom(NotificationPresentation.preview(notice)));
+                call(gtk, "gtk_menu_shell_insert", VOID_POINTER_POINTER_INT, menu, widget, position++);
+                noticeItems.add(widget);
+                menuNotices.put(widget.address(), notice);
+                connect(widget, "activate", openStub, strings);
+            }
+        }
+        call(gtk, "gtk_widget_show_all", VOID_POINTER, menu);
+    }
+
+    @Override
+    public List<Notice> dismissed() {
+        final var result = List.copyOf(dismissed);
+        dismissed.clear();
+        return result;
+    }
+
+    @Override
     public void update(final String tooltip, final boolean attention) {
         try (final var strings = Arena.ofConfined()) {
             call(gtk, "gtk_menu_item_set_label", VOID_POINTER_POINTER, heading, strings.allocateFrom(tooltip));
@@ -162,10 +219,86 @@ public final class LinuxTray implements NativeTray {
 
     @Override
     public void poll() {
+        checkCallback();
         // Bound dispatch work so a busy desktop cannot starve mailbox processing or shutdown.
         for (int i = 0; i < 64 && (int) call(gtk, "gtk_events_pending", INT) != 0; i++) {
             call(gtk, "gtk_main_iteration_do", INT_INT, 0);
         }
+        checkCallback();
+        if (requested != null && !closed) {
+            final var notice = requested;
+            requested = null;
+            showDetails(notice);
+        }
+    }
+
+    private void showDetails(final Notice notice) {
+        if (dialog.address() != 0) {
+            call(gtk, "gtk_window_present", VOID_POINTER, dialog);
+            return;
+        }
+        dialog = (MemorySegment) call(gtk, "gtk_dialog_new", POINTER);
+        viewed = notice;
+        try (final var strings = Arena.ofConfined()) {
+            call(gtk, "gtk_window_set_title", VOID_POINTER_POINTER, dialog, strings.allocateFrom("YCA notification"));
+            call(gtk, "gtk_window_set_modal", VOID_POINTER_INT, dialog, 1);
+            call(gtk, "gtk_window_set_default_size", VOID_POINTER_INT_INT, dialog, 560, 360);
+            call(gtk, "gtk_dialog_add_button", POINTER_POINTER_POINTER_INT, dialog, strings.allocateFrom("Dismiss"), 1);
+            call(gtk, "gtk_dialog_add_button", POINTER_POINTER_POINTER_INT, dialog, strings.allocateFrom("Close"), -7);
+            call(gtk, "gtk_dialog_set_default_response", VOID_POINTER_INT, dialog, -7);
+            final var content = (MemorySegment) call(gtk, "gtk_dialog_get_content_area", POINTER_POINTER, dialog);
+            final var scroll = (MemorySegment) call(
+                    gtk, "gtk_scrolled_window_new", POINTER_POINTER_POINTER, MemorySegment.NULL, MemorySegment.NULL);
+            call(
+                    gtk,
+                    "gtk_scrolled_window_set_policy",
+                    VOID_POINTER_INT_INT,
+                    scroll,
+                    2,
+                    1); // never horizontal, automatic vertical
+            call(gtk, "gtk_widget_set_vexpand", VOID_POINTER_INT, scroll, 1);
+            final var label = (MemorySegment) call(
+                    gtk,
+                    "gtk_label_new",
+                    POINTER_POINTER,
+                    strings.allocateFrom(NotificationPresentation.details(notice)));
+            call(gtk, "gtk_label_set_line_wrap", VOID_POINTER_INT, label, 1);
+            call(gtk, "gtk_label_set_line_wrap_mode", VOID_POINTER_INT, label, 2); // word/character wrapping
+            call(gtk, "gtk_label_set_max_width_chars", VOID_POINTER_INT, label, 64);
+            call(gtk, "gtk_label_set_selectable", VOID_POINTER_INT, label, 1);
+            call(gtk, "gtk_container_set_border_width", VOID_POINTER_INT, scroll, 16);
+            call(gtk, "gtk_container_add", VOID_POINTER_POINTER, scroll, label);
+            call(gtk, "gtk_container_add", VOID_POINTER_POINTER, content, scroll);
+            connect(dialog, "response", responseStub, strings);
+            call(gtk, "gtk_widget_show_all", VOID_POINTER, dialog);
+            call(gtk, "gtk_window_present", VOID_POINTER, dialog);
+        }
+    }
+
+    private void closeDialog() {
+        if (dialog.address() != 0) {
+            call(gtk, "gtk_widget_destroy", VOID_POINTER, dialog);
+            dialog = MemorySegment.NULL;
+            viewed = null;
+        }
+    }
+
+    private void checkCallback() {
+        rethrow(callbackFailure);
+    }
+
+    private void connect(
+            final MemorySegment widget, final String signal, final MemorySegment stub, final Arena strings) {
+        call(
+                gtk,
+                "g_signal_connect_data",
+                LONG_POINTER_POINTER_POINTER_POINTER_POINTER_INT,
+                widget,
+                strings.allocateFrom(signal),
+                stub,
+                MemorySegment.NULL,
+                MemorySegment.NULL,
+                0);
     }
 
     @Override
@@ -244,6 +377,7 @@ public final class LinuxTray implements NativeTray {
             }
             closed = true;
             Throwable failure = cleanupTimeoutSource(null);
+            failure = cleanup(failure, this::closeDialog);
             if (indicator.address() != 0) {
                 failure = cleanup(
                         failure,
@@ -268,7 +402,10 @@ public final class LinuxTray implements NativeTray {
                 }
             }
             // Keep callback stubs and the singleton alive while native callback objects may survive.
-            if (indicator.address() == 0 && menu.address() == 0 && timeoutSource.address() == 0) {
+            if (indicator.address() == 0
+                    && menu.address() == 0
+                    && timeoutSource.address() == 0
+                    && dialog.address() == 0) {
                 failure = cleanup(failure, arena::close);
                 if (active == this && !arena.scope().isAlive()) {
                     active = null;
@@ -345,6 +482,25 @@ public final class LinuxTray implements NativeTray {
     private static void acknowledge(final MemorySegment widget, final MemorySegment data) {
         if (active != null) {
             active.acknowledged = true;
+        }
+    }
+
+    private static void open(final MemorySegment widget, final MemorySegment data) {
+        if (active != null) {
+            active.requested = active.menuNotices.get(widget.address());
+        }
+    }
+
+    private static void response(final MemorySegment widget, final int response, final MemorySegment data) {
+        if (active != null) {
+            try {
+                if (response == 1 && active.viewed != null) {
+                    active.dismissed.add(active.viewed);
+                }
+                active.closeDialog();
+            } catch (final RuntimeException | Error failure) {
+                active.callbackFailure = failure;
+            }
         }
     }
 

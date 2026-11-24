@@ -17,7 +17,10 @@
       { "returnType": "int", "parameterTypes": ["void*", "int", "long long", "void*"] },
       { "returnType": "int", "parameterTypes": ["void*", "int", "int", "int", "void*", "void*"] },
       { "returnType": "int", "parameterTypes": ["void*", "int", "long long", "long long"] },
-      { "returnType": "int", "parameterTypes": ["int", "void*", "int", "int", "int"] }
+      { "returnType": "int", "parameterTypes": ["int", "void*", "int", "int", "int"] },
+      { "returnType": "void*", "parameterTypes": ["void*", "void*", "void*", "void*", "long long"] },
+      { "returnType": "int", "parameterTypes": ["void*", "int", "void*"] },
+      { "returnType": "int", "parameterTypes": ["void*", "int"] }
     ],
     "upcalls": [
       { "returnType": "long long", "parameterTypes": ["void*", "int", "long long", "long long"] }
@@ -26,6 +29,12 @@
       {
         "class": "io.yupiik.ia.agent.notifications.tray.WindowsTray",
         "method": "windowProc",
+        "returnType": "long long",
+        "parameterTypes": ["void*", "int", "long long", "long long"]
+      },
+      {
+        "class": "io.yupiik.ia.agent.notifications.tray.WindowsTray",
+        "method": "dialogProc",
         "returnType": "long long",
         "parameterTypes": ["void*", "int", "long long", "long long"]
       }

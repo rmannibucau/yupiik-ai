@@ -59,13 +59,21 @@ YCA_NOTIFICATION_SOURCE=main \
   "$binary" publish
 ----
 
-Check that the persistent YCA icon changes to its attention state and alternates about once per second, and that its menu/tooltip identifies the test session's unread activity.
+Check that the persistent YCA icon changes to its attention state and alternates about once per second, and that its tooltip shows `YCA - 1 unread session` without the notification title.
 Desktop policy can hide the icon or suppress particular visual effects; Linux needs a tray host such as GNOME's AppIndicator extension.
+Open the tray menu and select the notification's single-line preview to view its full details: kind, title, session, source and timestamp.
+Repeat with a long title containing line breaks and Unicode characters: the preview must remain a single line of at most 60 Unicode code points, ending in `...` when shortened, while the bounded, wrapped, scrollable details retain the full received text.
+The publisher normalizes whitespace and caps title/session fields at 256 UTF-16 code units; details cannot recover text discarded before delivery.
+Choose *Close*, Escape or the window's close control and verify that the reminder remains unread.
+Publish a second session, open the first reminder's details and choose *Dismiss*: only that reminder should disappear, leaving the other session unread.
+With details for an older reminder still open, publish a newer reminder for the same session/source, then dismiss the older one and verify that the newer reminder remains.
 Choose *Acknowledge unread* and check that the normal icon/no-unread state returns.
 This is a synthetic reminder, not a real approval request, and acknowledging it never answers a YCA prompt.
 Publish again, choose *Quit*, then run `wait "$companion_pid"` to check clean termination.
 A later `publish` must fail promptly rather than start another companion or leave a disk-backed queue.
 Restart with `"$binary" serve --notification-service-blink false` to check the steady attention state and that old reminders are forgotten.
+
+These native menu/dialog checks must be performed on each target desktop and native-image build; JVM unit tests use fake trays and do not validate native backend behavior.
 
 For an end-to-end check, configure YCA's notification command to `["/absolute/path/to/yca-notifications", "publish"]`, ensure YCA inherits the same private token/port, and cause a real tool approval or input request.
 Answer the request in YCA, not in the tray.

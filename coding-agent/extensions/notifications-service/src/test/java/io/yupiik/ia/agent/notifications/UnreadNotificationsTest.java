@@ -41,6 +41,29 @@ class UnreadNotificationsTest {
     }
 
     @Test
+    void dismissesOnlyTheExactSelectedNotice() {
+        final var state = new UnreadNotifications();
+        final var selected = notice("one", "main", 1);
+        final var sameSession = notice("one", "btw", 2);
+        final var otherSession = notice("two", "main", 3);
+        state.publish(selected);
+        state.publish(sameSession);
+        state.publish(otherSession);
+        state.acknowledge(List.of(selected));
+        assertEquals(List.of(otherSession, sameSession), state.read());
+
+        final var replacement = new Notice(1, "one", "Updated title", "input_required", "btw", 2);
+        state.publish(replacement);
+        state.acknowledge(List.of(sameSession));
+        assertEquals(List.of(otherSession, replacement), state.read());
+
+        final var newer = notice("one", "btw", 4);
+        state.publish(newer);
+        state.acknowledge(List.of(replacement));
+        assertEquals(List.of(newer, otherSession), state.read());
+    }
+
+    @Test
     void boundsRetainedReminders() {
         final var state = new UnreadNotifications();
         for (int i = 0; i < 258; i++) {

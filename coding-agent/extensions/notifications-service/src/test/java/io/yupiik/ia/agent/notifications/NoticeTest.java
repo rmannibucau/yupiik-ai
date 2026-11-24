@@ -43,7 +43,7 @@ class NoticeTest {
     void summaryReportsUnreadSessionsNotPendingApprovals() {
         final var main = new Notice(1, "s", "Title", "approval_required", "main", 1);
         final var btw = new Notice(1, "s", "Other", "input_required", "btw", 0);
-        assertEquals("YCA - 1 unread session: Approval requested - Title", TrayService.summary(List.of(main, btw)));
+        assertEquals("YCA - 1 unread session", TrayService.summary(List.of(main, btw)));
         assertEquals("YCA - no unread activity", TrayService.summary(List.of()));
     }
 }

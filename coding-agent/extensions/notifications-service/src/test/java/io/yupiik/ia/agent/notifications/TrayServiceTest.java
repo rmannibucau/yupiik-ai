@@ -14,11 +14,16 @@ import io.yupiik.fusion.framework.api.ConfiguringContainer;
 import io.yupiik.ia.agent.notifications.tray.NativeTray;
 import java.time.Clock;
 import java.time.Instant;
+import java.time.ZoneId;
 import java.time.ZoneOffset;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Consumer;
 import org.junit.jupiter.api.Test;
 
 class TrayServiceTest {
@@ -40,7 +45,7 @@ class TrayServiceTest {
                 loop.get(3, TimeUnit.SECONDS);
                 assertEquals(1, tray.waits);
                 assertEquals(2, tray.updates);
-                assertTrue(tray.title.contains("Approval requested - Reactive notification"));
+                assertEquals("YCA - 1 unread session", tray.title);
                 assertTrue(tray.disposed);
             } finally {
                 tray.stopped = true;
@@ -77,6 +82,152 @@ class TrayServiceTest {
             assertTrue(tray.disposed);
             assertFalse(tray.sawAttention); // odd second of the optional blink cycle
             assertEquals(1, state.read().size());
+        }
+    }
+
+    @Test
+    void publishesFirstEmptySnapshotOnlyOnceWhenNothingChanges() throws Exception {
+        final var tray = new ScriptedTray(ignored -> {});
+        run(new UnreadNotifications(), tray);
+        assertEquals(List.of(List.of()), tray.snapshots);
+        assertEquals(1, tray.titles.size());
+        assertEquals("YCA - no unread activity", tray.titles.getFirst());
+        assertTrue(tray.disposed);
+    }
+
+    @Test
+    void blinkChangesAttentionWithoutRebuildingTheMenu() throws Exception {
+        final var state = new UnreadNotifications();
+        final var notice = new Notice(1, "one", "Blink", "turn_end", "main", 1);
+        state.publish(notice);
+        final var now = new AtomicLong();
+        final var clock = new Clock() {
+            @Override
+            public ZoneId getZone() {
+                return ZoneOffset.UTC;
+            }
+
+            @Override
+            public Clock withZone(final ZoneId zone) {
+                return this;
+            }
+
+            @Override
+            public Instant instant() {
+                return Instant.ofEpochMilli(now.get());
+            }
+        };
+        final var tray = new ScriptedTray(current -> now.set(1000L * (current.polls - 1)));
+        try (final var container = ConfiguringContainer.of().start();
+                final var endpoint = container.lookup(NotificationEndpoint.class)) {
+            new TrayService(endpoint.instance(), clock).run(state, tray, true);
+        }
+        assertEquals(List.of(List.of(notice)), tray.snapshots);
+        assertEquals(List.of(true, false, true), tray.attentions);
+    }
+
+    @Test
+    void dismissesOnlySelectedVersionsBeforePublishingTheLatestSnapshot() throws Exception {
+        final var state = new UnreadNotifications();
+        final var selected = new Notice(1, "one", "Selected", "approval_required", "main", 1);
+        final var replaced = new Notice(1, "one", "Old", "input_required", "btw", 2);
+        final var other = new Notice(1, "two", "Other", "turn_end", "main", 3);
+        final var newer = new Notice(1, "one", "New", "input_required", "btw", 4);
+        final var arrived = new Notice(1, "three", "Arrived", "turn_end", "main", 5);
+        state.publish(selected);
+        state.publish(replaced);
+        state.publish(other);
+        final var tray = new ScriptedTray(current -> {
+            if (current.polls == 2) {
+                state.publish(newer);
+                state.publish(arrived);
+                current.dismissals = List.of(selected, replaced);
+            }
+        });
+        run(state, tray);
+        final var remaining = List.of(arrived, newer, other);
+        assertEquals(remaining, state.read());
+        assertEquals(List.of(List.of(other, replaced, selected), remaining), tray.snapshots);
+        assertEquals(List.of("YCA - 2 unread sessions", "YCA - 3 unread sessions"), tray.titles);
+        assertTrue(tray.disposed);
+    }
+
+    @Test
+    void closingDetailsWithoutDismissalLeavesEveryNoticeUnread() throws Exception {
+        final var state = new UnreadNotifications();
+        final var notice = new Notice(1, "one", "Close details", "input_required", "main", 1);
+        state.publish(notice);
+        // Closing a details view returns no dismissals and does not close the tray.
+        final var tray = new ScriptedTray(ignored -> {});
+        run(state, tray);
+        assertEquals(List.of(notice), state.read());
+        assertEquals(List.of(List.of(notice)), tray.snapshots);
+        assertEquals(List.of("YCA - 1 unread session"), tray.titles);
+    }
+
+    private void run(final UnreadNotifications state, final NativeTray tray) throws Exception {
+        try (final var container = ConfiguringContainer.of().start();
+                final var endpoint = container.lookup(NotificationEndpoint.class)) {
+            new TrayService(endpoint.instance(), Clock.fixed(Instant.EPOCH, ZoneOffset.UTC)).run(state, tray, false);
+        }
+    }
+
+    private static final class ScriptedTray implements NativeTray {
+        private final Consumer<ScriptedTray> onPoll;
+        private final List<List<Notice>> snapshots = new ArrayList<>();
+        private final List<String> titles = new ArrayList<>();
+        private final List<Boolean> attentions = new ArrayList<>();
+        private List<Notice> dismissals = List.of();
+        private int polls;
+        private boolean disposed;
+
+        private ScriptedTray(final Consumer<ScriptedTray> onPoll) {
+            this.onPoll = onPoll;
+        }
+
+        @Override
+        public void update(final String tooltip, final boolean attention) {
+            titles.add(tooltip);
+            attentions.add(attention);
+        }
+
+        @Override
+        public void updateNotices(final List<Notice> notices) {
+            snapshots.add(List.copyOf(notices));
+        }
+
+        @Override
+        public List<Notice> dismissed() {
+            final var result = dismissals;
+            dismissals = List.of();
+            return result;
+        }
+
+        @Override
+        public void poll() {
+            polls++;
+            onPoll.accept(this);
+        }
+
+        @Override
+        public void await(final long timeoutMillis) {}
+
+        @Override
+        public void wakeup() {}
+
+        @Override
+        public boolean acknowledged() {
+            return false;
+        }
+
+        @Override
+        public boolean closed() {
+            return polls >= 4;
+        }
+
+        @Override
+        public void close() {
+            disposed = true;
         }
     }
 

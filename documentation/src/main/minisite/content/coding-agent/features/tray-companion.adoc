@@ -211,8 +211,15 @@ YCA_NOTIFICATION_SOURCE=main \
   --notification-service-token-file "$HOME/.yupiik/coding-agent/notifications-service.token"
 ----
 
-A successful publisher exits with code zero; check the tray's unread state and choose *Acknowledge unread* to clear the synthetic reminder.
+A successful publisher exits with code zero; check that the tray tooltip shows `YCA - 1 unread session`, without including the title.
+Open the tray menu and select the reminder preview to inspect its details, including kind, full title, session, source and timestamp.
+Choose *Close* and verify that the reminder remains unread; reopen it and choose *Dismiss* to remove just that reminder.
+Publish reminders for two different sessions and verify that dismissing one leaves the other unread.
+For a concurrent-update check, leave an older reminder's details open, publish a newer event for the same session/source, then dismiss the older reminder: the newer one must remain unread.
+Repeat with a long title containing line breaks and Unicode characters to check that the menu preview stays on one line, uses at most 60 Unicode code points with a trailing `...` when shortened, and leaves full text available in details.
+Choose *Acknowledge unread* to clear the remaining displayed synthetic reminders.
 This does not answer a real YCA prompt.
+Run these menu/dialog checks on each target desktop, both on the JVM and with its native executable; fake-tray unit tests do not validate native backend behavior.
 For an end-to-end check after restarting YCA, cause a real tool approval or input request, then answer it in YCA itself.
 
 To check failure reporting, stop the service and repeat the publication:
@@ -292,6 +299,13 @@ Newer timestamps win; the oldest reminder is dropped when the bound is reached.
 All enabled event types, including turn completion, count as unread activity.
 A prompt resolved in YCA does not retract its reminder; a later event for that session/source replaces it.
 The menu acknowledges the versions last displayed, preserving newer activity which arrived concurrently.
+The tooltip is count-only: `YCA - no unread activity`, `YCA - 1 unread session` or `YCA - N unread sessions`, counting distinct sessions rather than individual reminders.
+Each reminder has a sanitized, single-line menu preview combining its kind and title (or session when the title is blank), limited to 60 Unicode code points including a trailing `...` when truncated.
+Selecting a preview opens plain-text details with the full kind, title, session, source and timestamp, without preview truncation.
+Details are wrapped inside a bounded native window with scrolling for longer content.
+Full text means the received notification: session and title fields are limited to 256 UTF-16 code units, and the publisher normalizes whitespace before sending them.
+*Dismiss* acknowledges only that exact reminder version and closes the window, preserving other reminders and any newer replacement; *Close*, Escape and the window's close control leave it unread.
+Only one details window is shown at a time, retaining the originally viewed reminder even when newer activity arrives.
 There are no disk-backed `status` or `clear` commands: acknowledge from the tray, or Quit/restart to forget all reminders.
 
 Tray updates are native-event-driven on new reminders, menu actions and shutdown, rather than periodic polling.
