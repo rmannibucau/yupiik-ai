@@ -64,6 +64,8 @@ import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 @ExtendWith(TestJsonMapper.class)
 class OpenAIDialectTest {
@@ -441,6 +443,77 @@ class OpenAIDialectTest {
         assertTrue(
                 events.stream().anyMatch(e -> e instanceof LlmStreamEvent.End end && end.usage() != null),
                 "usage chunk must surface an End with usage, got: " + events);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"{}", "{\"content\":\"\"}", "null"})
+    void completionsStreamKeepsUsageWithPlaceholderChoice(final String delta, final JsonMapper mapper)
+            throws Exception {
+        final var sse = String.join(
+                "\n",
+                "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"OK\"},\"finish_reason\":null}],"
+                        + "\"usage\":{\"prompt_tokens\":11,\"completion_tokens\":1,\"total_tokens\":12}}",
+                "",
+                "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}",
+                "",
+                "data: {\"choices\":[{\"index\":0,\"delta\":" + delta + ",\"finish_reason\":null}],"
+                        + "\"usage\":{\"prompt_tokens\":11,\"completion_tokens\":16,\"total_tokens\":27,"
+                        + "\"completion_tokens_details\":{\"reasoning_tokens\":6}}}",
+                "",
+                "data: [DONE]",
+                "");
+        server.createContext("/v1/chat/completions", exchange -> respond(exchange, 200, "text/event-stream", sse));
+        server.start();
+        final var dialect = new OpenAICompletionsDialect(
+                mapper,
+                client,
+                ProviderSpec.of(
+                        "http://localhost:" + server.getAddress().getPort() + "/v1/chat/completions", "sk-test"));
+        final var publisher =
+                dialect.stream(request(true), () -> false).toCompletableFuture().get(5, TimeUnit.SECONDS);
+        assertEquals(
+                List.of(
+                        new LlmStreamEvent.TextDelta("OK"),
+                        new LlmStreamEvent.End("stop", null),
+                        new LlmStreamEvent.End(null, new Usage(11L, 16L, 27L, null, null, 6L, null))),
+                collect(publisher),
+                "only the final usage must be emitted, even with a placeholder choice");
+    }
+
+    @ParameterizedTest
+    @ValueSource(
+            strings = {
+                "{\"role\":\"assistant\"}",
+                "{\"content\":\"hello\"}",
+                "{\"reasoning_content\":\"thinking\"}",
+                "{\"reasoning\":\"thinking\"}",
+                "{\"tool_calls\":[{\"index\":0,\"function\":{\"name\":\"test\",\"arguments\":\"{}\"}}]}"
+            })
+    void completionsStreamIgnoresIntermediateUsage(final String delta, final JsonMapper mapper) throws Exception {
+        final var sse = String.join(
+                "\n",
+                "data: {\"choices\":[{\"index\":0,\"delta\":" + delta + ",\"finish_reason\":null}],"
+                        + "\"usage\":{\"prompt_tokens\":11,\"completion_tokens\":1,\"total_tokens\":12}}",
+                "",
+                "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}",
+                "",
+                "data: [DONE]",
+                "");
+        server.createContext("/v1/chat/completions", exchange -> respond(exchange, 200, "text/event-stream", sse));
+        server.start();
+        final var dialect = new OpenAICompletionsDialect(
+                mapper,
+                client,
+                ProviderSpec.of(
+                        "http://localhost:" + server.getAddress().getPort() + "/v1/chat/completions", "sk-test"));
+        final var publisher =
+                dialect.stream(request(true), () -> false).toCompletableFuture().get(5, TimeUnit.SECONDS);
+        assertEquals(
+                List.of(new LlmStreamEvent.End("stop", null)),
+                collect(publisher).stream()
+                        .filter(LlmStreamEvent.End.class::isInstance)
+                        .toList(),
+                "intermediate usage must not create a spurious terminal event");
     }
 
     @Test

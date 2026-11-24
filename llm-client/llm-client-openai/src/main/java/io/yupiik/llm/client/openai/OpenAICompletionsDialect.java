@@ -27,6 +27,7 @@ import io.yupiik.llm.client.model.LlmTool;
 import io.yupiik.llm.client.model.LlmToolCall;
 import io.yupiik.llm.client.model.Usage;
 import io.yupiik.llm.client.openai.model.ChatChunk;
+import io.yupiik.llm.client.openai.model.ChatChunk.ChunkChoice;
 import io.yupiik.llm.client.openai.model.ChatCompletionRequest;
 import io.yupiik.llm.client.openai.model.ChatCompletionResponse;
 import io.yupiik.llm.client.openai.model.CompletionsTool;
@@ -397,10 +398,12 @@ public class OpenAICompletionsDialect extends AbstractDialect {
         final var out = new ArrayList<LlmStreamEvent>();
         final var choices = chunk.choices();
         final var finishPresent = choices != null && choices.stream().anyMatch(c -> c.finishReason() != null);
-        if (chunk.usage() != null && (finishPresent || choices == null || choices.isEmpty())) {
-            // only surface the usage on the terminal chunk (it carries a finish_reason, or the
-            // stream sends a bare usage-only chunk at the end): an intermediate "usage" field on
-            // a mid-stream delta would otherwise be emitted as a spurious terminal End(null, usage)
+        if (chunk.usage() != null
+                && (finishPresent
+                        || choices == null
+                        || choices.stream().allMatch(OpenAICompletionsDialect::isUsageOnlyChoice))) {
+            // Gateways can retain placeholder choices in their final usage-only chunk.
+            // Ignore usage on intermediate content deltas to avoid spurious terminal events.
             out.add(new LlmStreamEvent.End(null, chunk.usage().toNeutral()));
         }
         if (choices != null) {
@@ -432,5 +435,16 @@ public class OpenAICompletionsDialect extends AbstractDialect {
             }
         }
         return out;
+    }
+
+    private static boolean isUsageOnlyChoice(final ChunkChoice choice) {
+        final var delta = choice.delta();
+        return delta == null
+                || (delta.role() == null
+                        && (delta.content() == null || "".equals(delta.content()))
+                        && (delta.reasoningContent() == null
+                                || delta.reasoningContent().isEmpty())
+                        && (delta.reasoning() == null || delta.reasoning().isEmpty())
+                        && (delta.toolCalls() == null || delta.toolCalls().isEmpty()));
     }
 }
