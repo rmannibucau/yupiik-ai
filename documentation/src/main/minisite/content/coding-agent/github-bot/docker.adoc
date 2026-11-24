@@ -156,19 +156,31 @@ Provision the following root-managed JSON files with the same ownership/mode, re
 ----
 {
   "yca": {
-    "memory": {"enabled": false},
-    "mcp": {"enabled": false, "servers": []},
-    "notifications": {"enabled": false}
+    "memory": {
+      "enabled": false
+    },
+    "mcp": {
+      "enabled": false,
+      "servers": []
+    },
+    "notifications": {
+      "enabled": false
+    }
   },
   "github": {
     "home": "/srv/yca-github/state",
     "login": "ACTUAL_PUBLISHER_LOGIN",
-    "auth": {"type": "pat", "tokenEnv": "YCA_GITHUB_PAT"},
+    "auth": {
+      "type": "pat",
+      "tokenEnv": "YCA_GITHUB_PAT"
+    },
     "authorization": {
       "userIds": "NUMERIC_HUMAN_ID",
       "allowRepositoryWriters": false
     },
-    "repositories": {"explicit": "OWNER/REPOSITORY"},
+    "repositories": {
+      "explicit": "OWNER/REPOSITORY"
+    },
     "context": {
       "bind": "WORKER_CONTROL_IPV4",
       "port": 8081,
@@ -193,7 +205,9 @@ Provision the following root-managed JSON files with the same ownership/mode, re
           "dependencyEgress": {
             "enabled": true,
             "image": "sha256:EGRESS_IMAGE_ID",
-            "allowedHosts": ["repo.maven.apache.org"],
+            "allowedHosts": [
+              "repo.maven.apache.org"
+            ],
             "dns": "127.0.0.1"
           }
         }
@@ -217,15 +231,17 @@ Create `/etc/yca-github/agent-configuration.json` with one selected provider/mod
   "yca": {
     "provider": {
       "defaultProvider": "inference",
-      "providers": [{
-        "id": "inference",
-        "api": "COMPLETIONS",
-        "baseUrl": "http://PROVIDER_IPV4:PROVIDER_PORT/v1/chat/completions",
-        "model": "APPROVED_MODEL_ID",
-        "contextWindow": 32768,
-        "outputTokens": 4096,
-        "maxConcurrent": 1
-      }]
+      "providers": [
+        {
+          "id": "inference",
+          "api": "COMPLETIONS",
+          "baseUrl": "http://PROVIDER_IPV4:PROVIDER_PORT/v1/chat/completions",
+          "model": "APPROVED_MODEL_ID",
+          "contextWindow": 32768,
+          "outputTokens": 4096,
+          "maxConcurrent": 1
+        }
+      ]
     }
   }
 }

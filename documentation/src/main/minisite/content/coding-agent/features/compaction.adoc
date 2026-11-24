@@ -364,16 +364,28 @@ These samples use the JSON `compress` alias for `yca.compression`.
   "yca": {
     "compaction": {
       "enabled": true,
-      "buffer": { "percent": 15, "minTokens": 16000 },
-      "tail": { "budgetTokens": 15000 }
+      "buffer": {
+        "percent": 15,
+        "minTokens": 16000
+      },
+      "tail": {
+        "budgetTokens": 15000
+      }
     },
     "compress": {
       "enabled": true,
-      "contextLimit": { "min": 50000, "max": 100000 },
+      "contextLimit": {
+        "min": 50000,
+        "max": 100000
+      },
       "iterationNudgeThreshold": 15,
       "nudgeFrequency": 5,
       "summaryBuffer": true,
-      "protectedTools": ["spawn_subagent", "skill", "write_todo"]
+      "protectedTools": [
+        "spawn_subagent",
+        "skill",
+        "write_todo"
+      ]
     }
   }
 }
@@ -385,11 +397,18 @@ These samples use the JSON `compress` alias for `yca.compression`.
 ----
 {
   "yca": {
-    "compress": { "enabled": false },
+    "compress": {
+      "enabled": false
+    },
     "compaction": {
       "enabled": true,
-      "buffer": { "percent": 15, "minTokens": 16000 },
-      "tail": { "budgetTokens": 15000 }
+      "buffer": {
+        "percent": 15,
+        "minTokens": 16000
+      },
+      "tail": {
+        "budgetTokens": 15000
+      }
     }
   }
 }
@@ -402,12 +421,20 @@ These samples use the JSON `compress` alias for `yca.compression`.
 {
   "yca": {
     "compaction": {
-      "buffer": { "percent": 15, "minTokens": 16000 },
-      "tail": { "budgetTokens": 4000 }
+      "buffer": {
+        "percent": 15,
+        "minTokens": 16000
+      },
+      "tail": {
+        "budgetTokens": 4000
+      }
     },
     "compress": {
       "enabled": true,
-      "contextLimit": { "min": "25%", "max": "40%" },
+      "contextLimit": {
+        "min": "25%",
+        "max": "40%"
+      },
       "iterationNudgeThreshold": 10
     }
   }
@@ -420,8 +447,12 @@ These samples use the JSON `compress` alias for `yca.compression`.
 ----
 {
   "yca": {
-    "compress": { "enabled": false },
-    "compaction": { "thresholdPercent": 80 },
+    "compress": {
+      "enabled": false
+    },
+    "compaction": {
+      "thresholdPercent": 80
+    },
     "pruning": {
       "enabled": true,
       "thresholdPercent": 65,
@@ -441,7 +472,10 @@ Opt-in speculation computes a candidate before the trigger while foreground work
 {
   "yca": {
     "compaction": {
-      "speculative": { "policy": "concurrent", "startPercent": 80 }
+      "speculative": {
+        "policy": "concurrent",
+        "startPercent": 80
+      }
     }
   }
 }

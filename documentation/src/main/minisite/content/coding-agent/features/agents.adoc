@@ -25,8 +25,24 @@ Without it, the agent uses the current contextual model.
 ----
 {
   "agents": [
-    { "name": "reviewer", "description": "Reviews changes for bugs and regressions without editing files.", "prompt": "~/.yupiik/coding-agent/agents/reviewer.md", "tools": ["read", "glob", "grep"], "model": { "name": "$local/qwen3-coder", "reasoningEffort": "high" } },
-    { "name": "tester", "prompt": "You are a meticulous test author. Prefer table-driven tests and always run them." }
+    {
+      "name": "reviewer",
+      "description": "Reviews changes for bugs and regressions without editing files.",
+      "prompt": "~/.yupiik/coding-agent/agents/reviewer.md",
+      "tools": [
+        "read",
+        "glob",
+        "grep"
+      ],
+      "model": {
+        "name": "$local/qwen3-coder",
+        "reasoningEffort": "high"
+      }
+    },
+    {
+      "name": "tester",
+      "prompt": "You are a meticulous test author. Prefer table-driven tests and always run them."
+    }
   ]
 }
 ----
@@ -64,7 +80,9 @@ Discovery is not authorization.
 {
   "subagents": {
     "allowModelOverride": false,
-    "excludes": ["$external/restricted-model"]
+    "excludes": [
+      "$external/restricted-model"
+    ]
   },
   "provider": {
     "providers": [
@@ -81,19 +99,42 @@ Discovery is not authorization.
         },
         "model": "gpt-6.1-sol",
         "models": [
-          { "model": "gpt-6-luna" },
-          { "model": "gpt-6.1-terra" },
-          { "model": "gpt-6.1-sol" },
-          { "model": "gpt-5.6-terra" },
-          { "model": "gpt-5.6-sol" },
-          { "model": "gpt-6-sol" },
-          { "model": "gpt-6-astra" }
+          {
+            "model": "gpt-6-luna"
+          },
+          {
+            "model": "gpt-6.1-terra"
+          },
+          {
+            "model": "gpt-6.1-sol"
+          },
+          {
+            "model": "gpt-5.6-terra"
+          },
+          {
+            "model": "gpt-5.6-sol"
+          },
+          {
+            "model": "gpt-6-sol"
+          },
+          {
+            "model": "gpt-6-astra"
+          }
         ],
         "subagents": {
           "defaultModel": "$codex/gpt-6.1-sol",
           "allowModelOverride": true,
-          "includes": ["$codex/gpt-6-luna", "$codex/gpt-6.1-terra", "$codex/gpt-6.1-sol"],
-          "excludes": ["$codex/gpt-5.6-terra", "$codex/gpt-5.6-sol", "$codex/gpt-6-sol", "$codex/gpt-6-astra"]
+          "includes": [
+            "$codex/gpt-6-luna",
+            "$codex/gpt-6.1-terra",
+            "$codex/gpt-6.1-sol"
+          ],
+          "excludes": [
+            "$codex/gpt-5.6-terra",
+            "$codex/gpt-5.6-sol",
+            "$codex/gpt-6-sol",
+            "$codex/gpt-6-astra"
+          ]
         }
       }
     ]
@@ -188,9 +229,18 @@ Additional administrative discovery and routing restrictions live under `yca.too
 {
   "tools": {
     "spawnSubagent": {
-      "allowedAgents": ["reviewer", "tester"],
-      "allowedProviders": ["default", "local"],
-      "allowedModels": ["$local/qwen3-coder", "gpt-5-mini"]
+      "allowedAgents": [
+        "reviewer",
+        "tester"
+      ],
+      "allowedProviders": [
+        "default",
+        "local"
+      ],
+      "allowedModels": [
+        "$local/qwen3-coder",
+        "gpt-5-mini"
+      ]
     }
   }
 }

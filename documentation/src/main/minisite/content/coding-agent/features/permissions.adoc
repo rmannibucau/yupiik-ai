@@ -162,9 +162,16 @@ remain the enforcement gate. Set it to a blank string to omit the sentence.
       "readOnlyPromptHints": "Plan-mode bash is limited to read-only command families (git status, git diff, git log, git show, ls, cat, grep, head, tail, ...); commands that mutate repository state such as git add are denied.",
       "rules": [
         {
-          "matcher": { "commandStart": { "options": ["docker", "run"] } },  <2>
-          "plan": "ask",                                                    <3>
-          "default": "all"                                                  <4>
+          "matcher": { <2>
+            "commandStart": {
+              "options": [
+                "docker",
+                "run"
+              ]
+            }
+          },
+          "plan": "ask", <3>
+          "default": "all" <4>
         }
       ]
     }

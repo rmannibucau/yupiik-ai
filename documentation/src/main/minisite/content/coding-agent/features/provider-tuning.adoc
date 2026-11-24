@@ -114,16 +114,23 @@ effort - through `providerSpecificOptions`:
 ----
 {
   "provider": {
-    "providers": [{
-      "id": "azure-claude",
-      "baseUrl": "https://<region>.inference.ai.azure.com/<project>/anthropic/v1/messages",
-      "api": "anthropic",
-      "model": "$azure-claude/claude-sonnet-5-5",
-      "providerSpecificOptions": {
-        "thinking": { "type": "adaptive", "display": "summarized" },
-        "output_config": { "effort": "max" }
+    "providers": [
+      {
+        "id": "azure-claude",
+        "baseUrl": "https://<region>.inference.ai.azure.com/<project>/anthropic/v1/messages",
+        "api": "anthropic",
+        "model": "$azure-claude/claude-sonnet-5-5",
+        "providerSpecificOptions": {
+          "thinking": {
+            "type": "adaptive",
+            "display": "summarized"
+          },
+          "output_config": {
+            "effort": "max"
+          }
+        }
       }
-    }]
+    ]
   }
 }
 ----

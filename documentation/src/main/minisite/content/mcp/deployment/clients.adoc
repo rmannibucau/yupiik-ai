@@ -46,7 +46,14 @@ Same declaration, in the client configuration file (`claude_desktop_config.json`
 
 [source,json]
 ----
-{"mcpServers": {"demo": {"type": "http", "url": "http://localhost:8080/mcp"}}}
+{
+  "mcpServers": {
+    "demo": {
+      "type": "http",
+      "url": "http://localhost:8080/mcp"
+    }
+  }
+}
 ----
 
 Clients which only support the stdio transport need a bridge - `npx mcp-remote http://localhost:8080/mcp` - since
@@ -58,7 +65,11 @@ this server is HTTP only:
   "mcpServers": {
     "demo": {
       "command": "npx",
-      "args": ["-y", "mcp-remote", "http://localhost:8080/mcp"]
+      "args": [
+        "-y",
+        "mcp-remote",
+        "http://localhost:8080/mcp"
+      ]
     }
   }
 }

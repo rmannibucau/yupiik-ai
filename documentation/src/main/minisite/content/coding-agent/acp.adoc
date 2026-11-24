@@ -31,7 +31,9 @@ For the native distribution:
   "agent_servers": {
     "YCA": {
       "command": "/absolute/path/to/yca",
-      "args": ["acp"],
+      "args": [
+        "acp"
+      ],
       "env": {}
     }
   }
@@ -50,7 +52,11 @@ For the JVM distribution, use this alternative configuration:
   "agent_servers": {
     "YCA": {
       "command": "/absolute/path/to/java",
-      "args": ["-jar", "/absolute/path/to/yca-bin-{project_version}-fatjar.jar", "acp"],
+      "args": [
+        "-jar",
+        "/absolute/path/to/yca-bin-{project_version}-fatjar.jar",
+        "acp"
+      ],
       "env": {}
     }
   }
@@ -85,7 +91,13 @@ Use the ACP-specific `--provider` argument to select an existing provider by its
   "agent_servers": {
     "YCA": {
       "command": "/absolute/path/to/yca",
-      "args": ["acp", "--provider", "my-provider", "--model", "my-chat-model"],
+      "args": [
+        "acp",
+        "--provider",
+        "my-provider",
+        "--model",
+        "my-chat-model"
+      ],
       "env": {}
     }
   }
@@ -145,7 +157,12 @@ System instructions use an explicit flat text shape, for example:
 {
   "systemPrompt": {
     "mode": "append",
-    "content": [{"type": "text", "text": "Follow this session's review checklist."}]
+    "content": [
+      {
+        "type": "text",
+        "text": "Follow this session's review checklist."
+      }
+    ]
   }
 }
 ----
@@ -397,7 +414,12 @@ The IDE can include the following descriptors in `mcpServers` on `session/new`, 
     "type": "http",
     "name": "remote-tools",
     "url": "https://tools.example.com/mcp",
-    "headers": [{"name": "Authorization", "value": "Bearer supplied-by-client"}]
+    "headers": [
+      {
+        "name": "Authorization",
+        "value": "Bearer supplied-by-client"
+      }
+    ]
   },
   {
     "type": "sse",

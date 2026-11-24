@@ -52,13 +52,25 @@ curl -X POST http://localhost:8080/a2a -H 'content-type: application/json' -H 'a
 
 [source,json]
 ----
-{"result": {"task": {
-  "id": "t-1", "contextId": "c-1",
-  "status": {
-    "state": "TASK_STATE_INPUT_REQUIRED",
-    "message": {"role": "ROLE_AGENT", "parts": [{"text": "From where to where?"}]}
+{
+  "result": {
+    "task": {
+      "id": "t-1",
+      "contextId": "c-1",
+      "status": {
+        "state": "TASK_STATE_INPUT_REQUIRED",
+        "message": {
+          "role": "ROLE_AGENT",
+          "parts": [
+            {
+              "text": "From where to where?"
+            }
+          ]
+        }
+      }
+    }
   }
-}}}
+}
 ----
 
 [source,bash]

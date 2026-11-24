@@ -191,13 +191,27 @@ Inline log panels use JUL-level colors rather than speaker colors:
 {
   "tui": {
     "log": {
-      "severe": { "color": "#ff0000" },
-      "warning": { "color": "#ffd700" },
-      "info": { "color": "#00ffff" },
-      "config": { "color": "auto" },
-      "fine": { "color": "auto" },
-      "finer": { "color": "auto" },
-      "finest": { "color": "auto" }
+      "severe": {
+        "color": "#ff0000"
+      },
+      "warning": {
+        "color": "#ffd700"
+      },
+      "info": {
+        "color": "#00ffff"
+      },
+      "config": {
+        "color": "auto"
+      },
+      "fine": {
+        "color": "auto"
+      },
+      "finer": {
+        "color": "auto"
+      },
+      "finest": {
+        "color": "auto"
+      }
     }
   }
 }

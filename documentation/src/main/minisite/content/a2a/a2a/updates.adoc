@@ -25,10 +25,26 @@ xref:../deployment/configuration.adoc[Configuration].
 ----
 {
   /* exactly one of */
-  "task":           { /* the initial or current state */ },
-  "message":        { /* a direct answer, it ends the stream */ },
-  "statusUpdate":   { "taskId": "t-1", "contextId": "c-1", "status": { "state": "TASK_STATE_WORKING" } },
-  "artifactUpdate": { "taskId": "t-1", "contextId": "c-1", "artifact": {}, "append": false, "lastChunk": true }
+  "task": {
+    /* the initial or current state */
+  },
+  "message": {
+    /* a direct answer, it ends the stream */
+  },
+  "statusUpdate": {
+    "taskId": "t-1",
+    "contextId": "c-1",
+    "status": {
+      "state": "TASK_STATE_WORKING"
+    }
+  },
+  "artifactUpdate": {
+    "taskId": "t-1",
+    "contextId": "c-1",
+    "artifact": {},
+    "append": false,
+    "lastChunk": true
+  }
 }
 ----
 
@@ -107,8 +123,23 @@ Or register it with the message itself, which is the reliable way - nothing can 
 
 [source,json]
 ----
-{"message": {"messageId": "m-1", "role": "ROLE_USER", "parts": [{"text": "go"}]},
- "configuration": {"taskPushNotificationConfig": {"url": "https://caller.example.com/hook", "token": "opaque-1"}}}
+{
+  "message": {
+    "messageId": "m-1",
+    "role": "ROLE_USER",
+    "parts": [
+      {
+        "text": "go"
+      }
+    ]
+  },
+  "configuration": {
+    "taskPushNotificationConfig": {
+      "url": "https://caller.example.com/hook",
+      "token": "opaque-1"
+    }
+  }
+}
 ----
 
 The call the receiver sees:

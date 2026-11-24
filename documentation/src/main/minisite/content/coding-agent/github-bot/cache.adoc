@@ -140,22 +140,33 @@ For example, this complete policy selects Maven and overrides its path while ret
       "root": "/var/lib/yca/dependency-cache",
       "scope": "REPOSITORY",
       "compatibility": "linux-amd64-jdk25-v1",
-      "presets": ["MAVEN"],
-      "entries": [{
-        "id": "maven",
-        "kind": "MAVEN",
-        "directory": "downloads/maven",
-        "excludeDirectoryNameSuffixes": [".partial"]
-      }],
+      "presets": [
+        "MAVEN"
+      ],
+      "entries": [
+        {
+          "id": "maven",
+          "kind": "MAVEN",
+          "directory": "downloads/maven",
+          "excludeDirectoryNameSuffixes": [
+            ".partial"
+          ]
+        }
+      ],
       "environment": {
         "MAVEN_OPTS": "-Xmx512m -Dmaven.repo.local=${cache.maven}"
       },
-      "files": [{
-        "path": ".m2/settings.xml",
-        "content": "<settings><localRepository>${cache.maven}</localRepository></settings>\n"
-      }],
+      "files": [
+        {
+          "path": ".m2/settings.xml",
+          "content": "<settings><localRepository>${cache.maven}</localRepository></settings>\n"
+        }
+      ],
       "gracefulTimeoutSeconds": 300,
-      "maintenance": {"resetAfterDays": 30, "maxSizeBytes": 10737418240},
+      "maintenance": {
+        "resetAfterDays": 30,
+        "maxSizeBytes": 10737418240
+      },
       "limits": {
         "maxFiles": 100000,
         "maxFileBytes": 17179869184,
@@ -199,20 +210,26 @@ The compatibility label is operator-declared, not automatic npm version detectio
       "mode": "RESTORE_ONLY",
       "root": "/var/lib/yca/dependency-cache",
       "compatibility": "npm-11-linux-amd64",
-      "entries": [{
-        "id": "package-downloads",
-        "kind": "GENERIC",
-        "directory": "dependencies/npm/_cacache",
-        "excludeDirectoryNameSuffixes": [".temporary"]
-      }],
+      "entries": [
+        {
+          "id": "package-downloads",
+          "kind": "GENERIC",
+          "directory": "dependencies/npm/_cacache",
+          "excludeDirectoryNameSuffixes": [
+            ".temporary"
+          ]
+        }
+      ],
       "environment": {
         "npm_config_cache": "${storage}/dependencies/npm",
         "NPM_CONFIG_USERCONFIG": "${storage}/tooling/npmrc"
       },
-      "files": [{
-        "path": "tooling/npmrc",
-        "content": "cache=${storage}/dependencies/npm\nfund=false\n"
-      }]
+      "files": [
+        {
+          "path": "tooling/npmrc",
+          "content": "cache=${storage}/dependencies/npm\nfund=false\n"
+        }
+      ]
     }
   }
 }

@@ -170,8 +170,14 @@ Only configure variants to override the catalog: without a configured variant or
             "contextWindow": 400000,
             "behavior": {
               "variants": [
-                { "name": "default", "reasoningEffort": "medium" },
-                { "name": "reasoning", "reasoningEffort": "xhigh" }
+                {
+                  "name": "default",
+                  "reasoningEffort": "medium"
+                },
+                {
+                  "name": "reasoning",
+                  "reasoningEffort": "xhigh"
+                }
               ],
               "defaultVariant": "reasoning"
             }
@@ -223,13 +229,15 @@ The `exec` helper runs a command and returns its stdout, stripped by default:
 ----
 {
   "provider": {
-    "providers": [{
-      "id": "command-auth",
-      "api": "auto",
-      "baseUrl": "https://provider.example/v1",
-      "model": "my-model",
-      "dynamicHeaders": "authorization=Bearer {{exec \"exec_options=ttl=3600,strip=true\" \"MY_ENV=foo\" \"MY_OTHER_ENV=bar\" \"somebin\" \"somearg\" \"someotherarg\"}}"
-    }]
+    "providers": [
+      {
+        "id": "command-auth",
+        "api": "auto",
+        "baseUrl": "https://provider.example/v1",
+        "model": "my-model",
+        "dynamicHeaders": "authorization=Bearer {{exec \"exec_options=ttl=3600,strip=true\" \"MY_ENV=foo\" \"MY_OTHER_ENV=bar\" \"somebin\" \"somearg\" \"someotherarg\"}}"
+      }
+    ]
   }
 }
 ----
@@ -282,7 +290,11 @@ Names such as `gpt-6-luna` and `gpt-5.3-codex` are examples; availability change
         "model": "gpt-6-luna",
         "contextWindow": 400000,
         "capabilities": {
-          "codex": { "clientVersion": 160, "includeReasoning": false, "enableUsage": true }
+          "codex": {
+            "clientVersion": 160,
+            "includeReasoning": false,
+            "enableUsage": true
+          }
         },
         "dynamicHeaders": "authorization: Bearer {{codexAuth \"codex\"}}",
         "headers": "ChatGPT-Account-Id: xxxx-yyyy-zzzzz\nOpenAI-Beta: responses=experimental\noriginator: codex_cli_rs\naccept: text/event-stream"
@@ -436,7 +448,10 @@ The option defaults to `false`.
         "capabilities": {
           "openai": {
             "sessionId": {
-              "enabledKeys": ["x-session-id", "prompt_cache_key"]
+              "enabledKeys": [
+                "x-session-id",
+                "prompt_cache_key"
+              ]
             },
             "xClientRequestIdEnabled": true
           }
@@ -456,10 +471,12 @@ If needed, set a Codex-style `user-agent` in the provider's `headers`:
 ----
 {
   "provider": {
-    "providers": [{
-      "id": "codex",
-      "headers": "OpenAI-Beta: responses=experimental\noriginator: codex_cli_rs\naccept: text/event-stream\nuser-agent: codex_cli_rs/0.163.0 (Ubuntu 26.04; x86_64) gnome-terminal"
-    }]
+    "providers": [
+      {
+        "id": "codex",
+        "headers": "OpenAI-Beta: responses=experimental\noriginator: codex_cli_rs\naccept: text/event-stream\nuser-agent: codex_cli_rs/0.163.0 (Ubuntu 26.04; x86_64) gnome-terminal"
+      }
+    ]
   }
 }
 ----

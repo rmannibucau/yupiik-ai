@@ -145,10 +145,18 @@ For example, an advisory result in `output/result.json` can be:
   "assessment": {
     "recommendation": "clarification_needed",
     "assessment": "The goal is clear, but the supplied context does not establish the compatibility requirements. No source evidence is available in this empty repository.",
-    "concerns": ["Existing consumer expectations are unspecified."],
-    "suggestedApproach": ["Agree on the public contract before implementing it."],
-    "acceptanceCriteria": ["Document expected inputs, outputs and error behavior."],
-    "openQuestions": ["Which consumers must remain compatible?"]
+    "concerns": [
+      "Existing consumer expectations are unspecified."
+    ],
+    "suggestedApproach": [
+      "Agree on the public contract before implementing it."
+    ],
+    "acceptanceCriteria": [
+      "Document expected inputs, outputs and error behavior."
+    ],
+    "openQuestions": [
+      "Which consumers must remain compatible?"
+    ]
   },
   "tests": []
 }

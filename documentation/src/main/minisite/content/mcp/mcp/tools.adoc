@@ -49,13 +49,31 @@ For the example above:
     "type": "object",
     "description": "Input request for my/tool",
     "properties": {
-      "amount": {"type": "number", "description": "The amount to convert."},
-      "from": {"type": "string", "description": "Source currency, ISO 4217."},
-      "to": {"type": "string", "description": "Target currency, defaults to EUR."}
+      "amount": {
+        "type": "number",
+        "description": "The amount to convert."
+      },
+      "from": {
+        "type": "string",
+        "description": "Source currency, ISO 4217."
+      },
+      "to": {
+        "type": "string",
+        "description": "Target currency, defaults to EUR."
+      }
     },
-    "required": ["amount", "from"]
+    "required": [
+      "amount",
+      "from"
+    ]
   },
-  "outputSchema": {"type": "object", "properties": {"...": {}}, "required": []}
+  "outputSchema": {
+    "type": "object",
+    "properties": {
+      "...": {}
+    },
+    "required": []
+  }
 }
 ----
 

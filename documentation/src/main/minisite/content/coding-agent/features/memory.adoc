@@ -67,7 +67,10 @@ Each fact has text and a target scope:
 ----
 {
   "facts": [
-    { "text": "Prefer focused regression tests.", "scope": "project" }
+    {
+      "text": "Prefer focused regression tests.",
+      "scope": "project"
+    }
   ]
 }
 ----
@@ -170,7 +173,11 @@ Declare the local backend, then route only memory to it:
 {
   "provider": {
     "providers": [
-      { "id": "remote", "baseUrl": "https://api.openai.com/v1", "model": "gpt-5-mini" },
+      {
+        "id": "remote",
+        "baseUrl": "https://api.openai.com/v1",
+        "model": "gpt-5-mini"
+      },
       {
         "id": "local",
         "baseUrl": "http://127.0.0.1:8080/v1",

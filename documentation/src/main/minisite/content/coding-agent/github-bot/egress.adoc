@@ -204,7 +204,11 @@ For example, in the trusted dispatcher JSON configuration:
       "docker": {
         "egress": {
           "image": "YOUR_REGISTRY/yca-egress@sha256:YOUR_REVIEWED_DIGEST",
-          "allowedHosts": ["api.github.com", "github.com", "YOUR_PUBLIC_PROVIDER_HOST"]
+          "allowedHosts": [
+            "api.github.com",
+            "github.com",
+            "YOUR_PUBLIC_PROVIDER_HOST"
+          ]
         }
       }
     }

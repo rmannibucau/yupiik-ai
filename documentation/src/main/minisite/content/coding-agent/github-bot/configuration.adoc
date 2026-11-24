@@ -144,7 +144,10 @@ For example:
 ----
 {
   "yca": {
-    "todos": {"continueOnUnfinished": true, "maxContinues": 5}
+    "todos": {
+      "continueOnUnfinished": true,
+      "maxContinues": 5
+    }
   },
   "run": {
     "result-correction-prompt": "Artifact validation failed: {{{validationError}}}. Repair only {{{file}}}, at most {{maxBytes}} bytes, with required nonblank string alternatives {{{requiredFields}}}. Use existing evidence only; do not repeat tests, commits, pushes or publication. A chat answer does not replace the JSON artifact."
@@ -256,22 +259,28 @@ The trusted attempt configuration retains the nested provider capabilities and p
   "yca": {
     "provider": {
       "defaultProvider": "qwen",
-      "providers": [{
-        "id": "qwen",
-        "baseUrl": "https://llm.example.com/v1/chat/completions",
-        "apiKey": "REPLACE_WITH_PROVIDER_TOKEN",
-        "model": "qwen3.8-27b",
-        "api": "completions",
-        "contextWindow": 196608,
-        "outputTokens": 32768,
-        "maxConcurrent": 1,
-        "capabilities": {
-          "openai": { "replayReasoning": true }
-        },
-        "providerSpecificOptions": "{\"temperature\":0.6,\"top_p\":0.95,\"top_k\":20,\"min_p\":0,\"reasoning_effort\":\"low\",\"chat_template_kwargs\":{\"preserve_thinking\":true}}"
-      }]
+      "providers": [
+        {
+          "id": "qwen",
+          "baseUrl": "https://llm.example.com/v1/chat/completions",
+          "apiKey": "REPLACE_WITH_PROVIDER_TOKEN",
+          "model": "qwen3.8-27b",
+          "api": "completions",
+          "contextWindow": 196608,
+          "outputTokens": 32768,
+          "maxConcurrent": 1,
+          "capabilities": {
+            "openai": {
+              "replayReasoning": true
+            }
+          },
+          "providerSpecificOptions": "{\"temperature\":0.6,\"top_p\":0.95,\"top_k\":20,\"min_p\":0,\"reasoning_effort\":\"low\",\"chat_template_kwargs\":{\"preserve_thinking\":true}}"
+        }
+      ]
     },
-    "pruning": { "ingestionOutputCapChars": 65536 }
+    "pruning": {
+      "ingestionOutputCapChars": 65536
+    }
   }
 }
 ----
@@ -737,7 +746,20 @@ Nono and Kubernetes connectivity must be explicitly arranged and tested by the o
 
 [source,json]
 ----
-{"poll":{"search":{"enabled":true,"reconciliationIntervalSeconds":3600},"reviews":{"enabled":true},"discussions":{"enabled":true}}}
+{
+  "poll": {
+    "search": {
+      "enabled": true,
+      "reconciliationIntervalSeconds": 3600
+    },
+    "reviews": {
+      "enabled": true
+    },
+    "discussions": {
+      "enabled": true
+    }
+  }
+}
 ----
 
 This example explicitly enables the optional review and Discussion feeds while retaining default search-first selection and hourly direct reconciliation.

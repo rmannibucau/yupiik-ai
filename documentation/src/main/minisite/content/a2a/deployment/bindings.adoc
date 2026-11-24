@@ -41,16 +41,25 @@ The JSON-RPC error object, with the codes of section 5.4 and the details as an a
 
 [source,json]
 ----
-{"jsonrpc": "2.0", "id": 1, "error": {
-  "code": -32001,
-  "message": "Task not found",
-  "data": [{
-    "@type": "type.googleapis.com/google.rpc.ErrorInfo",
-    "reason": "TASK_NOT_FOUND",
-    "domain": "a2a-protocol.org",
-    "metadata": {"taskId": "t-1", "timestamp": "2026-08-01T10:30:00.000Z"}
-  }]
-}}
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "error": {
+    "code": -32001,
+    "message": "Task not found",
+    "data": [
+      {
+        "@type": "type.googleapis.com/google.rpc.ErrorInfo",
+        "reason": "TASK_NOT_FOUND",
+        "domain": "a2a-protocol.org",
+        "metadata": {
+          "taskId": "t-1",
+          "timestamp": "2026-08-01T10:30:00.000Z"
+        }
+      }
+    ]
+  }
+}
 ----
 
 [options="header",cols="1,1,1"]
@@ -100,17 +109,24 @@ The JSON representation of `google.rpc.Status`, with the HTTP status of the tabl
 
 [source,json]
 ----
-{"error": {
-  "code": 404,
-  "status": "NOT_FOUND",
-  "message": "Task not found",
-  "details": [{
-    "@type": "type.googleapis.com/google.rpc.ErrorInfo",
-    "reason": "TASK_NOT_FOUND",
-    "domain": "a2a-protocol.org",
-    "metadata": {"taskId": "t-1", "timestamp": "2026-08-01T10:30:00.000Z"}
-  }]
-}}
+{
+  "error": {
+    "code": 404,
+    "status": "NOT_FOUND",
+    "message": "Task not found",
+    "details": [
+      {
+        "@type": "type.googleapis.com/google.rpc.ErrorInfo",
+        "reason": "TASK_NOT_FOUND",
+        "domain": "a2a-protocol.org",
+        "metadata": {
+          "taskId": "t-1",
+          "timestamp": "2026-08-01T10:30:00.000Z"
+        }
+      }
+    ]
+  }
+}
 ----
 
 `status` and the `ErrorInfo` `reason` are what tell two A2A errors sharing an HTTP status apart - `TaskNotCancelableError`

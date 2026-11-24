@@ -108,7 +108,23 @@ For example, JSON configuration can enable only interaction alerts:
 
 [source,json]
 ----
-{"yca":{"notifications":{"enabled":true,"on":{"event":{"turnEnd":false,"approval":true},"tools":{"ask_user":true,"btw":true}}}}}
+{
+  "yca": {
+    "notifications": {
+      "enabled": true,
+      "on": {
+        "event": {
+          "turnEnd": false,
+          "approval": true
+        },
+        "tools": {
+          "ask_user": true,
+          "btw": true
+        }
+      }
+    }
+  }
+}
 ----
 
 Each notification consults exactly one switch in addition to `enabled`; there are no combined filters or overrides.

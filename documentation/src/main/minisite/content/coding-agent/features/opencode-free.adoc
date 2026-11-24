@@ -19,14 +19,16 @@ Choose a currently available model; names and availability can change.
 ----
 {
   "provider": {
-    "providers": [{
-      "id": "opencode",
-      "api": "OPENCODE_FREE",
-      "baseUrl": "https://opencode.ai/inference/openai/v1/chat/completions",
-      "model": "big-pickle",
-      "maxConcurrent": 1,
-      "timeoutSeconds": 45
-    }]
+    "providers": [
+      {
+        "id": "opencode",
+        "api": "OPENCODE_FREE",
+        "baseUrl": "https://opencode.ai/inference/openai/v1/chat/completions",
+        "model": "big-pickle",
+        "maxConcurrent": 1,
+        "timeoutSeconds": 45
+      }
+    ]
   }
 }
 ----

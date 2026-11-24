@@ -40,8 +40,17 @@ registered last so any xref:executors.adoc[executor] of yours wins - picks:
   "message": {
     "messageId": "m-1",
     "role": "ROLE_USER",
-    "parts": [{"text": "a report please"}],
-    "metadata": {"skillId": "report/build", "arguments": {"city": "Paris"}}
+    "parts": [
+      {
+        "text": "a report please"
+      }
+    ],
+    "metadata": {
+      "skillId": "report/build",
+      "arguments": {
+        "city": "Paris"
+      }
+    }
   }
 }
 ----
@@ -122,10 +131,21 @@ public Artifact build(@JsonRpcParam(required = true) final String city) {
 
 [source,json]
 ----
-{"task": {"status": {
-  "state": "TASK_STATE_FAILED",
-  "message": {"role": "ROLE_AGENT", "parts": [{"text": "city should not be blank"}]}
-}}}
+{
+  "task": {
+    "status": {
+      "state": "TASK_STATE_FAILED",
+      "message": {
+        "role": "ROLE_AGENT",
+        "parts": [
+          {
+            "text": "city should not be blank"
+          }
+        ]
+      }
+    }
+  }
+}
 ----
 
 Only *invalid calls* are protocol errors instead: an unknown skill, a missing argument, an unsupported output mode. The

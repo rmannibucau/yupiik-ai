@@ -19,20 +19,45 @@ curl http://localhost:8080/.well-known/agent-card.json
   "description": "Builds reports about cities.",
   "version": "1.0.0",
   "supportedInterfaces": [
-    {"url": "https://agent.example.com/a2a", "protocolBinding": "JSONRPC", "protocolVersion": "1.0"},
-    {"url": "https://agent.example.com/a2a/v1", "protocolBinding": "HTTP+JSON", "protocolVersion": "1.0"}
+    {
+      "url": "https://agent.example.com/a2a",
+      "protocolBinding": "JSONRPC",
+      "protocolVersion": "1.0"
+    },
+    {
+      "url": "https://agent.example.com/a2a/v1",
+      "protocolBinding": "HTTP+JSON",
+      "protocolVersion": "1.0"
+    }
   ],
-  "capabilities": {"streaming": true, "pushNotifications": true, "extendedAgentCard": false},
-  "defaultInputModes": ["text/plain", "application/json"],
-  "defaultOutputModes": ["text/plain", "application/json"],
+  "capabilities": {
+    "streaming": true,
+    "pushNotifications": true,
+    "extendedAgentCard": false
+  },
+  "defaultInputModes": [
+    "text/plain",
+    "application/json"
+  ],
+  "defaultOutputModes": [
+    "text/plain",
+    "application/json"
+  ],
   "skills": [
     {
       "id": "report/build",
       "name": "report/build",
       "description": "Builds a report about a city.",
-      "tags": ["report", "city"],
-      "examples": ["Build a report about Paris."],
-      "outputModes": ["text/plain"]
+      "tags": [
+        "report",
+        "city"
+      ],
+      "examples": [
+        "Build a report about Paris."
+      ],
+      "outputModes": [
+        "text/plain"
+      ]
     }
   ]
 }
@@ -161,10 +186,12 @@ java -Dfusion.a2a.signatureKey=/etc/agent/agent-key.pem \
 ----
 {
   "name": "report-agent",
-  "signatures": [{
-    "protected": "eyJhbGciOiJFUzI1NiIsInR5cCI6IkpPU0UiLCJraWQiOiIyMDI2LTA4In0",
-    "signature": "MEUCIQD..."
-  }]
+  "signatures": [
+    {
+      "protected": "eyJhbGciOiJFUzI1NiIsInR5cCI6IkpPU0UiLCJraWQiOiIyMDI2LTA4In0",
+      "signature": "MEUCIQD..."
+    }
+  ]
 }
 ----
 

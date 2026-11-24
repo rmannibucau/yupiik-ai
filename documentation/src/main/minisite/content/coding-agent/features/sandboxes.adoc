@@ -629,7 +629,11 @@ Wire it into yca's tool registry like any stdio server
       {
         "name": "agentfs",
         "command": "agentfs",
-        "args": ["serve", "mcp", "doc-fixes"]
+        "args": [
+          "serve",
+          "mcp",
+          "doc-fixes"
+        ]
       }
     ]
   }
