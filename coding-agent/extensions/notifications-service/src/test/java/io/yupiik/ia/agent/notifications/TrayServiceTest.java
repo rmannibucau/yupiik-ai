@@ -153,6 +153,24 @@ class TrayServiceTest {
     }
 
     @Test
+    void dismissingOneMenuRowPreservesOtherRemindersInTheSameSession() throws Exception {
+        final var state = new UnreadNotifications();
+        final var selected = new Notice(1, "one", "Selected", "approval_required", "main", 1);
+        final var other = new Notice(1, "one", "Other source", "input_required", "btw", 2);
+        state.publish(selected);
+        state.publish(other);
+        final var tray = new ScriptedTray(current -> {
+            if (current.polls == 2) {
+                current.dismissals = List.of(selected);
+            }
+        });
+        run(state, tray);
+        assertEquals(List.of(other), state.read());
+        assertEquals(List.of(List.of(other, selected), List.of(other)), tray.snapshots);
+        assertEquals(List.of("YCA - 1 unread session", "YCA - 1 unread session"), tray.titles);
+    }
+
+    @Test
     void closingDetailsWithoutDismissalLeavesEveryNoticeUnread() throws Exception {
         final var state = new UnreadNotifications();
         final var notice = new Notice(1, "one", "Close details", "input_required", "main", 1);

@@ -215,6 +215,8 @@ A successful publisher exits with code zero; check that the tray tooltip shows `
 Open the tray menu and select the reminder preview to inspect its details, including kind, full title, session, source and timestamp.
 Choose *Close* and verify that the reminder remains unread; reopen it and choose *Dismiss* to remove just that reminder.
 Publish reminders for two different sessions and verify that dismissing one leaves the other unread.
+Repeat with the *Dismiss* row immediately below a preview: it must remove only that reminder without opening details, and the native menu closes normally.
+Check the paired preview/Dismiss rows and their icons where supported; desktop tray hosts may hide menu icons.
 For a concurrent-update check, leave an older reminder's details open, publish a newer event for the same session/source, then dismiss the older reminder: the newer one must remain unread.
 Repeat with a long title containing line breaks and Unicode characters to check that the menu preview stays on one line, uses at most 60 Unicode code points with a trailing `...` when shortened, and leaves full text available in details.
 Choose *Acknowledge unread* to clear the remaining displayed synthetic reminders.
@@ -257,13 +259,26 @@ The loopback protocol is not encrypted and is not intended for remote forwarding
 [options="header"]
 |===
 |Platform |Backend |Runtime requirements
-|Linux, 64-bit |GTK3 and Ayatana AppIndicator (legacy AppIndicator fallback) through FFM |Graphical session, GTK3, `libayatana-appindicator3.so.1` or `libappindicator3.so.1`, session D-Bus and a tray/StatusNotifier host.
+|Linux, 64-bit |Ayatana GLib/Gio menus/actions, with GTK3 AppIndicator fallback, through FFM |Graphical session, GTK3 for details windows, `libayatana-appindicator-glib.so.2`, `libayatana-appindicator3.so.1` or `libappindicator3.so.1`, session D-Bus and a compatible tray/StatusNotifier host.
 |Windows, 64-bit |Win32 `Shell_NotifyIconW` through FFM |Interactive desktop and Explorer notification area; no extra Java GUI runtime.
 |macOS, 64-bit |AppKit `NSStatusItem` through the Objective-C runtime and FFM |Logged-in desktop; JVM launcher must use `-XstartOnFirstThread`.
 |===
 
-On Debian/Ubuntu, Linux libraries are typically provided by `libgtk-3-0t64` (older releases: `libgtk-3-0`) and `libayatana-appindicator3-1`.
-Package names vary by distribution.
+On Linux, `notification-service-linux-backend` defaults to `auto`.
+The automatic loader prefers `libayatana-appindicator-glib.so.2` with Gio menus/actions, then tries `libayatana-appindicator3.so.1`, then `libappindicator3.so.1` when a library is absent or its required ABI is incomplete.
+This is library/ABI fallback, not desktop-host negotiation: the GLib backend requires the tray host to support `org.gtk.Menus` and `org.gtk.Actions`.
+An installed GLib library does not prove that the desktop host supports these protocols, and there is no reliable host negotiation.
+If the icon appears but its menu does not work, force the legacy GTK3/dbusmenu backend with `serve --notification-service-linux-backend gtk3`, or set `NOTIFICATION_SERVICE_LINUX_BACKEND=gtk3` for the server.
+To require the modern backend instead, use `serve --notification-service-linux-backend glib` or `NOTIFICATION_SERVICE_LINUX_BACKEND=glib`.
+Values are case-insensitive (`auto`, `glib` and `gtk3`); explicit selections do not fall back to the other backend family.
+Backend selection is fixed after AppIndicator initialization for the process lifetime; switching implementations requires a service restart because their native GObject types conflict.
+For systemd, append the option to `ExecStart`, then reload the units and restart the service.
+GTK3 is still needed for reminder details windows even with the modern GLib backend.
+
+On Debian/Ubuntu, GTK3 is typically provided by `libgtk-3-0t64` (older releases: `libgtk-3-0`), and the legacy Ayatana backend by `libayatana-appindicator3-1`.
+Package names and GLib backend availability vary by distribution.
+NOTE: Recent legacy Ayatana builds warn that `libayatana-appindicator` is deprecated in favor of `libayatana-appindicator-glib`.
+Automatic fallback does not suppress these legacy warnings; the warning alone does not indicate a failed tray operation, so check menu behavior separately.
 GNOME normally requires a separately installed/enabled AppIndicator extension; stock GNOME without a host does not display these icons.
 SSH/headless sessions are not supported for `serve`, although publishing needs no desktop libraries.
 Windows may place the icon in its overflow area, and macOS may hide menu-bar items.
@@ -301,6 +316,9 @@ A prompt resolved in YCA does not retract its reminder; a later event for that s
 The menu acknowledges the versions last displayed, preserving newer activity which arrived concurrently.
 The tooltip is count-only: `YCA - no unread activity`, `YCA - 1 unread session` or `YCA - N unread sessions`, counting distinct sessions rather than individual reminders.
 Each reminder has a sanitized, single-line menu preview combining its kind and title (or session when the title is blank), limited to 60 Unicode code points including a trailing `...` when truncated.
+Each preview is followed immediately by its own *Dismiss* menu row, removing only that exact reminder version without opening a details window.
+The native menu closes normally after selecting a row; reopen it to act on another reminder.
+Native menu icons are used where supported, with textual markers on Windows; Linux tray hosts may suppress icons.
 Selecting a preview opens plain-text details with the full kind, title, session, source and timestamp, without preview truncation.
 Details are wrapped inside a bounded native window with scrolling for longer content.
 Full text means the received notification: session and title fields are limited to 256 UTF-16 code units, and the publisher normalizes whitespace before sending them.

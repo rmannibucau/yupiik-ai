@@ -153,6 +153,10 @@ public final class MacTray implements NativeTray {
             cocoa.addAction(targetClass, "quitTray:", lookup.findStatic(MacTray.class, "quitTray", ACTION_TYPE));
             cocoa.addAction(targetClass, "showNotice:", lookup.findStatic(MacTray.class, "showNotice", ACTION_TYPE));
             cocoa.addAction(
+                    targetClass,
+                    "dismissMenuNotice:",
+                    lookup.findStatic(MacTray.class, "dismissMenuNotice", ACTION_TYPE));
+            cocoa.addAction(
                     targetClass, "dismissNotice:", lookup.findStatic(MacTray.class, "dismissNotice", ACTION_TYPE));
             cocoa.addAction(targetClass, "closeNotice:", lookup.findStatic(MacTray.class, "closeNotice", ACTION_TYPE));
         } catch (final NoSuchMethodException | IllegalAccessException failure) {
@@ -224,7 +228,33 @@ public final class MacTray implements NativeTray {
             for (final var notice : snapshot) {
                 final var item = addMenuItem(preview(notice), "showNotice:", index++);
                 noticeItems.put(item.address(), notice);
+                setMenuItemImage(
+                        item,
+                        switch (notice.type()) {
+                            case "approval_required" -> "NSLockLockedTemplate";
+                            case "input_required" -> "NSUserTemplate";
+                            default -> "NSInfo";
+                        });
+                final var dismissItem = addMenuItem("Dismiss", "dismissMenuNotice:", index++);
+                noticeItems.put(dismissItem.address(), notice);
+                setMenuItemImage(dismissItem, "NSStopProgressTemplate");
             }
+        }
+    }
+
+    private void setMenuItemImage(final MemorySegment item, final String name) {
+        final var named =
+                (MemorySegment) cocoa.send(OBJECT_ARGUMENT, cocoa.type("NSImage"), "imageNamed:", cocoa.string(name));
+        if (named.address() == 0) {
+            return; // Keep the native text action usable if a stock image is unavailable.
+        }
+        // Never resize or release AppKit's shared named image. The menu item retains our sized copy.
+        final var icon = cocoa.object(named, "copy");
+        try (final var geometry = Arena.ofConfined()) {
+            cocoa.send(VOID_SIZE, icon, "setSize:", size(geometry, 16, 16));
+            cocoa.send(VOID_ARGUMENT, item, "setImage:", icon);
+        } finally {
+            cocoa.send(VOID, icon, "release");
         }
     }
 
@@ -641,6 +671,21 @@ public final class MacTray implements NativeTray {
             final var tray = TARGETS.get(self.address());
             if (tray != null && !tray.quitRequested) {
                 tray.requestedNotice = tray.noticeItems.get(sender.address());
+            }
+        } catch (final Throwable ignored) {
+            // Keep the native callback boundary exception-free.
+        }
+    }
+
+    private static void dismissMenuNotice(
+            final MemorySegment self, final MemorySegment selector, final MemorySegment sender) {
+        try {
+            final var tray = TARGETS.get(self.address());
+            if (tray != null && !tray.quitRequested) {
+                final var notice = tray.noticeItems.get(sender.address());
+                if (notice != null) {
+                    tray.dismissed.add(notice);
+                }
             }
         } catch (final Throwable ignored) {
             // Keep the native callback boundary exception-free.

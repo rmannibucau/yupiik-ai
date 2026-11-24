@@ -34,7 +34,7 @@ public class TrayService {
         final var unread = new UnreadNotifications();
         try (final var icon = new AppIcon();
                 final var listener = endpoint.listen(configuration, unread)) {
-            final var tray = tray(icon);
+            final var tray = tray(icon, configuration);
             System.out.println("YCA notifications tray initialized on loopback port " + listener.port()
                     + ". Visibility depends on the desktop tray host.");
             run(unread, tray, configuration.blink());
@@ -113,10 +113,10 @@ public class TrayService {
         return NotificationPresentation.summary(notices);
     }
 
-    private NativeTray tray(final AppIcon icon) throws IOException {
+    private NativeTray tray(final AppIcon icon, final ServiceConfiguration configuration) throws IOException {
         final var os = System.getProperty("os.name", "").toLowerCase(Locale.ROOT);
         if (os.contains("linux")) {
-            return new LinuxTray(icon.png());
+            return new LinuxTray(icon.png(), configuration.linuxBackend());
         }
         if (os.contains("windows")) {
             return new WindowsTray(icon.ico());

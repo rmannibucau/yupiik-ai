@@ -24,16 +24,18 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.locks.ReentrantLock;
 
-/** GTK3/AppIndicator integration; no AWT, X11 calls or Java native bridge dependency. */
+/** GTK3 details with GLib/Gio or legacy GTK AppIndicator menus; no AWT or JNI bridge. */
 public final class LinuxTray implements NativeTray {
     private static final FunctionDescriptor INT_POINTER_POINTER = FunctionDescriptor.of(JAVA_INT, ADDRESS, ADDRESS);
     private static final FunctionDescriptor POINTER_POINTER_POINTER_INT =
             FunctionDescriptor.of(ADDRESS, ADDRESS, ADDRESS, JAVA_INT);
     private static final FunctionDescriptor POINTER = FunctionDescriptor.of(ADDRESS);
     private static final FunctionDescriptor POINTER_POINTER = FunctionDescriptor.of(ADDRESS, ADDRESS);
+    private static final FunctionDescriptor POINTER_POINTER_INT = FunctionDescriptor.of(ADDRESS, ADDRESS, JAVA_INT);
     private static final FunctionDescriptor POINTER_INT = FunctionDescriptor.of(ADDRESS, JAVA_INT);
     private static final FunctionDescriptor VOID_POINTER_INT = FunctionDescriptor.ofVoid(ADDRESS, JAVA_INT);
     private static final FunctionDescriptor VOID_POINTER_POINTER = FunctionDescriptor.ofVoid(ADDRESS, ADDRESS);
@@ -60,6 +62,7 @@ public final class LinuxTray implements NativeTray {
     private static final MethodHandle QUIT;
     private static final MethodHandle TICK;
     private static final MethodHandle OPEN;
+    private static final MethodHandle DISMISS;
     private static final MethodHandle RESPONSE;
 
     static {
@@ -69,6 +72,7 @@ public final class LinuxTray implements NativeTray {
             QUIT = lookup.findStatic(LinuxTray.class, "quit", ACTION_TYPE);
             TICK = lookup.findStatic(LinuxTray.class, "tick", TICK_TYPE);
             OPEN = lookup.findStatic(LinuxTray.class, "open", ACTION_TYPE);
+            DISMISS = lookup.findStatic(LinuxTray.class, "dismiss", ACTION_TYPE);
             RESPONSE = lookup.findStatic(LinuxTray.class, "response", VOID_POINTER_INT_POINTER.toMethodType());
         } catch (final ReflectiveOperationException e) {
             throw new ExceptionInInitializerError(e);
@@ -76,12 +80,21 @@ public final class LinuxTray implements NativeTray {
     }
 
     private static LinuxTray active;
+    // GObject retains the registered AppIndicator GType and its native code pointers for the process lifetime.
+    // Keep its library loaded, and never register the incompatible implementation in the same process.
+    private static String initializedBackend;
+    private static SymbolLookup initializedLibrary;
+    private static Arena initializedLibraryArena;
     private final Arena arena = Arena.ofShared();
     private final Linker linker = Linker.nativeLinker();
     private final Map<String, MethodHandle> functions = new HashMap<>();
     private final ReentrantLock lifecycleLock = new ReentrantLock();
     private SymbolLookup gtk;
     private SymbolLookup indicatorLibrary;
+    private Arena indicatorArena;
+    private String indicatorBackend;
+    private boolean gioIndicator;
+    private GioNotificationMenu gioMenu;
     private MethodHandle wakeup;
     private MemorySegment context = MemorySegment.NULL;
     private MemorySegment tickStub = MemorySegment.NULL;
@@ -91,6 +104,7 @@ public final class LinuxTray implements NativeTray {
     private MemorySegment menu = MemorySegment.NULL;
     private MemorySegment heading = MemorySegment.NULL;
     private MemorySegment openStub = MemorySegment.NULL;
+    private MemorySegment dismissStub = MemorySegment.NULL;
     private MemorySegment responseStub = MemorySegment.NULL;
     private MemorySegment dialog = MemorySegment.NULL;
     private final Map<Long, Notice> menuNotices = new HashMap<>();
@@ -105,14 +119,14 @@ public final class LinuxTray implements NativeTray {
     private boolean closed;
 
     public LinuxTray(final Path icon) {
+        this(icon, Backend.AUTO);
+    }
+
+    public LinuxTray(final Path icon, final Backend backend) {
         iconPath = icon.toAbsolutePath().toString();
         try {
             gtk = SymbolLookup.libraryLookup("libgtk-3.so.0", arena);
-            try {
-                indicatorLibrary = SymbolLookup.libraryLookup("libayatana-appindicator3.so.1", arena);
-            } catch (final IllegalArgumentException missingAyatana) {
-                indicatorLibrary = SymbolLookup.libraryLookup("libappindicator3.so.1", arena);
-            }
+            loadIndicator(backend);
             if ((int) call(gtk, "gtk_init_check", INT_POINTER_POINTER, MemorySegment.NULL, MemorySegment.NULL) == 0) {
                 throw new IllegalStateException(
                         "GTK cannot connect to a desktop display; run serve in the graphical session.");
@@ -130,7 +144,9 @@ public final class LinuxTray implements NativeTray {
                     VOID_POINTER);
             tickStub = linker.upcallStub(TICK, INT_POINTER, arena);
             openStub = linker.upcallStub(OPEN, VOID_POINTER_POINTER, arena);
+            dismissStub = linker.upcallStub(DISMISS, VOID_POINTER_POINTER, arena);
             responseStub = linker.upcallStub(RESPONSE, VOID_POINTER_INT_POINTER, arena);
+            retainIndicatorLibrary();
             indicator = (MemorySegment) call(
                     indicatorLibrary,
                     "app_indicator_new",
@@ -141,20 +157,22 @@ public final class LinuxTray implements NativeTray {
             if (indicator.address() == 0) {
                 throw new IllegalStateException("AppIndicator creation failed.");
             }
-            menu = (MemorySegment) call(gtk, "gtk_menu_new", POINTER);
-            call(gtk, "g_object_ref_sink", POINTER_POINTER, menu);
-            heading = item("YCA - no unread activity", null);
-            call(gtk, "gtk_widget_set_sensitive", VOID_POINTER_INT, heading, 0);
-            item("Acknowledge unread activity (not approval)", ACKNOWLEDGE);
-            item("Quit notifications service", QUIT);
-            call(gtk, "gtk_widget_show_all", VOID_POINTER, menu);
-            call(indicatorLibrary, "app_indicator_set_menu", VOID_POINTER_POINTER, indicator, menu);
-            call(
-                    indicatorLibrary,
-                    "app_indicator_set_attention_icon",
-                    VOID_POINTER_POINTER,
-                    indicator,
-                    arena.allocateFrom("dialog-warning"));
+            if (gioIndicator) {
+                gioMenu = new GioNotificationMenu(
+                        notice -> requested = notice, dismissed::add, () -> acknowledged = true, () -> closed = true);
+                call(indicatorLibrary, "app_indicator_set_menu", VOID_POINTER_POINTER, indicator, gioMenu.menu());
+                call(indicatorLibrary, "app_indicator_set_actions", VOID_POINTER_POINTER, indicator, gioMenu.actions());
+            } else {
+                menu = (MemorySegment) call(gtk, "gtk_menu_new", POINTER);
+                call(gtk, "g_object_ref_sink", POINTER_POINTER, menu);
+                heading = item("YCA - no unread activity", null);
+                call(gtk, "gtk_widget_set_sensitive", VOID_POINTER_INT, heading, 0);
+                item("Acknowledge unread activity (not approval)", ACKNOWLEDGE);
+                item("Quit notifications service", QUIT);
+                call(gtk, "gtk_widget_show_all", VOID_POINTER, menu);
+                call(indicatorLibrary, "app_indicator_set_menu", VOID_POINTER_POINTER, indicator, menu);
+            }
+            setIcon("app_indicator_set_attention_icon", "dialog-warning", arena);
             call(indicatorLibrary, "app_indicator_set_status", VOID_POINTER_INT, indicator, 1);
         } catch (final RuntimeException | Error failure) {
             try {
@@ -166,8 +184,103 @@ public final class LinuxTray implements NativeTray {
         }
     }
 
+    private void loadIndicator(final Backend backend) {
+        final var candidates =
+                switch (backend) {
+                    case AUTO ->
+                        List.of(
+                                "libayatana-appindicator-glib.so.2",
+                                "libayatana-appindicator3.so.1",
+                                "libappindicator3.so.1");
+                    case GLIB -> List.of("libayatana-appindicator-glib.so.2");
+                    case GTK3 -> List.of("libayatana-appindicator3.so.1", "libappindicator3.so.1");
+                };
+        if (initializedBackend != null) {
+            if (!candidates.contains(initializedBackend)) {
+                throw new IllegalStateException(
+                        "Changing the initialized Linux AppIndicator backend requires a process restart.");
+            }
+            indicatorLibrary = initializedLibrary;
+            indicatorBackend = initializedBackend;
+            gioIndicator = initializedBackend.equals("libayatana-appindicator-glib.so.2");
+            return;
+        }
+        final var unavailable = new ArrayList<String>();
+        for (final var name : candidates) {
+            final var candidateArena = Arena.ofShared();
+            boolean selected = false;
+            try {
+                final SymbolLookup candidate;
+                try {
+                    candidate = SymbolLookup.libraryLookup(name, candidateArena);
+                } catch (final IllegalArgumentException missing) {
+                    unavailable.add(name + " cannot be loaded");
+                    continue;
+                }
+                final var modern = name.equals("libayatana-appindicator-glib.so.2");
+                final var required = new ArrayList<>(List.of(
+                        "app_indicator_new",
+                        "app_indicator_set_menu",
+                        "app_indicator_set_status",
+                        "app_indicator_set_title",
+                        "app_indicator_set_icon",
+                        "app_indicator_set_attention_icon"));
+                if (modern) {
+                    required.add("app_indicator_set_actions");
+                    required.add("app_indicator_set_tooltip");
+                }
+                final var missing = required.stream()
+                        .filter(symbol -> candidate.find(symbol).isEmpty())
+                        .toList();
+                if (!missing.isEmpty()) {
+                    unavailable.add(name + " is missing symbols: " + String.join(", ", missing));
+                    continue;
+                }
+                indicatorLibrary = candidate;
+                indicatorBackend = name;
+                indicatorArena = candidateArena;
+                gioIndicator = modern;
+                selected = true;
+                return;
+            } finally {
+                if (!selected) {
+                    candidateArena.close();
+                }
+            }
+        }
+        throw new IllegalStateException("No usable Linux AppIndicator backend: " + String.join(" AND ", unavailable));
+    }
+
+    private void retainIndicatorLibrary() {
+        if (initializedBackend == null) {
+            initializedBackend = indicatorBackend;
+            initializedLibrary = indicatorLibrary;
+            initializedLibraryArena = indicatorArena;
+            indicatorArena = null;
+        }
+    }
+
+    private void setIcon(final String function, final String icon, final Arena strings) {
+        if (gioIndicator) {
+            // Unlike the legacy ABI, GLib requires the third icon-description argument.
+            call(
+                    indicatorLibrary,
+                    function,
+                    FunctionDescriptor.ofVoid(ADDRESS, ADDRESS, ADDRESS),
+                    indicator,
+                    strings.allocateFrom(icon),
+                    MemorySegment.NULL);
+        } else {
+            call(indicatorLibrary, function, VOID_POINTER_POINTER, indicator, strings.allocateFrom(icon));
+        }
+    }
+
     @Override
     public void updateNotices(final List<Notice> notices) {
+        if (gioMenu != null) {
+            gioMenu.updateNotices(notices);
+            return;
+        }
         for (final var widget : noticeItems) {
             call(gtk, "gtk_widget_destroy", VOID_POINTER, widget);
         }
@@ -176,15 +289,14 @@ public final class LinuxTray implements NativeTray {
         try (final var strings = Arena.ofConfined()) {
             int position = 1;
             for (final var notice : notices) {
-                final var widget = (MemorySegment) call(
-                        gtk,
-                        "gtk_menu_item_new_with_label",
-                        POINTER_POINTER,
-                        strings.allocateFrom(NotificationPresentation.preview(notice)));
-                call(gtk, "gtk_menu_shell_insert", VOID_POINTER_POINTER_INT, menu, widget, position++);
-                noticeItems.add(widget);
-                menuNotices.put(widget.address(), notice);
-                connect(widget, "activate", openStub, strings);
+                final var icon =
+                        switch (notice.type()) {
+                            case "approval_required" -> "dialog-warning";
+                            case "input_required" -> "dialog-question";
+                            default -> "emblem-ok";
+                        };
+                noticeItem(notice, NotificationPresentation.preview(notice), icon, openStub, position++, strings);
+                noticeItem(notice, "Dismiss", "edit-clear", dismissStub, position++, strings);
             }
         }
         call(gtk, "gtk_widget_show_all", VOID_POINTER, menu);
@@ -197,22 +309,49 @@ public final class LinuxTray implements NativeTray {
         return result;
     }
 
+    private void noticeItem(
+            final Notice notice,
+            final String text,
+            final String icon,
+            final MemorySegment callback,
+            final int position,
+            final Arena strings) {
+        // GTK3 exports these icons through AppIndicator; the tray host can still hide them.
+        final var widget = (MemorySegment)
+                call(gtk, "gtk_image_menu_item_new_with_label", POINTER_POINTER, strings.allocateFrom(text));
+        final var image = (MemorySegment)
+                call(gtk, "gtk_image_new_from_icon_name", POINTER_POINTER_INT, strings.allocateFrom(icon), 1);
+        call(gtk, "gtk_image_menu_item_set_image", VOID_POINTER_POINTER, widget, image);
+        call(gtk, "gtk_image_menu_item_set_always_show_image", VOID_POINTER_INT, widget, 1);
+        call(gtk, "gtk_menu_shell_insert", VOID_POINTER_POINTER_INT, menu, widget, position);
+        noticeItems.add(widget);
+        menuNotices.put(widget.address(), notice);
+        connect(widget, "activate", callback, strings);
+    }
+
     @Override
     public void update(final String tooltip, final boolean attention) {
         try (final var strings = Arena.ofConfined()) {
-            call(gtk, "gtk_menu_item_set_label", VOID_POINTER_POINTER, heading, strings.allocateFrom(tooltip));
+            if (gioMenu != null) {
+                gioMenu.updateSummary(tooltip);
+                call(
+                        indicatorLibrary,
+                        "app_indicator_set_tooltip",
+                        VOID_POINTER_POINTER_POINTER_POINTER,
+                        indicator,
+                        MemorySegment.NULL,
+                        strings.allocateFrom(tooltip),
+                        strings.allocateFrom(""));
+            } else {
+                call(gtk, "gtk_menu_item_set_label", VOID_POINTER_POINTER, heading, strings.allocateFrom(tooltip));
+            }
             call(
                     indicatorLibrary,
                     "app_indicator_set_title",
                     VOID_POINTER_POINTER,
                     indicator,
                     strings.allocateFrom(tooltip));
-            call(
-                    indicatorLibrary,
-                    "app_indicator_set_icon",
-                    VOID_POINTER_POINTER,
-                    indicator,
-                    strings.allocateFrom(attention ? "dialog-warning" : iconPath));
+            setIcon("app_indicator_set_icon", attention ? "dialog-warning" : iconPath, strings);
             call(indicatorLibrary, "app_indicator_set_status", VOID_POINTER_INT, indicator, attention ? 2 : 1);
         }
     }
@@ -285,6 +424,9 @@ public final class LinuxTray implements NativeTray {
 
     private void checkCallback() {
         rethrow(callbackFailure);
+        if (gioMenu != null) {
+            gioMenu.checkCallback();
+        }
     }
 
     private void connect(
@@ -401,12 +543,27 @@ public final class LinuxTray implements NativeTray {
                     });
                 }
             }
+            if (indicator.address() == 0 && gioMenu != null) {
+                failure = cleanup(failure, () -> {
+                    gioMenu.close();
+                    gioMenu = null;
+                });
+            }
             // Keep callback stubs and the singleton alive while native callback objects may survive.
             if (indicator.address() == 0
                     && menu.address() == 0
+                    && gioMenu == null
                     && timeoutSource.address() == 0
                     && dialog.address() == 0) {
-                failure = cleanup(failure, arena::close);
+                if (indicatorArena != null) {
+                    failure = cleanup(failure, () -> {
+                        indicatorArena.close();
+                        indicatorArena = null;
+                    });
+                }
+                if (indicatorArena == null) {
+                    failure = cleanup(failure, arena::close);
+                }
                 if (active == this && !arena.scope().isAlive()) {
                     active = null;
                 }
@@ -504,6 +661,19 @@ public final class LinuxTray implements NativeTray {
         }
     }
 
+    private static void dismiss(final MemorySegment widget, final MemorySegment data) {
+        if (active != null) {
+            try {
+                final var notice = active.menuNotices.get(widget.address());
+                if (notice != null) {
+                    active.dismissed.add(notice);
+                }
+            } catch (final RuntimeException | Error failure) {
+                active.callbackFailure = failure;
+            }
+        }
+    }
+
     private static void quit(final MemorySegment widget, final MemorySegment data) {
         if (active != null) {
             active.closed = true;
@@ -512,6 +682,25 @@ public final class LinuxTray implements NativeTray {
 
     private static int tick(final MemorySegment data) {
         return 0;
+    }
+
+    /** Native menu ABI selection; AUTO prefers GLib/Gio and falls back to legacy GTK3 libraries. */
+    public enum Backend {
+        AUTO,
+        GLIB,
+        GTK3;
+
+        /** Fusion configuration converter; accepts CLI spelling and enum names without native initialization. */
+        public static Backend fromConfigurationString(final String value) {
+            return switch (value == null ? "" : value.toUpperCase(Locale.ROOT)) {
+                case "AUTO" -> AUTO;
+                case "GLIB" -> GLIB;
+                case "GTK3" -> GTK3;
+                default ->
+                    throw new IllegalArgumentException(
+                            "notification-service-linux-backend must be one of: auto, glib, gtk3.");
+            };
+        }
     }
 
     private Object call(

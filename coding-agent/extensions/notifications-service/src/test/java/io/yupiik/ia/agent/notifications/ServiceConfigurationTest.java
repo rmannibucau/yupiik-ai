@@ -10,13 +10,75 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
+import io.yupiik.fusion.framework.api.ConfiguringContainer;
+import io.yupiik.fusion.framework.api.RuntimeContainer;
+import io.yupiik.fusion.framework.api.configuration.Configuration;
+import io.yupiik.fusion.framework.api.container.FusionBean;
+import io.yupiik.fusion.framework.api.container.FusionModule;
+import io.yupiik.fusion.framework.api.container.bean.ProvidedInstanceBean;
+import io.yupiik.fusion.framework.api.scope.DefaultScoped;
+import io.yupiik.ia.agent.notifications.tray.LinuxTray.Backend;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Optional;
+import java.util.function.BiPredicate;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 class ServiceConfigurationTest {
+    @Test
+    void defaultsToAutomaticLinuxBackend() {
+        assertEquals(Backend.AUTO, new ServiceConfiguration(0, null, true, null).linuxBackend());
+        try (final var container = ConfiguringContainer.of()
+                        .register(new ProvidedInstanceBean<>(
+                                DefaultScoped.class, Configuration.class, () -> key -> Optional.empty()))
+                        .register(new FusionModule() {
+                            @Override
+                            public BiPredicate<RuntimeContainer, FusionBean<?>> beanFilter() {
+                                return (container, bean) -> bean.type() == ServiceConfiguration.class;
+                            }
+                        })
+                        .start();
+                final var configuration = container.lookup(ServiceConfiguration.class)) {
+            assertEquals(Backend.AUTO, configuration.instance().linuxBackend());
+            assertEquals(11026, configuration.instance().port());
+        }
+    }
+
+    @Test
+    void acceptsSupportedLinuxBackends() {
+        for (final var backend : Backend.values()) {
+            assertEquals(backend, new ServiceConfiguration(0, null, true, null, backend).linuxBackend());
+        }
+    }
+
+    @Test
+    void rejectsUnsupportedLinuxBackends() {
+        for (final var backend : new String[] {null, "", "auto ", "gtk4"}) {
+            final var error =
+                    assertThrows(IllegalArgumentException.class, () -> Backend.fromConfigurationString(backend));
+            assertEquals("notification-service-linux-backend must be one of: auto, glib, gtk3.", error.getMessage());
+        }
+    }
+
+    @Test
+    void parsesCliSpellingAndEnumNames() {
+        assertEquals(Backend.AUTO, Backend.fromConfigurationString("auto"));
+        assertEquals(Backend.GLIB, Backend.fromConfigurationString("glib"));
+        assertEquals(Backend.GTK3, Backend.fromConfigurationString("gtk3"));
+        for (final var backend : Backend.values()) {
+            assertEquals(backend, Backend.fromConfigurationString(backend.name()));
+        }
+    }
+
+    @Test
+    void rejectsNullBackend() {
+        final var error =
+                assertThrows(IllegalArgumentException.class, () -> new ServiceConfiguration(0, null, true, null, null));
+        assertEquals("notification-service-linux-backend must not be null.", error.getMessage());
+    }
+
     @Test
     void loadsUtf8AndStripsSurroundingWhitespace(@TempDir final Path directory) throws Exception {
         final var file =

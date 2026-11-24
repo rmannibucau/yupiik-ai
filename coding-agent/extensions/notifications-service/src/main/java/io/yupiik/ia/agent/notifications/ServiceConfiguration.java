@@ -8,6 +8,7 @@ package io.yupiik.ia.agent.notifications;
 
 import io.yupiik.fusion.framework.build.api.configuration.Property;
 import io.yupiik.fusion.framework.build.api.configuration.RootConfiguration;
+import io.yupiik.ia.agent.notifications.tray.LinuxTray.Backend;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -28,8 +29,23 @@ public record ServiceConfiguration(
         @Property(
                 value = "token-file",
                 documentation = "Optional UTF-8 file containing the shared authentication token.")
-        String tokenFile) {
+        String tokenFile,
+
+        @Property(
+                value = "linux-backend",
+                defaultValue = "io.yupiik.ia.agent.notifications.tray.LinuxTray.Backend.AUTO",
+                documentation = "Linux tray backend: auto prefers GLib/Gio then GTK3 on absent or incomplete ABI; "
+                        + "glib requires a host supporting org.gtk.Menus/org.gtk.Actions; gtk3 forces legacy menus. "
+                        + "GTK3 is still required for details windows.")
+        Backend linuxBackend) {
+    public ServiceConfiguration(final int port, final String token, final boolean blink, final String tokenFile) {
+        this(port, token, blink, tokenFile, Backend.AUTO);
+    }
+
     public ServiceConfiguration {
+        if (linuxBackend == null) {
+            throw new IllegalArgumentException("notification-service-linux-backend must not be null.");
+        }
         if (tokenFile != null && !tokenFile.isBlank()) {
             if (token != null && !token.isBlank()) {
                 throw new IllegalArgumentException(

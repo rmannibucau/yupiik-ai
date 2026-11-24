@@ -239,13 +239,19 @@ public final class WindowsTray implements NativeTray {
         try (final var scratch = Arena.ofConfined()) {
             for (int i = 0; i < updated.size(); i++) {
                 // Ampersands are menu mnemonics in Win32, not literal text unless doubled.
+                // Text markers avoid introducing owned HBITMAPs or owner-drawn menu callbacks.
+                // Each snapshot has adjacent preview/dismiss commands, not a session-id lookup.
                 requireSuccess(
                         (int) api.appendMenu.invokeExact(
                                 replacement,
                                 0,
-                                (long) FIRST_NOTICE + i,
-                                wide(scratch, preview(updated.get(i)).replace("&", "&&"))),
+                                FIRST_NOTICE + 2L * i,
+                                wide(scratch, "[i] " + preview(updated.get(i)).replace("&", "&&"))),
                         "AppendMenuW(notice)");
+                requireSuccess(
+                        (int) api.appendMenu.invokeExact(
+                                replacement, 0, FIRST_NOTICE + 2L * i + 1, wide(scratch, "    [x] Dismiss")),
+                        "AppendMenuW(dismiss)");
             }
             if (!updated.isEmpty()) {
                 requireSuccess(
@@ -468,6 +474,7 @@ public final class WindowsTray implements NativeTray {
     }
 
     private void showMenu() throws Throwable {
+        final var menuNotices = notices; // Keep the exact snapshots represented by this menu invocation.
         menuOpen = true;
         try (final var scratch = Arena.ofConfined()) {
             final var point = scratch.allocate(POINT);
@@ -485,8 +492,14 @@ public final class WindowsTray implements NativeTray {
                 acknowledged = true; // Only a reminder acknowledgement, never an approval response.
             } else if (command == QUIT) {
                 closed = true;
-            } else if (command >= FIRST_NOTICE && command - FIRST_NOTICE < notices.size()) {
-                showDetails(notices.get(command - FIRST_NOTICE));
+            } else if (command >= FIRST_NOTICE && (command - FIRST_NOTICE) / 2 < menuNotices.size()) {
+                final var noticeCommand = command - FIRST_NOTICE;
+                final var selected = menuNotices.get(noticeCommand / 2);
+                if (noticeCommand % 2 == 0) {
+                    showDetails(selected);
+                } else {
+                    dismissals.add(selected); // Exact snapshot, just like the details dialog's Dismiss.
+                }
             }
             // Required for reliable dismissal/reopening of notification-area shortcut menus.
             final var posted = (int) api.postMessage.invokeExact(window, 0, 0L, 0L); // WM_NULL

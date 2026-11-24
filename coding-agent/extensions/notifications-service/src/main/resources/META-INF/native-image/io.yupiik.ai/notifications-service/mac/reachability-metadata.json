@@ -82,6 +82,12 @@
     "directUpcalls": [
       {
         "class": "io.yupiik.ia.agent.notifications.tray.MacTray",
+        "method": "dismissMenuNotice",
+        "returnType": "void",
+        "parameterTypes": ["void*", "void*", "void*"]
+      },
+      {
+        "class": "io.yupiik.ia.agent.notifications.tray.MacTray",
         "method": "showNotice",
         "returnType": "void",
         "parameterTypes": ["void*", "void*", "void*"]

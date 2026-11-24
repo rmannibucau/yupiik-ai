@@ -39,6 +39,52 @@ class NotificationsCliTest {
         assertTrue(help.output().contains("notification-service-port"), help.output());
         assertTrue(help.output().contains("notification-service-token"), help.output());
         assertTrue(help.output().contains("notification-service-token-file"), help.output());
+        assertTrue(help.output().contains("notification-service-linux-backend"), help.output());
+    }
+
+    @Test
+    void rejectsInvalidLinuxBackendFromArgvAndEnvironment(@TempDir final Path directory) throws Exception {
+        final var argument = run(directory, Map.of(), "publish", "--notification-service-linux-backend", "gtk4");
+        final var environment = run(directory, Map.of("NOTIFICATION_SERVICE_LINUX_BACKEND", "gtk4"), "publish");
+        for (final var result : List.of(argument, environment)) {
+            assertNotEquals(0, result.exitCode(), result.output());
+            assertTrue(
+                    result.output().contains("notification-service-linux-backend must be one of: auto, glib, gtk3."),
+                    result.output());
+        }
+    }
+
+    @Test
+    void linuxBackendOverridesDoNotRequireNativeAccessForPublish(@TempDir final Path directory) throws Exception {
+        try (final var container = ConfiguringContainer.of().start();
+                final var mapper = container.lookup(JsonMapper.class)) {
+            final var unread = new UnreadNotifications();
+            final var endpoint = new NotificationEndpoint(mapper.instance());
+            try (final var listener = endpoint.listen(new ServiceConfiguration(0, TOKEN, true, null), unread)) {
+                for (final var backend : List.of("auto", "glib", "gtk3")) {
+                    final var argument = run(
+                            directory,
+                            Map.of("NOTIFICATION_SERVICE_TOKEN", TOKEN, "YCA_NOTIFICATION_SESSION", backend),
+                            "publish",
+                            "--notification-service-port",
+                            Integer.toString(listener.port()),
+                            "--notification-service-linux-backend",
+                            backend);
+                    assertEquals(0, argument.exitCode(), argument.output());
+                    final var environment = run(
+                            directory,
+                            Map.of(
+                                    "NOTIFICATION_SERVICE_TOKEN", TOKEN,
+                                    "NOTIFICATION_SERVICE_LINUX_BACKEND", backend,
+                                    "YCA_NOTIFICATION_SESSION", backend + "-env"),
+                            "publish",
+                            "--notification-service-port",
+                            Integer.toString(listener.port()));
+                    assertEquals(0, environment.exitCode(), environment.output());
+                }
+                assertEquals(6, unread.read().size());
+            }
+        }
     }
 
     @Test

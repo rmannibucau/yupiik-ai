@@ -61,11 +61,19 @@ YCA_NOTIFICATION_SOURCE=main \
 
 Check that the persistent YCA icon changes to its attention state and alternates about once per second, and that its tooltip shows `YCA - 1 unread session` without the notification title.
 Desktop policy can hide the icon or suppress particular visual effects; Linux needs a tray host such as GNOME's AppIndicator extension.
+Linux's default `auto` loader prefers `libayatana-appindicator-glib.so.2` with Gio menus/actions, then tries `libayatana-appindicator3.so.1` and `libappindicator3.so.1` when a library is absent or its required ABI is incomplete.
+The GLib backend needs a desktop tray host supporting `org.gtk.Menus` and `org.gtk.Actions`: an installed library does not prove host support, and there is no reliable host negotiation.
+Force legacy menus with `serve --notification-service-linux-backend gtk3`, or force Gio menus/actions with `serve --notification-service-linux-backend glib`; the equivalent environment variable is `NOTIFICATION_SERVICE_LINUX_BACKEND` (`auto`, `glib` or `gtk3`).
+Automatic fallback does not suppress legacy Ayatana deprecation warnings, and even the modern GLib backend still needs GTK3 for details windows.
+See the canonical guide for platform requirements and diagnostics.
 Open the tray menu and select the notification's single-line preview to view its full details: kind, title, session, source and timestamp.
+Each preview is followed by its own *Dismiss* row, which removes that reminder directly without opening details and closes the native menu normally.
+Check that each Dismiss row acts on the preview immediately above it; icons are shown where supported and may be hidden by the desktop tray host.
 Repeat with a long title containing line breaks and Unicode characters: the preview must remain a single line of at most 60 Unicode code points, ending in `...` when shortened, while the bounded, wrapped, scrollable details retain the full received text.
 The publisher normalizes whitespace and caps title/session fields at 256 UTF-16 code units; details cannot recover text discarded before delivery.
 Choose *Close*, Escape or the window's close control and verify that the reminder remains unread.
 Publish a second session, open the first reminder's details and choose *Dismiss*: only that reminder should disappear, leaving the other session unread.
+Publish again and repeat using the menu's direct *Dismiss* row, verifying that only its associated reminder disappears.
 With details for an older reminder still open, publish a newer reminder for the same session/source, then dismiss the older one and verify that the newer reminder remains.
 Choose *Acknowledge unread* and check that the normal icon/no-unread state returns.
 This is a synthetic reminder, not a real approval request, and acknowledging it never answers a YCA prompt.
