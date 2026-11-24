@@ -20,21 +20,19 @@ import dev.tamboui.style.Style;
 import dev.tamboui.text.Line;
 import dev.tamboui.text.Span;
 import dev.tamboui.text.Text;
+import io.yupiik.language.tokenizer.Token;
+import io.yupiik.language.tokenizer.Tokenizer;
+import io.yupiik.language.tokenizer.languages.GenericTokenizer;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 import java.util.function.ToLongBiFunction;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 /**
- * Lightweight keyword/token syntax highlighter used to color fenced code blocks
- * before they are rendered. It is intentionally simple: strings, comments,
- * keywords, types and numbers of the most common languages get a distinct color
- * while everything else stays plain. It never throws and falls back to a plain
- * generic tokenizer for unknown languages.
+ * TamboUI adapter for the shared semantic syntax highlighter. Tokenization is deliberately
+ * line-by-line to retain line-cache reuse and the existing lack of cross-line lexical context.
+ * Unknown languages use generic highlighting; explicit plain-text aliases stay unstyled.
  */
 public class SyntaxHighlighter {
 
@@ -56,6 +54,10 @@ public class SyntaxHighlighter {
     private static final long MAX_BLOCK_WEIGHT = 4L << 20;
     private static final long MAX_LINE_WEIGHT = 2L << 20;
 
+    private static final io.yupiik.language.tokenizer.SyntaxHighlighter TOKENIZER =
+            new io.yupiik.language.tokenizer.SyntaxHighlighter();
+    private final Tokenizer fallback = new GenericTokenizer();
+
     private volatile int maxLineLength = DEFAULT_MAX_LINE_LENGTH;
     private volatile CodeTheme theme = CodeTheme.ONE_DARK;
 
@@ -67,7 +69,7 @@ public class SyntaxHighlighter {
     // We conservatively charge UTF-16 source/output characters even when strings are shared,
     // plus layout overhead (segments, lines, spans and their styles). This is not a heap census.
 
-    private record LineKey(long generation, Highlighter highlighter, String line) {}
+    private record LineKey(long generation, String language, String line) {}
 
     private record BlockKey(long generation, String language, String code) {}
 
@@ -84,12 +86,6 @@ public class SyntaxHighlighter {
     private long splitWeight;
     private long blockWeight;
     private long lineWeight;
-
-    private interface Highlighter {
-        Pattern pattern();
-    }
-
-    private record RegexHighlighter(Pattern pattern) implements Highlighter {}
 
     public record Segment(Type type, String language, String text) {
         public enum Type {
@@ -185,446 +181,8 @@ public class SyntaxHighlighter {
     }
 
     private static long lineWeight(final LineKey key, final List<Span> spans) {
-        return 64L + 2L * key.line().length() + spansWeight(spans);
+        return 64L + 2L * key.language().length() + 2L * key.line().length() + spansWeight(spans);
     }
-
-    private Style token(final String hex) {
-        return Style.EMPTY.fg(Color.hex(hex));
-    }
-
-    private static Highlighter language(final List<String> keywords, final List<String> types) {
-        return new RegexHighlighter(Pattern.compile(
-                "(?<str>\"(?:\\\\.|[^\"\\\\])*+\"|'(?:\\\\.|[^'\\\\])*+'|`(?:\\\\.|[^`\\\\])*+`)"
-                        + "|(?<com>//[^\\n]*+|/\\*(?:[^*]|\\*(?!/))*+\\*/|#[^\\n]*+|--[^\\n]*+|<!--(?:[^-]|-(?!-))*+-->|\\{\\{-?[^\\n]*+}})"
-                        + "|(?<num>\\b\\d++(?:\\.\\d+)?+\\b)"
-                        + "|(?<tag><\\/?[A-Za-z][A-Za-z0-9:-]*|/?>)"
-                        + "|(?<attr>(?<![A-Za-z0-9_])[A-Za-z_:][A-Za-z0-9_:.-]*+=)"
-                        + "|(?<ann>@[A-Za-z_][A-Za-z0-9_$]*)"
-                        + "|(?<kw>\\b(?:" + alternation(keywords) + ")\\b)"
-                        + "|(?<ty>\\b(?:" + alternation(types) + ")\\b)",
-                Pattern.MULTILINE));
-    }
-
-    // an empty word list would compile to the invalid "\b(?)\b"; "(?!)" never matches
-    private static String alternation(final List<String> words) {
-        return words.isEmpty() ? "(?!)" : String.join("|", words);
-    }
-
-    private static final Highlighter JAVA = language(
-            List.of(
-                    "public",
-                    "private",
-                    "protected",
-                    "static",
-                    "final",
-                    "class",
-                    "interface",
-                    "enum",
-                    "record",
-                    "void",
-                    "return",
-                    "if",
-                    "else",
-                    "for",
-                    "while",
-                    "do",
-                    "switch",
-                    "case",
-                    "default",
-                    "break",
-                    "continue",
-                    "new",
-                    "try",
-                    "catch",
-                    "finally",
-                    "throw",
-                    "throws",
-                    "extends",
-                    "implements",
-                    "import",
-                    "package",
-                    "this",
-                    "super",
-                    "null",
-                    "true",
-                    "false",
-                    "var",
-                    "instanceof",
-                    "synchronized",
-                    "abstract",
-                    "yield",
-                    "sealed",
-                    "permits",
-                    "assert",
-                    "native",
-                    "transient",
-                    "volatile",
-                    "strictfp"),
-            List.of(
-                    "String",
-                    "int",
-                    "long",
-                    "byte",
-                    "short",
-                    "float",
-                    "double",
-                    "boolean",
-                    "char",
-                    "Object",
-                    "Integer",
-                    "Long",
-                    "Boolean",
-                    "Double",
-                    "Float",
-                    "Byte",
-                    "Short",
-                    "Character",
-                    "CharSequence",
-                    "StringBuilder",
-                    "StringBuffer",
-                    "List",
-                    "ArrayList",
-                    "LinkedList",
-                    "Map",
-                    "HashMap",
-                    "LinkedHashMap",
-                    "Set",
-                    "HashSet",
-                    "Collection",
-                    "Optional",
-                    "OptionalInt",
-                    "OptionalDouble",
-                    "Stream",
-                    "Collectors",
-                    "CompletableFuture",
-                    "BigDecimal",
-                    "BigInteger",
-                    "Arrays",
-                    "Objects",
-                    "Path",
-                    "Iterable"));
-    private static final Highlighter TS = language(
-            List.of(
-                    "const",
-                    "let",
-                    "var",
-                    "function",
-                    "return",
-                    "if",
-                    "else",
-                    "for",
-                    "while",
-                    "do",
-                    "switch",
-                    "case",
-                    "default",
-                    "break",
-                    "continue",
-                    "new",
-                    "try",
-                    "catch",
-                    "finally",
-                    "throw",
-                    "throws",
-                    "extends",
-                    "implements",
-                    "import",
-                    "export",
-                    "from",
-                    "async",
-                    "await",
-                    "yield",
-                    "class",
-                    "interface",
-                    "enum",
-                    "type",
-                    "null",
-                    "true",
-                    "false",
-                    "this",
-                    "super",
-                    "of",
-                    "instanceof",
-                    "typeof",
-                    "delete",
-                    "in",
-                    "void",
-                    "readonly",
-                    "static",
-                    "public",
-                    "private",
-                    "protected"),
-            List.of(
-                    "string",
-                    "number",
-                    "boolean",
-                    "any",
-                    "unknown",
-                    "never",
-                    "void",
-                    "object",
-                    "Promise",
-                    "Array",
-                    "Function",
-                    "Record",
-                    "Date"));
-    private static final Highlighter PYTHON = language(
-            List.of(
-                    "def",
-                    "class",
-                    "return",
-                    "if",
-                    "elif",
-                    "else",
-                    "for",
-                    "while",
-                    "try",
-                    "except",
-                    "finally",
-                    "with",
-                    "as",
-                    "import",
-                    "from",
-                    "pass",
-                    "break",
-                    "continue",
-                    "lambda",
-                    "yield",
-                    "global",
-                    "nonlocal",
-                    "raise",
-                    "assert",
-                    "del",
-                    "and",
-                    "or",
-                    "not",
-                    "in",
-                    "is",
-                    "None",
-                    "True",
-                    "False"),
-            List.of(
-                    "str",
-                    "int",
-                    "float",
-                    "bool",
-                    "list",
-                    "dict",
-                    "tuple",
-                    "set",
-                    "bytes",
-                    "object",
-                    "Exception",
-                    "Any",
-                    "Optional",
-                    "Type"));
-    private static final Highlighter SHELL = language(
-            List.of(
-                    "if",
-                    "then",
-                    "else",
-                    "elif",
-                    "fi",
-                    "for",
-                    "while",
-                    "do",
-                    "done",
-                    "case",
-                    "esac",
-                    "function",
-                    "in",
-                    "return",
-                    "exit",
-                    "export",
-                    "local",
-                    "readonly",
-                    "echo",
-                    "printf",
-                    "cd",
-                    "ls",
-                    "mkdir",
-                    "rm",
-                    "cp",
-                    "mv",
-                    "touch",
-                    "cat",
-                    "grep",
-                    "sed",
-                    "awk",
-                    "find",
-                    "sudo",
-                    "git",
-                    "node",
-                    "npm",
-                    "mvn",
-                    "java"),
-            List.of());
-    private static final Highlighter SQL = language(
-            List.of(
-                    "select",
-                    "from",
-                    "where",
-                    "insert",
-                    "into",
-                    "values",
-                    "update",
-                    "set",
-                    "delete",
-                    "create",
-                    "table",
-                    "drop",
-                    "alter",
-                    "index",
-                    "join",
-                    "left",
-                    "right",
-                    "inner",
-                    "outer",
-                    "on",
-                    "group",
-                    "by",
-                    "order",
-                    "having",
-                    "limit",
-                    "offset",
-                    "and",
-                    "or",
-                    "not",
-                    "in",
-                    "like",
-                    "between",
-                    "is",
-                    "null",
-                    "as",
-                    "distinct",
-                    "union",
-                    "all",
-                    "primary",
-                    "key",
-                    "foreign",
-                    "references",
-                    "constraint",
-                    "default",
-                    "grant",
-                    "revoke"),
-            List.of(
-                    "int",
-                    "integer",
-                    "bigint",
-                    "varchar",
-                    "text",
-                    "char",
-                    "date",
-                    "datetime",
-                    "timestamp",
-                    "boolean",
-                    "decimal",
-                    "numeric",
-                    "float",
-                    "double",
-                    "serial",
-                    "uuid"));
-    private static final Highlighter XML = language(
-            List.of("xmlns", "version", "encoding", "standalone", "DOCTYPE", "ENTITY", "SYSTEM", "PUBLIC"), List.of());
-    private static final Highlighter YAML = new RegexHighlighter(Pattern.compile(
-            "(?<str>\"(?:\\\\.|[^\"\\\\])*+\"|'[^'\\n]*+(?:''[^'\\n]*+)*+')"
-                    + "|(?<com>#[^\\n]*+)"
-                    + "|(?<ty>^[ \\t]*-(?:[ \\t]|$))"
-                    + "|(?<attr>^[ \\t]*[&*][A-Za-z0-9_-]+)"
-                    + "|(?<tag>^[ \\t]*(?:- )?[A-Za-z_][A-Za-z0-9_. -]*+(?=:(?:[ \\t]|$)))"
-                    + "|(?<kw>\\b(?:true|false|null|True|False|Null|TRUE|FALSE|NULL|yes|no|on|off|Yes|No|On|Off)\\b|~)"
-                    + "|(?<num>\\b\\d++(?:\\.\\d+)?+\\b)",
-            Pattern.MULTILINE));
-
-    /**
-     * Markdown source markers: code spans and links (string), bold/italic/strike
-     * (type), headings, blockquotes, list markers, setext/hr rules (keyword),
-     * fences and table rows (tag), numbers and HTML comments. Every token whose
-     * closing delimiter can sit far away (spans, links) confirms the closer
-     * inside a possessive bounded window first, so a pathological line costs
-     * O(n*512) at worst instead of super-linear backtracking; line constructs
-     * are anchored to the line start.
-     */
-    private static final Highlighter MARKDOWN = new RegexHighlighter(Pattern.compile(
-            "(?<str>`(?=[^`\\n]{0,512}+`)[^`\\n]{0,512}`"
-                    + "|\\[(?=[^\\]\\n]{0,512}+\\](?:\\([^)\\n]{0,512}+\\))?)[^\\]\\n]{0,512}\\](?:\\([^)\\n]{0,512}\\))?)"
-                    + "|(?<com><!--(?:[^-]|-(?!-))*+-->)"
-                    + "|(?<kw>^#{1,6}(?=[ \\t])"
-                    + "|^[ \\t]{0,3}+>+"
-                    + "|^[ \\t]{0,3}+(?:-{3,}+|\\*{3,}+|_{3,}+)(?=[ \\t]*+$)"
-                    + "|^[ \\t]{0,3}+(?:[-*+]|\\d++[.)])[ \\t]++(?=\\S)"
-                    + "|^[=-]{2,}+$)"
-                    + "|(?<tag>^[ \\t]{0,3}+(?:```|~~~)(?=$|\\s)"
-                    + "|^\\|[^\\n]*+\\|?$)"
-                    + "|(?<ty>\\*\\*(?=((?:[^*\\n]|\\*(?!\\*)){0,512}+\\*\\*))(?:[^*\\n]|\\*(?!\\*)){0,512}\\*\\*"
-                    + "|\\*(?!\\*)(?=([^*\\n]{0,512}+\\*(?!\\*)))[^*\\n]{0,512}\\*(?!\\*)"
-                    + "|(?<![_\\w])_(?!\\s)(?=([^_\\n]{0,512}+_(?!\\w)))[^_\\n]{0,512}_(?!\\w)"
-                    + "|~~(?=([^~\\n]{0,512}+~~))[^~\\n]{0,512}~~)"
-                    + "|(?<num>\\b\\d++(?:\\.\\d+)?+\\b)",
-            Pattern.MULTILINE));
-
-    /**
-     * Asciidoc source markers: monospace/passthrough code, links, URLs and
-     * macros (string), bold/italic (type), anchors (annotation), headings and
-     * attributes (keyword), line comments, block delimiters and block
-     * attributions (tag), numbers. Same bounded-window discipline as
-     * {@link #MARKDOWN}.
-     */
-    private static final Highlighter ASCIIDOC = new RegexHighlighter(Pattern.compile(
-            "(?<str>`(?=[^`\\n]{0,512}+`)[^`\\n]{0,512}`"
-                    + "|(?<![A-Za-z0-9])\\+(?!\\s)(?=([^+\\n]{0,512}+\\+))[^+\\n]{0,512}\\+"
-                    + "|(?<![A-Za-z0-9])link:(?=([^\\s\\[\\]\\n]{0,512}+(?:\\[[^\\]]{0,512}+\\])?))[^\\s\\[\\]\\n]{0,512}(?:\\[[^\\]]{0,512}\\])?"
-                    + "|(?<![A-Za-z0-9:])(?:https?|ftp|mailto)://(?=[^\\s\\[\\]\\n]{0,512}+)[^\\s\\[\\]\\n]{0,512}"
-                    + "|(?=[A-Za-z0-9_]{1,64}::[^\\s\\[\\]\\n]{0,512}+\\[[^\\]]{0,512}+\\])[A-Za-z0-9_]{1,64}::[^\\s\\[\\]\\n]{0,512}\\[[^\\]]{0,512}\\])"
-                    + "|(?<ty>\\*\\*(?=((?:[^*\\n]|\\*(?!\\*)){0,512}+\\*\\*))(?:[^*\\n]|\\*(?!\\*)){0,512}\\*\\*"
-                    + "|\\*(?!\\*)(?=([^*\\n]{0,512}+\\*(?!\\*)))[^*\\n]{0,512}\\*(?!\\*)"
-                    + "|(?<![_\\w])_(?!\\s)(?=([^_\\n]{0,512}+_(?!\\w)))[^_\\n]{0,512}_(?!\\w))"
-                    + "|(?<ann>\\[\\[(?=([^\\]\\n]{0,512}+\\]\\]))[^\\]\\n]{0,512}\\]\\]"
-                    + "|\\[#(?=([^\\]\\n]{0,512}+\\]))[^\\]\\n]{0,512}\\])"
-                    + "|(?<com>^//[^\\n]*+)"
-                    + "|(?<kw>^=++\\s(?=\\S))"
-                    + "|(?<attr>^:[A-Za-z0-9_][A-Za-z0-9_.-]*+:(?=\\s|$))"
-                    + "|(?<tag>^(?:-{4,}+|\\.{4,}+|\\*{4,}+|_{4,}+|={4,}+)[ \\t]*+$"
-                    + "|^[ \\t]{0,3}+\\[[A-Za-z0-9_,=#. -]++\\]$)"
-                    + "|(?<num>\\b\\d++(?:\\.\\d+)?+\\b)",
-            Pattern.MULTILINE));
-
-    private static final Highlighter GENERIC = language(
-            List.of(
-                    "return",
-                    "if",
-                    "else",
-                    "for",
-                    "while",
-                    "switch",
-                    "case",
-                    "break",
-                    "continue",
-                    "class",
-                    "interface",
-                    "enum",
-                    "record",
-                    "function",
-                    "def",
-                    "import",
-                    "export",
-                    "var",
-                    "let",
-                    "const",
-                    "new",
-                    "try",
-                    "catch",
-                    "finally",
-                    "throw",
-                    "this",
-                    "super",
-                    "null",
-                    "true",
-                    "false",
-                    "async",
-                    "await",
-                    "void"),
-            List.of());
 
     public List<Segment> split(final String markdown) {
         if (markdown == null || markdown.isBlank()) {
@@ -820,6 +378,8 @@ public class SyntaxHighlighter {
             return List.of();
         }
         final var generation = this.generation;
+        final var theme = this.theme;
+        final var maxLineLength = this.maxLineLength;
         final var key = new BlockKey(generation, lang == null ? "" : lang, code);
         List<Line> cached;
         synchronized (blockCache) {
@@ -828,11 +388,13 @@ public class SyntaxHighlighter {
         if (cached != null) {
             return cached;
         }
-        final var tokenizer = pick(lang);
+        final var resolved = TOKENIZER.resolveLanguage(lang);
+        final var language = resolved == null ? "generic" : resolved;
         final var lines = code.replace("\r\n", "\n").split("\n", -1);
         final var result = new ArrayList<Line>(lines.length);
         for (final var line : lines) {
-            result.add(Line.from(colored(tokenizer, line).toArray(Span[]::new)));
+            result.add(Line.from(
+                    colored(language, line, generation, theme, maxLineLength).toArray(Span[]::new)));
         }
         final var immutable = List.copyOf(result);
         synchronized (blockCache) {
@@ -850,15 +412,16 @@ public class SyntaxHighlighter {
         return immutable;
     }
 
-    private List<Span> colored(final Highlighter h, final String line) {
-        if (line.length() > maxLineLength) {
+    private List<Span> colored(
+            final String language,
+            final String line,
+            final long generation,
+            final CodeTheme theme,
+            final int maxLineLength) {
+        if (line.length() > maxLineLength || line.isBlank()) {
             return List.of(Span.raw(line));
         }
-        if (line.isBlank()) {
-            return List.of(Span.raw(line));
-        }
-        final var generation = this.generation;
-        final var cacheKey = new LineKey(generation, h, line);
+        final var cacheKey = new LineKey(generation, language, line);
         List<Span> cached;
         synchronized (lineCache) {
             cached = lineCache.get(cacheKey);
@@ -866,21 +429,10 @@ public class SyntaxHighlighter {
         if (cached != null) {
             return cached;
         }
-        final var out = new ArrayList<Span>();
-        final var m = h.pattern().matcher(line);
-        var last = 0;
-        while (m.find()) {
-            if (m.start() > last) {
-                out.add(Span.raw(line.substring(last, m.start())));
-            }
-            out.add(Span.styled(m.group(), styleOf(m)));
-            last = m.end();
-        }
-        if (last < line.length()) {
-            out.add(Span.raw(line.substring(last)));
-        }
-        if (out.isEmpty()) {
-            out.add(Span.raw(line));
+        final var tokens = "generic".equals(language) ? fallback.tokenize(line) : TOKENIZER.highlight(language, line);
+        final var out = new ArrayList<Span>(tokens.size());
+        for (final var token : tokens) {
+            out.add(span(token, theme));
         }
         final var immutable = List.copyOf(out);
         synchronized (lineCache) {
@@ -898,103 +450,24 @@ public class SyntaxHighlighter {
         return immutable;
     }
 
-    private Style styleOf(final Matcher m) {
-        if (m.group("str") != null) {
-            return token(theme.string());
-        }
-        if (m.group("com") != null) {
-            return token(theme.comment());
-        }
-        if (m.group("num") != null) {
-            return token(theme.number());
-        }
-        if (m.group("tag") != null) {
-            return token(theme.tag());
-        }
-        if (m.pattern().namedGroups().containsKey("attr") && m.group("attr") != null) {
-            return token(theme.attr());
-        }
-        if (m.pattern().namedGroups().containsKey("ann") && m.group("ann") != null) {
-            return token(theme.annotation());
-        }
-        if (m.group("kw") != null) {
-            return token(theme.keyword());
-        }
-        return token(theme.type());
+    private static Span span(final Token token, final CodeTheme theme) {
+        final var color =
+                switch (token.kind()) {
+                    case STRING -> theme.string();
+                    case COMMENT -> theme.comment();
+                    case NUMBER -> theme.number();
+                    case KEYWORD -> theme.keyword();
+                    case TYPE -> theme.type();
+                    case TAG -> theme.tag();
+                    case ATTRIBUTE -> theme.attr();
+                    case ANNOTATION -> theme.annotation();
+                    case OPERATOR, PLAIN -> null;
+                };
+        return color == null ? Span.raw(token.text()) : Span.styled(token.text(), Style.EMPTY.fg(Color.hex(color)));
     }
 
-    private static Highlighter pick(final String lang) {
-        if (lang == null || lang.isBlank()) {
-            return GENERIC;
-        }
-        final var l = lang.toLowerCase(Locale.ROOT);
-        if (l.contains("java")) {
-            return JAVA;
-        }
-        if (l.contains("shell") || l.contains("bash") || l.equals("sh") || l.equals("zsh")) {
-            return SHELL;
-        }
-        if (l.contains("python") || l.contains("py")) {
-            return PYTHON;
-        }
-        if (l.contains("sql")) {
-            return SQL;
-        }
-        if (l.equals("yaml") || l.equals("yml")) {
-            return YAML;
-        }
-        if (l.contains("xml") || l.contains("html") || l.contains("svg") || l.contains("css")) {
-            return XML;
-        }
-        if (l.contains("javascript")
-                || l.contains("typescript")
-                || l.equals("js")
-                || l.equals("ts")
-                || l.equals("json")) {
-            return TS;
-        }
-        if (l.equals("md") || l.equals("markdown")) {
-            return MARKDOWN;
-        }
-        if (l.equals("adoc") || l.equals("asciidoc")) {
-            return ASCIIDOC;
-        }
-        return GENERIC;
-    }
-
-    /**
-     * Maps a file path to a syntax-highlighting language id, or {@code null} when
-     * the extension is unknown (callers then fall back to the plain style).
-     */
+    /** Maps a file path to a canonical language id, or {@code null} when unknown. */
     public static String guessLanguage(final String path) {
-        if (path == null || path.isBlank()) {
-            return null;
-        }
-        var name = path;
-        final var slash = Math.max(name.lastIndexOf('/'), name.lastIndexOf('\\'));
-        if (slash >= 0) {
-            name = name.substring(slash + 1);
-        }
-        final var dot = name.lastIndexOf('.');
-        if (dot < 0) {
-            return null;
-        }
-        return switch (name.substring(dot + 1).toLowerCase(Locale.ROOT)) {
-            case "java", "kt", "kts" -> "java";
-            case "xml", "html", "htm", "svg", "xhtml" -> "xml";
-            case "css", "scss", "less" -> "css";
-            case "json", "jsonc", "json5" -> "json";
-            case "yaml", "yml" -> "yaml";
-            case "js", "mjs", "cjs" -> "javascript";
-            case "ts", "mts", "cts" -> "typescript";
-            case "py", "pyw" -> "python";
-            case "sh", "bash", "zsh" -> "shell";
-            case "sql" -> "sql";
-            case "md", "markdown" -> "markdown";
-            case "adoc", "asciidoc" -> "asciidoc";
-            case "properties", "ini", "toml" -> "yaml";
-            case "gradle", "groovy" -> "java";
-            default -> null;
-        };
+        return TOKENIZER.guessLanguage(path);
     }
 }

@@ -369,14 +369,26 @@ class SyntaxHighlighterTest {
         }
         assertSame(
                 first,
-                highlighter.highlightLines("java-refresh", a).getFirst().spans().getFirst());
+                highlighter
+                        .highlightLines("java title=refresh", a)
+                        .getFirst()
+                        .spans()
+                        .getFirst());
         highlighter.highlightLines("java", "// last" + "x".repeat(40_000));
         assertSame(
                 first,
-                highlighter.highlightLines("java-still", a).getFirst().spans().getFirst());
+                highlighter
+                        .highlightLines("java title=still", a)
+                        .getFirst()
+                        .spans()
+                        .getFirst());
         assertNotSame(
                 second,
-                highlighter.highlightLines("java-evicted", b).getFirst().spans().getFirst());
+                highlighter
+                        .highlightLines("java title=evicted", b)
+                        .getFirst()
+                        .spans()
+                        .getFirst());
     }
 
     @Test
@@ -396,7 +408,7 @@ class SyntaxHighlighterTest {
         assertSame(
                 small,
                 highlighter
-                        .highlightLines("java-other", "public")
+                        .highlightLines("java title=other", "public")
                         .getFirst()
                         .spans()
                         .getFirst());
@@ -418,7 +430,7 @@ class SyntaxHighlighterTest {
         assertSame(
                 small,
                 highlighter
-                        .highlightLines("java-other", "public")
+                        .highlightLines("java title=other", "public")
                         .getFirst()
                         .spans()
                         .getFirst());
@@ -558,19 +570,22 @@ class SyntaxHighlighterTest {
     }
 
     @Test
-    void attributesAreStillHighlightedAfterPossessiveStar() {
-        final var xml = highlighter.highlightLines("xml", "<a id=\"x\"></a>").get(0);
-        assertTrue(
-                xml.spans().stream()
-                        .anyMatch(
-                                s -> s.content().equals("id=") && s.style().fg().isPresent()),
-                "expected the id= attribute to be colored");
+    void semanticTagAndAttributeNamesAreColoredButPunctuationInheritsForeground() {
+        final var xml =
+                highlighter.highlightLines("xml", "<a id=\"x\">text</a>").get(0);
+        assertEquals("<a id=\"x\">text</a>", lineText(xml));
+        assertColor(xml, "a", CodeTheme.ONE_DARK.tag());
+        assertColor(xml, "id", CodeTheme.ONE_DARK.attr());
+        assertColor(xml, "\"x\"", CodeTheme.ONE_DARK.string());
+        for (final var punctuation : List.of("<", "=", ">", "</")) {
+            assertRaw(xml, punctuation);
+        }
         final var assignment = highlighter.highlightLines("javascript", "a=b;").get(0);
-        assertTrue(
-                assignment.spans().stream()
-                        .anyMatch(
-                                s -> s.content().equals("a=") && s.style().fg().isPresent()),
-                "expected the a= attribute to be colored");
+        assertEquals("a=b;", lineText(assignment));
+        // Assignment is not a markup attribute: identifiers and operators inherit the UI foreground.
+        assertRaw(assignment, "a");
+        assertRaw(assignment, "=");
+        assertRaw(assignment, "b");
     }
 
     @Test
@@ -629,9 +644,14 @@ class SyntaxHighlighterTest {
     @Test
     void guessLanguageMapsExtensionsAndIgnoresUnknown() {
         assertEquals("java", SyntaxHighlighter.guessLanguage("src/main/java/Foo.java"));
-        assertEquals("java", SyntaxHighlighter.guessLanguage("Foo.KT"), "extensions are case-insensitive");
+        assertEquals("kotlin", SyntaxHighlighter.guessLanguage("Foo.KT"), "extensions are case-insensitive");
         assertEquals("xml", SyntaxHighlighter.guessLanguage("pom.xml"));
-        assertEquals("json", SyntaxHighlighter.guessLanguage("/data/config.json5"));
+        assertEquals("json5", SyntaxHighlighter.guessLanguage("/data/config.json5"));
+        assertEquals("jsonc", SyntaxHighlighter.guessLanguage("/data/config.jsonc"));
+        assertEquals("groovy", SyntaxHighlighter.guessLanguage("build.gradle"));
+        assertEquals("properties", SyntaxHighlighter.guessLanguage("app.properties"));
+        assertEquals("toml", SyntaxHighlighter.guessLanguage("app.toml"));
+        assertEquals("ini", SyntaxHighlighter.guessLanguage("app.ini"));
         assertEquals("yaml", SyntaxHighlighter.guessLanguage("build.yaml"));
         assertEquals("javascript", SyntaxHighlighter.guessLanguage("app.js"));
         assertEquals("typescript", SyntaxHighlighter.guessLanguage("app.ts"));
@@ -696,7 +716,9 @@ class SyntaxHighlighterTest {
                 colored.stream().anyMatch(c -> c.startsWith("+code") || c.equals("+code+")),
                 "passthrough must be colored");
         assertTrue(colored.stream().anyMatch(c -> c.equals("[[anchor]]")), "anchor must be colored");
-        assertTrue(colored.stream().anyMatch(c -> c.startsWith("----")), "block delimiter must be colored");
+        // Block delimiters are semantic operators, not tags: retain them without overriding foreground.
+        assertRaw(lines.get(11), "----");
+        assertRaw(lines.get(13), "----");
         assertTrue(colored.stream().anyMatch(c -> c.startsWith("// comment")), "comment must be colored");
         assertEquals(
                 "= Title\n\n:author: me\n\n*bold* and _italic_ text\n\n+code+ and `code2`\n\n[[anchor]]\n\n[source,java]\n----\nint a;\n----\n\n// comment\n",
@@ -792,7 +814,106 @@ class SyntaxHighlighterTest {
                 "a large markdown document must render within the linear budget");
     }
 
+    @Test
+    void javascriptResolutionDoesNotAccidentallySelectJava() {
+        final var source = "const value = typeof input;";
+        final var javascript = highlighter.highlightLines("javascript", source).getFirst();
+        assertColor(javascript, "const", CodeTheme.ONE_DARK.keyword());
+        assertColor(javascript, "typeof", CodeTheme.ONE_DARK.keyword());
+        assertRaw(javascript, "=");
+        assertEquals(source, lineText(javascript));
+        for (final var alias : List.of("js", "mjs", "JavaScript title=example")) {
+            final var aliased = highlighter.highlightLines(alias, source).getFirst();
+            assertSame(
+                    javascript.spans().getFirst(),
+                    aliased.spans().getFirst(),
+                    "resolved aliases must reuse the canonical language's line cache");
+        }
+    }
+
+    @Test
+    void versionedJavaAndTsxAndJsoncResolveThroughSharedHighlighter() {
+        final var java = highlighter.highlightLines("java", "public class A").getFirst();
+        final var java21 =
+                highlighter.highlightLines("Java 21", "public class A").getFirst();
+        assertSame(java.spans().getFirst(), java21.spans().getFirst());
+        final var tsx =
+                highlighter.highlightLines("tsx", "const value: string = 'x';").getFirst();
+        assertColor(tsx, "const", CodeTheme.ONE_DARK.keyword());
+        assertColor(tsx, "string", CodeTheme.ONE_DARK.type());
+        final var jsonc = highlighter.highlightLines("jsonc", "// comment").getFirst();
+        assertColor(jsonc, "// comment", CodeTheme.ONE_DARK.comment());
+    }
+
+    @Test
+    void explicitPlainAliasesStayPlainButUnknownAndMissingLanguagesUseGenericColors() {
+        final var source = "return \"value\" + 42; // comment";
+        for (final var alias : List.of("text", "txt", "plain", "plaintext", "console", "TEXT title=sample")) {
+            final var line = highlighter.highlightLines(alias, source).getFirst();
+            assertEquals(source, lineText(line));
+            assertTrue(line.spans().stream().allMatch(s -> s.style().fg().isEmpty()), alias);
+        }
+        for (final var alias : new String[] {null, "", "not-a-language", "notpython", "java-unknown"}) {
+            final var line = highlighter.highlightLines(alias, source).getFirst();
+            assertEquals(source, lineText(line));
+            assertColor(line, "return", CodeTheme.ONE_DARK.keyword());
+            assertColor(line, "\"value\"", CodeTheme.ONE_DARK.string());
+            assertColor(line, "42", CodeTheme.ONE_DARK.number());
+            assertColor(line, "// comment", CodeTheme.ONE_DARK.comment());
+        }
+    }
+
+    @Test
+    void nullCodeAndCrLfAndTrailingEmptyLinesKeepTheirExistingSemantics() {
+        assertEquals(List.of(), highlighter.highlightLines("java", null));
+        assertEquals(List.of(), highlighter.highlightLines(null, null));
+        assertTrue(highlighter.highlight("java", null).isEmpty());
+        assertEquals(
+                List.of(""),
+                highlighter.highlightLines("java", "").stream()
+                        .map(Line::rawContent)
+                        .toList());
+        assertEquals(
+                List.of("public class A", "", " ", ""),
+                highlighter.highlightLines("java", "public class A\r\n\r\n \r\n").stream()
+                        .map(Line::rawContent)
+                        .toList());
+    }
+
+    @Test
+    void linesReuseCachedSpansAcrossBlocksWithoutCarryingLexicalContext() {
+        final var source = "public class A";
+        final var standalone = highlighter.highlightLines("java", source).getFirst();
+        final var afterCommentOpener =
+                highlighter.highlightLines("java", "/* comment\n" + source).get(1);
+        assertSame(standalone.spans().getFirst(), afterCommentOpener.spans().getFirst());
+        assertColor(afterCommentOpener, "public", CodeTheme.ONE_DARK.keyword());
+        highlighter.clearCaches();
+        final var refreshed =
+                highlighter.highlightLines("java", "/* comment\n" + source).get(1);
+        assertNotSame(standalone.spans().getFirst(), refreshed.spans().getFirst());
+        assertColor(refreshed, "public", CodeTheme.ONE_DARK.keyword());
+    }
+
     private String lineText(final Line line) {
         return line.spans().stream().map(Span::content).collect(Collectors.joining());
+    }
+
+    private static void assertColor(final Line line, final String text, final String hex) {
+        final var spans =
+                line.spans().stream().filter(s -> s.content().equals(text)).toList();
+        assertFalse(spans.isEmpty(), () -> "missing semantic token: " + text);
+        for (final var span : spans) {
+            assertEquals(Optional.of(Color.hex(hex)), span.style().fg(), () -> "wrong color for: " + text);
+        }
+    }
+
+    private static void assertRaw(final Line line, final String text) {
+        final var spans =
+                line.spans().stream().filter(s -> s.content().equals(text)).toList();
+        assertFalse(spans.isEmpty(), () -> "missing separate unstyled token: " + text);
+        for (final var span : spans) {
+            assertTrue(span.style().fg().isEmpty(), () -> "unexpected foreground for: " + text);
+        }
     }
 }

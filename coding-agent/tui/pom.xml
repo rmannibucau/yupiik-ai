@@ -12,6 +12,10 @@
   <description>YCA terminal user interface based on TamboUI and fusion-cli.</description>
   <dependencies>
     <dependency>
+      <groupId>io.yupiik.maven</groupId>
+      <artifactId>simple-language-tokenizer</artifactId>
+    </dependency>
+    <dependency>
       <groupId>io.yupiik.ai</groupId>
       <artifactId>core</artifactId>
       <version>${project.version}</version>

@@ -44,7 +44,7 @@ import java.util.regex.Pattern;
  *
  * <p>Pure and terminal-free (no JSON, no palette, no frame) so it is unit testable
  * without a display. The returned ids are understood by
- * {@link SyntaxHighlighter#pick(String)}, which already has a highlighter for each.
+ * {@link SyntaxHighlighter#highlightLines(String, String)}, which already has a highlighter for each.
  */
 public final class ToolOutputLanguage {
     /** Programs whose output <em>is</em> in that language; a shell/cat/grep is absent on purpose. */
@@ -157,7 +157,7 @@ public final class ToolOutputLanguage {
      * @param command the command that produced it - a plain command line
      *                ({@code ToolCard.keyCommand()} or the tool arguments
      *                {@code command} property), may be null
-     * @return a {@link SyntaxHighlighter#pick(String)}-known language id, or {@code null}
+     * @return a {@link SyntaxHighlighter#highlightLines(String, String)}-known language id, or {@code null}
      *         when nothing is convincing enough to color
      */
     public static String guess(final String output, final String command) {

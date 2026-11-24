@@ -17,6 +17,7 @@ package io.yupiik.ia.agent.tui;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.Random;
 import java.util.regex.Pattern;
@@ -46,7 +47,14 @@ class ToolOutputLanguageTest {
     @Test
     void printingCommandsStayUncolored() {
         assertNull(ToolOutputLanguage.guess("total 8\n", "ls -la"));
-        assertNull(ToolOutputLanguage.guess("a\nb\n", "cat out.txt"));
+        assertEquals("plain", ToolOutputLanguage.guess("a\nb\n", "cat out.txt"));
+        final var source = "return \"value\" + 42; // comment";
+        final var language = ToolOutputLanguage.guess(source, "cat out.txt");
+        assertEquals("plain", language);
+        assertTrue(new SyntaxHighlighter()
+                .highlightLines(language, source).stream()
+                        .flatMap(line -> line.spans().stream())
+                        .allMatch(span -> span.style().fg().isEmpty()));
         assertNull(ToolOutputLanguage.guess("[INFO] BUILD SUCCESS\n", "mvn -q test"));
     }
 
