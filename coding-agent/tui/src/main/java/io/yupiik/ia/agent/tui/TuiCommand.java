@@ -101,6 +101,7 @@ import io.yupiik.ia.agent.core.shell.TurnRunner;
 import io.yupiik.ia.agent.core.shell.btw.BtwAnswerer;
 import io.yupiik.ia.agent.core.shell.slash.ArgCompletion;
 import io.yupiik.ia.agent.core.shell.slash.CompletionEngine;
+import io.yupiik.ia.agent.core.shell.slash.ShellInputRouting;
 import io.yupiik.ia.agent.core.shell.slash.SlashRegistry;
 import io.yupiik.ia.agent.core.style.ModelStyleService;
 import io.yupiik.ia.agent.core.tools.EmbeddedTool;
@@ -953,7 +954,7 @@ public class TuiCommand implements Runnable {
      * and no turn is running.
      */
     private void submitNextInitialPrompt(final UiState state) {
-        if (state.model.busy() || state.interrupted) {
+        if (state.model.busy() || state.interrupted || state.inputRoutingPending) {
             return;
         }
         final var next = state.initialPrompts.pollFirst();
@@ -1792,7 +1793,7 @@ public class TuiCommand implements Runnable {
                     final var runner = state.runner;
                     if (runner != null && !state.model.busy()) {
                         final var next = state.pendingPrompts.removeFirst();
-                        runLater(state, () -> submit(next, state.runner, state, false));
+                        runLater(state, () -> submitPrompt(next, state, false));
                     }
                 }
                 // startup prompts run one turn each: the next one starts now that this turn ended
@@ -2537,15 +2538,53 @@ public class TuiCommand implements Runnable {
     }
 
     private void submit(final String text, final TuiRunner runner, final UiState state, final boolean pinToBottom) {
-        if (!text.regionMatches(true, 0, "/btw", 0, 4)) {
-            promptHistory.add(text);
-        }
         dismissCompletion(state);
-        clearError(state);
-        if (text.startsWith("/")) {
-            slash(text, runner, state);
-            return;
-        }
+        state.inputRoutingPending = true;
+        final var routing = ShellInputRouting.resolve(text, slashRegistry, io(runner, state)).toCompletableFuture();
+        // Ordinary input and known commands already resolve on the UI thread. Do not defer
+        // their dispatch behind subsequent key events (which can start new completion lookups).
+        final var resolvedOnUiThread = routing.isDone();
+        routing.whenComplete((decision, error) -> {
+            final Runnable apply = () -> {
+                state.inputRoutingPending = false;
+                if (error != null) {
+                    state.input.setText(text);
+                    positionCursorAtEnd(state);
+                    state.initialPrompts.clear();
+                    notify(state, "input selection failed - please submit again");
+                    return;
+                }
+                switch (decision) {
+                    case COMMAND -> {
+                        clearError(state);
+                        slash(text, runner, state);
+                    }
+                    case PROMPT -> {
+                        clearError(state);
+                        promptHistory.add(text);
+                        submitPrompt(text, state, pinToBottom);
+                    }
+                    case CORRECT, CANCEL -> {
+                        state.input.setText(text);
+                        positionCursorAtEnd(state);
+                        // A startup correction must not release subsequent scripted entries.
+                        state.initialPrompts.clear();
+                        if (decision == ShellInputRouting.Decision.CORRECT) {
+                            notify(state, "fix the command and submit again (see /help for commands)");
+                        }
+                    }
+                }
+            };
+            if (resolvedOnUiThread) {
+                apply.run();
+            } else {
+                runLater(state, apply);
+            }
+        });
+    }
+
+    /** Already accepted input: queued prompts must never go through slash classification again. */
+    private void submitPrompt(final String text, final UiState state, final boolean pinToBottom) {
         if (state.model.busy()) {
             state.pendingPrompts.addLast(text);
             final var n = state.pendingPrompts.size();
@@ -2622,6 +2661,8 @@ public class TuiCommand implements Runnable {
     }
 
     private void slash(final String text, final TuiRunner runner, final UiState state) {
+        // Includes modal-only commands and shortcut-generated commands, before any early return.
+        promptHistory.add(text);
         final var parts = SPLIT_COMMAND.split(text.substring(1), 2);
         if ("btw".equals(parts[0].toLowerCase(Locale.ROOT))) {
             btw(parts.length > 1 ? parts[1].strip() : "", runner, state);
@@ -2837,6 +2878,11 @@ public class TuiCommand implements Runnable {
             }
         }
         syncSession(state);
+        // The next input can be typed while a configuration command is still running.
+        // Refresh against its settled settings even if the old-provider lookup was empty.
+        if (!(outcome instanceof ShellOutcome.Quit) && active() == state) {
+            recomputePendingCompletion();
+        }
         // a queued initial prompt may be a slash command: unlike a turn it never emits TurnDone,
         // so the next entry is released here once the command outcome has been applied
         if (!(outcome instanceof ShellOutcome.Quit)

@@ -118,6 +118,7 @@ final class UiState {
     volatile boolean quitArmed;
     volatile CompletableFuture<Boolean> inFlight;
     volatile boolean historyActive;
+    volatile boolean inputRoutingPending;
     volatile String historyDraft = "";
     /**
      * Pending approval dialogs (head = currently displayed), FIFO. Both the main agent

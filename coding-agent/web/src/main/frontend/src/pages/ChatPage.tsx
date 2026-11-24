@@ -95,7 +95,7 @@ export function ChatPage({
   const initializing = !!sessionId && !bootstrapped;
   const [prompt, setPrompt] = useState('');
   const [cursor, setCursor] = useState(0);
-  // transient flag set only while the fire-and-forget session.prompt/session.slash RPC is in flight
+  // Transient flag set while the composer session.input RPC (including routing pickers) is in flight.
   const [sending, setSending] = useState(false);
   // the real "a turn is running" signal comes from the SSE stream; combine both
   const busy = status.busy || sending;
@@ -624,27 +624,24 @@ export function ChatPage({
     setCursor(0);
     setCompletionDismissed(false);
     try {
-      // slash commands are dispatched server-side (a /command line is never sent to the LLM) and
-      // the sidebar is re-synced because such commands may change mode/provider/model/permissions.
-      if (text.startsWith('/')) {
-        if (isHelpCommand(text)) {
-          // /help renders its markdown through a "transcript" event the inline renderer skips; open
-          // the big modal and let the streaming effect above feed it the markdown as it arrives.
-          setHelpOpen(true);
-          setHelpContent(null);
-        }
-        if (isExecutingToolsCommand(text)) {
-          // /executing-tools renders its markdown through a "transcript" event which the inline
-          // renderer deliberately skips (only-modal): open the modal and feed it the transcript.
-          setExecutingToolsOpen(true);
-          setExecutingToolsContent(null);
-        }
-        await call('session.slash', { id: sessionId, text });
-        loadSidebar();
+      // Only exact known modal commands get special presentation. The server owns routing,
+      // including slash-like paths and the correction/cancellation picker.
+      if (isHelpCommand(text)) {
+        setHelpOpen(true);
+        setHelpContent(null);
+      }
+      if (isExecutingToolsCommand(text)) {
+        setExecutingToolsOpen(true);
+        setExecutingToolsContent(null);
+      }
+      const { disposition } = await call<{ disposition: 'accepted' | 'correct' | 'cancel' }>(
+        'session.input', { id: sessionId, text });
+      if (disposition === 'correct' || disposition === 'cancel') {
+        setPrompt(draft);
+        setCursor(draft.length);
       } else {
-        await call('session.prompt', { id: sessionId, prompt: text });
-        // this prompt may have been queued behind a running turn (never a concurrent turn), so a
-        // subsequent poll shows the pending count in the bottom bar.
+        loadSidebar();
+        // An accepted prompt may have been queued behind a running turn.
         refreshQueued();
       }
     } catch (error) {
@@ -1583,12 +1580,12 @@ export function todoDiffSummary(
 
 /** Whether a submitted prompt is the /help slash command (leading slash help, even with args). */
 export function isHelpCommand(text: string): boolean {
-  return /^\/help\b/.test(text?.trim() ?? '');
+  return /^\/help(?:\s|$)/i.test(text?.trim() ?? '');
 }
 
 /** Whether a submitted prompt is the /executing-tools slash command (leading slash, even with args). */
 export function isExecutingToolsCommand(text: string): boolean {
-  return /^\/executing-tools\b/.test(text?.trim() ?? '');
+  return /^\/executing-tools(?:\s|$)/i.test(text?.trim() ?? '');
 }
 
 /**

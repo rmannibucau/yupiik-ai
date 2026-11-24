@@ -46,6 +46,7 @@ import io.yupiik.ia.agent.core.shell.ShellSession;
 import io.yupiik.ia.agent.core.shell.SpeakerLabels;
 import io.yupiik.ia.agent.core.shell.ToolOutputVisibility;
 import io.yupiik.ia.agent.core.shell.TurnRunner;
+import io.yupiik.ia.agent.core.shell.slash.ShellInputRouting;
 import io.yupiik.ia.agent.core.shell.slash.SlashRegistry;
 import io.yupiik.ia.agent.core.style.ModelStyleService;
 import io.yupiik.ia.agent.core.todo.TodoItem;
@@ -297,8 +298,8 @@ public class CliCommand implements Runnable {
                     documentation =
                             "Prompts submitted at startup, in order, through the same path as a typed line: use it to "
                                     + "script a soft resume, e.g. continue re-runs the agent on the persisted history "
-                                    + "without sending any message. A slash-prefixed entry is dispatched as a usual "
-                                    + "slash command. Values are comma separated; prefix with "
+                                    + "without sending any message. Slash-prefixed entries use the same command/prompt "
+                                    + "routing as interactive input. Values are comma separated; prefix with "
                                     + "sep=<char>, to split on another single character when a value itself contains "
                                     + "commas.")
             List<String> initialPrompt) {
@@ -572,7 +573,7 @@ public class CliCommand implements Runnable {
                 if (line.isEmpty() || quitRequested) {
                     break;
                 }
-                final var text = line.get().strip();
+                final var text = line.get();
                 if (text.isBlank()) {
                     continue;
                 }
@@ -586,35 +587,75 @@ public class CliCommand implements Runnable {
     }
 
     /**
-     * Dispatches one non-blank user line exactly like the REPL: {@code exit} leaves the shell,
-     * a slash command is dispatched through {@link #slash(String)} and anything else runs a
-     * resume alias or a regular turn ({@link #runInput(String)}).
+     * Resolves one non-blank user line before changing the transcript or prompt queue.
      *
      * @return {@code false} when the shell should exit.
      */
     private boolean runLine(final String text) {
-        if (text.equals("exit")) {
+        return routeLine(text, false) != InputOutcome.QUIT;
+    }
+
+    private enum InputOutcome {
+        ACCEPTED,
+        RETRY,
+        QUIT
+    }
+
+    private InputOutcome routeLine(final String text, final boolean busy) {
+        if (text.strip().equals("exit")) {
             requestQuit();
             println(MarkdownColorizer.status("bye"));
-            return false;
+            return InputOutcome.QUIT;
         }
-        if (text.startsWith("/")) {
-            slash(text);
-            return !quitRequested;
+        final ShellInputRouting.Decision decision;
+        try {
+            decision = ShellInputRouting.resolve(text, slashRegistry, io)
+                    .toCompletableFuture()
+                    .join();
+        } catch (final CompletionException e) {
+            final var cause = e.getCause() == null ? e : e.getCause();
+            if (!(cause instanceof PromptInterruptException)) {
+                frontend.error(cause.getMessage());
+            }
+            return quitRequested ? InputOutcome.QUIT : InputOutcome.RETRY;
         }
-        runInput(text);
-        println();
-        return !quitRequested;
+        switch (decision) {
+            case COMMAND -> slash(text.strip());
+            case PROMPT -> {
+                // Already resolved: neither queued prompts nor confirmed slash text are classified again.
+                if (busy) {
+                    pendingPrompts.addLast(text);
+                    println(MarkdownColorizer.status("queued prompt (" + pendingPrompts.size()
+                            + " pending) - integrated into the running turn at the next checkpoint"));
+                    drainQueueIfIdle();
+                } else {
+                    runInput(text);
+                    println();
+                }
+            }
+            case CORRECT -> {
+                // Prompt/ShellIO expose no editable-draft setter. Recall remains owned by the
+                // line-editing backend; do not add another history or record picker answers here.
+                println(MarkdownColorizer.status("Use /help to find a command, then correct and re-enter the input. "
+                        + "The draft cannot be restored here; re-enter the exact original input to try again:"));
+                println(text);
+                return InputOutcome.RETRY;
+            }
+            case CANCEL -> {
+                // No transcript, queue or LLM writes.
+                return InputOutcome.RETRY;
+            }
+        }
+        return quitRequested ? InputOutcome.QUIT : InputOutcome.ACCEPTED;
     }
 
     /**
      * Submits the {@code --initial-prompt} entries before the REPL takes over, in order, through
      * the very same dispatch as a typed line (see {@link #runLine(String)}): a resume alias such
      * as {@code continue} restarts the loop on the persisted history without sending any message,
-     * a slash-prefixed entry is dispatched as a usual slash command and anything else runs a
-     * regular turn. Entries are sequential, so in queueing mode (interactive terminal) each turn
+     * slash-prefixed entries use the shared routing decision. Entries are sequential, so in queueing mode each turn
      * waits for the previous one to complete instead of being integrated into it as a typed-ahead
-     * prompt; slash entries at startup start no turn and have nothing to wait for.
+     * prompt; only entries that actually start a turn have a new future to await.
      */
     private void submitInitialPrompts() {
         final var prompts = conf.initialPrompt();
@@ -625,14 +666,13 @@ public class CliCommand implements Runnable {
             if (prompt == null || prompt.isBlank()) {
                 continue;
             }
-            final var text = prompt.strip();
-            final var slash = text.startsWith("/");
-            if (!runLine(text)) {
+            final var previous = inFlight;
+            if (routeLine(prompt, false) != InputOutcome.ACCEPTED) {
                 break;
             }
-            if (!slash && queueing) {
+            if (queueing) {
                 final var future = inFlight;
-                if (future != null) {
+                if (future != null && future != previous) {
                     awaitTurn(future);
                 }
             }
@@ -652,7 +692,7 @@ public class CliCommand implements Runnable {
     }
 
     /**
-     * While a turn runs the REPL keeps reading silently; every non-slash line
+     * While a turn runs the REPL keeps reading silently; every resolved prompt
      * is queued and integrated by the running turn at its next checkpoint,
      * mirroring the TUI's prompt queue.
      *
@@ -686,24 +726,11 @@ public class CliCommand implements Runnable {
         if (line.isEmpty()) {
             return false;
         }
-        final var text = line.get().strip();
+        final var text = line.get();
         if (text.isBlank()) {
             return true;
         }
-        if (text.equals("exit")) {
-            requestQuit();
-            println(MarkdownColorizer.status("bye"));
-            return false;
-        }
-        if (text.startsWith("/")) {
-            slash(text);
-            return !quitRequested;
-        }
-        pendingPrompts.addLast(text);
-        println(MarkdownColorizer.status("queued prompt (" + pendingPrompts.size()
-                + " pending) - integrated into the running turn at the next checkpoint"));
-        drainQueueIfIdle();
-        return !quitRequested;
+        return routeLine(text, true) != InputOutcome.QUIT;
     }
 
     private boolean turnActive() {

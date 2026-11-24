@@ -47,6 +47,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Supplier;
 
@@ -304,6 +305,16 @@ public class WebJsonRpc {
         sessions.attach(id);
         sessions.submit(id, prompt, blankToNull(agent));
         return Map.of("submitted", true);
+    }
+
+    @JsonRpc(
+            value = "session.input",
+            documentation = "Routes composer input, returning accepted, correct, or cancel after any routing picker.")
+    public CompletableFuture<Map<String, String>> input(
+            @JsonRpcParam(required = true, documentation = "Session id.") final String id,
+            @JsonRpcParam(required = true, documentation = "The composer input.") final String text) {
+        sessions.attach(id);
+        return sessions.input(id, text).thenApply(disposition -> Map.of("disposition", disposition));
     }
 
     @JsonRpc(

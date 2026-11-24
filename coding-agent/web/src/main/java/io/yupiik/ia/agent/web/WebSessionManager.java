@@ -38,6 +38,7 @@ import io.yupiik.ia.agent.core.shell.ShellSession;
 import io.yupiik.ia.agent.core.shell.SpeakerLabels;
 import io.yupiik.ia.agent.core.shell.TurnRunner;
 import io.yupiik.ia.agent.core.shell.btw.BtwAnswerer;
+import io.yupiik.ia.agent.core.shell.slash.ShellInputRouting;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -250,14 +251,41 @@ public class WebSessionManager implements AutoCloseable {
         if (session == null) {
             return CompletableFuture.failedFuture(new IllegalArgumentException("session not attached: " + sessionId));
         }
-        // slash commands never start a turn: they are dispatched through the shared registry and
-        // their outcome is applied to this session's frontend (status/transcript/error), exactly
-        // like the TUI and CLI. Interactive commands (e.g. /model, /provider) chain on ShellIO.pick
-        // which the frontend answers via a modal. This is what makes web slash commands behave like
-        // TUI ones instead of being sent to the LLM as plain text.
-        if (prompt != null && !prompt.isBlank() && prompt.strip().startsWith("/")) {
-            return slash(session, prompt.strip());
+        if (prompt == null) {
+            return submitPrompt(session, null, agentName);
         }
+        return ShellInputRouting.resolve(prompt, slashRegistry.registry(), session.env.io())
+                .thenCompose(decision -> switch (decision) {
+                    case COMMAND -> slash(session, prompt.strip());
+                    case PROMPT -> submitPrompt(session, prompt, agentName);
+                    case CORRECT, CANCEL -> CompletableFuture.completedFuture(false);
+                })
+                .toCompletableFuture();
+    }
+
+    /** Routes composer input before dispatching a command or accepting a prompt. */
+    public CompletableFuture<String> input(final String sessionId, final String text) {
+        final var session = sessions.get(sessionId);
+        if (session == null) {
+            return CompletableFuture.failedFuture(new IllegalArgumentException("session not attached: " + sessionId));
+        }
+        return ShellInputRouting.resolve(text, slashRegistry.registry(), session.env.io())
+                .thenCompose(decision -> switch (decision) {
+                    case COMMAND -> slash(session, text.strip()).thenApply(ignored -> "accepted");
+                    case PROMPT -> {
+                        // Do not keep the composer RPC open for the duration of the agent turn.
+                        submitPrompt(session, text, null);
+                        yield CompletableFuture.completedFuture("accepted");
+                    }
+                    case CORRECT -> CompletableFuture.completedFuture("correct");
+                    case CANCEL -> CompletableFuture.completedFuture("cancel");
+                })
+                .toCompletableFuture();
+    }
+
+    private CompletableFuture<Boolean> submitPrompt(
+            final WebSession session, final String prompt, final String agentName) {
+        final var sessionId = session.sessionId;
         // a prompt arriving while a turn is running is queued (never starts a concurrent turn): the
         // running loop picks it up at its next checkpoint via the queuedPrompt supplier, mirroring
         // the TUI's pending-prompts queue. Slash commands above always run immediately.
