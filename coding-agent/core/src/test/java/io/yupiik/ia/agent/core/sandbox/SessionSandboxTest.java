@@ -138,6 +138,128 @@ class SessionSandboxTest {
     }
 
     @Test
+    void explicitFilesystemRequestsReuseCoveringSessionGrants() throws Exception {
+        final var calls = new AtomicInteger();
+        final var decision = new AtomicReference<>(ApprovalGate.Result.ALLOW_SESSION);
+        final var permissions = permissions(request -> {
+            calls.incrementAndGet();
+            return decision.get();
+        });
+        final var outside = Files.createDirectories(root.resolve("outside"));
+        final var secret = outside.resolve("secret");
+        try (final var sandbox = sandbox(permissions, List.of(secret.toString()))) {
+            sandbox.requireRead(outside);
+            decision.set(ApprovalGate.Result.DENY);
+            sandbox.request("filesystem", "../outside", false);
+            sandbox.request("filesystem", outside.resolve("child").toString(), false);
+            final var alias = Files.createSymbolicLink(root.resolve("alias"), outside);
+            sandbox.request("filesystem", alias.toString(), false);
+            assertEquals(1, calls.get());
+            assertThrows(SecurityException.class, () -> sandbox.request("filesystem", secret.toString(), false));
+            assertEquals(1, calls.get(), "Hard denies must precede grant reuse");
+            assertThrows(SecurityException.class, () -> sandbox.request("filesystem", outside.toString(), true));
+            assertThrows(SecurityException.class, () -> sandbox.request("filesystem", root.toString(), false));
+            assertThrows(SecurityException.class, () -> sandbox.request("filesystem", outside + "-other", false));
+            assertEquals(3, calls.get());
+
+            decision.set(ApprovalGate.Result.ALLOW_SESSION);
+            sandbox.request("filesystem", outside.toString(), true);
+            decision.set(ApprovalGate.Result.DENY);
+            sandbox.request("filesystem", outside.resolve("child").toString(), true);
+            sandbox.request("filesystem", outside.resolve("child").toString(), false);
+            sandbox.requireWrite(outside.resolve("child"));
+            sandbox.requireRead(outside.resolve("child"));
+            assertEquals(4, calls.get());
+            sandbox.revoke();
+            assertThrows(SecurityException.class, () -> sandbox.request("filesystem", outside.toString(), true));
+            assertEquals(5, calls.get());
+        }
+    }
+
+    @Test
+    void explicitNetworkRequestsReuseOnlyCoveringSessionGrants() throws Exception {
+        final var calls = new AtomicInteger();
+        final var decision = new AtomicReference<>(ApprovalGate.Result.ALLOW_SESSION);
+        try (final var sandbox = sandbox(
+                permissions(request -> {
+                    calls.incrementAndGet();
+                    return decision.get();
+                }),
+                List.of())) {
+            sandbox.request("network", "EXAMPLE.com", false);
+            decision.set(ApprovalGate.Result.DENY);
+            sandbox.request("network", "example.com:443", false);
+            assertEquals(1, calls.get());
+            assertThrows(SecurityException.class, () -> sandbox.request("network", "example.com:80", false));
+            assertThrows(SecurityException.class, () -> sandbox.request("network", "*.example.com", false));
+            assertThrows(SecurityException.class, () -> sandbox.request("network", "other.example.com", false));
+            assertEquals(4, calls.get());
+            decision.set(ApprovalGate.Result.ALLOW_SESSION);
+            sandbox.request("network", "*.example.com", false);
+            decision.set(ApprovalGate.Result.DENY);
+            sandbox.request("network", "*.EXAMPLE.com:443", false);
+            sandbox.request("network", "api.example.com", false);
+            sandbox.request("network", "*.api.example.com", false);
+            assertEquals(5, calls.get());
+            assertThrows(SecurityException.class, () -> sandbox.request("network", "notexample.com", false));
+            sandbox.revoke();
+            assertThrows(SecurityException.class, () -> sandbox.request("network", "api.example.com", false));
+            assertEquals(7, calls.get());
+        }
+    }
+
+    @Test
+    void repeatedExplicitOnceRequestsStillPrompt() throws Exception {
+        final var calls = new AtomicInteger();
+        try (final var sandbox = sandbox(
+                permissions(request -> {
+                    calls.incrementAndGet();
+                    return ApprovalGate.Result.ALLOW_ONCE;
+                }),
+                List.of())) {
+            for (final var kind : List.of("filesystem", "network")) {
+                final var target =
+                        "filesystem".equals(kind) ? root.resolve("outside").toString() : "example.com";
+                sandbox.request(kind, target, false);
+                sandbox.request(kind, target, false);
+            }
+            assertEquals(4, calls.get());
+        }
+    }
+
+    @Test
+    void modeChangesExpireRememberedExplicitRequestsAcrossViews() throws Exception {
+        final var calls = new AtomicInteger();
+        final var decision = new AtomicReference<>(ApprovalGate.Result.ALLOW_SESSION);
+        final var permissions = permissions(request -> {
+            calls.incrementAndGet();
+            return decision.get();
+        });
+        try (final var sandbox = sandbox(permissions, List.of())) {
+            permissions.setPermissionModeChangeListener(sandbox::revoke);
+            final var view = sandbox.approvalView(permissions(request -> {
+                throw new AssertionError("Existing grants should be shared with borrowed views");
+            }));
+            final var target = root.resolve("outside").toString();
+            sandbox.request("filesystem", target, true);
+            sandbox.request("network", "example.com", false);
+            view.request("filesystem", target, false);
+            view.request("network", "example.com", false);
+            permissions.setPermissionMode(PermissionMode.ASK);
+            sandbox.request("filesystem", target, true);
+            sandbox.request("network", "example.com", false);
+            assertEquals(2, calls.get(), "Setting the same effective mode must retain grants");
+            permissions.setPermissionMode(PermissionMode.YOLO);
+            permissions.setPermissionMode(PermissionMode.ASK);
+            decision.set(ApprovalGate.Result.DENY);
+            assertThrows(SecurityException.class, () -> sandbox.request("filesystem", target, false));
+            assertThrows(SecurityException.class, () -> sandbox.request("network", "example.com", false));
+            assertEquals(4, calls.get());
+            sandbox.requireRead(root.resolve("project"));
+        }
+    }
+
+    @Test
     void explicitOnceRequestDoesNotBecomeSessionGrant() throws Exception {
         final var decision = new AtomicReference<>(ApprovalGate.Result.ALLOW_ONCE);
         try (final var sandbox = sandbox(permissions(request -> decision.get()), List.of())) {

@@ -206,11 +206,32 @@ public final class SessionSandbox implements Sandbox {
         final var requestedGeneration = currentGeneration();
         if ("filesystem".equals(kind)) {
             final var path = (Path.of(target).isAbsolute() ? Path.of(target) : project.resolve(target)).normalize();
-            rejectHardDeny(path, write);
+            lock.lock();
+            try {
+                checkGeneration(requestedGeneration);
+                rejectHardDeny(path, write);
+                final var canonical = SandboxPaths.canonical(path);
+                if (granted(canonical, write ? writes : reads) || (!write && granted(canonical, writes))) {
+                    return;
+                }
+            } finally {
+                lock.unlock();
+            }
             final var result = approve(kind, path.toString(), write, approvalPermissions);
             addPath(path, write, result == ApprovalGate.Result.ALLOW_ONCE, requestedGeneration);
         } else if ("network".equals(kind)) {
             final var domain = SandboxDestinations.normalizeRule(target);
+            lock.lock();
+            try {
+                checkGeneration(requestedGeneration);
+                if (network.stream()
+                        .anyMatch(rule ->
+                                rule.equals(domain) || (rule.startsWith("*.") && domain.endsWith(rule.substring(1))))) {
+                    return;
+                }
+            } finally {
+                lock.unlock();
+            }
             final var result = approve(kind, domain, false, approvalPermissions);
             lock.lock();
             try {
