@@ -25,7 +25,35 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
-/** Linux-only libc calls. Only a disposable helper process may call {@link #exec}. */
+/**
+ * Linux-only libc calls. Only a disposable helper process may call {@link #exec}.
+ *
+ * <p>The C equivalents below assume the supported little-endian Linux LP64 ABI (x86_64 or aarch64):
+ * pointers, {@code long}, {@code size_t} and {@code ssize_t} occupy eight bytes, {@code int} four,
+ * and {@code short} two. Shared headers and libc declarations are:
+ * <pre>{@code
+ * #include <errno.h>
+ * #include <stddef.h>
+ * #include <stdint.h>
+ * #include <linux/audit.h>
+ * #include <linux/filter.h>
+ * #include <linux/seccomp.h>
+ * #include <sys/prctl.h>
+ * #include <unistd.h>
+ *
+ * // Declared by the headers; these correspond to the FFM function descriptors:
+ * int prctl(int option, ...);
+ * int execve(const char *path, char *const argv[], char *const envp[]);
+ * ssize_t write(int fd, const void *buffer, size_t count);
+ * void _exit(int status);
+ * }</pre>
+ * <p>The linker resolves these symbols from the default native lookup. For {@code prctl}, only
+ * the first argument is fixed; the four variadic arguments are passed as LP64 words.
+ * Capturing {@code errno} adds a leading Java-only call-state segment to the method handle,
+ * not to the C prototype, and snapshots the calling thread's errno before Java resumes.
+ * {@code Arena} owns the native allocations; C snippets omit allocation failure handling and
+ * use pseudocode where Java strings, collections or exceptions have no direct C equivalent.
+ */
 @SuppressWarnings("restricted")
 public final class LinuxNative {
     private static final FunctionDescriptor PRCTL =
@@ -54,6 +82,16 @@ public final class LinuxNative {
         // No instances.
     }
 
+    /**
+     * Disables process dumpability after checking the supported ABI.
+     * <pre>{@code
+     * // requireArchitecture() runs first; state is FFM-only storage.
+     * if (prctl(PR_SET_DUMPABLE, 0UL, 0UL, 0UL, 0UL) != 0) {
+     *     int saved_errno = errno;
+     *     // Java: throw IllegalStateException with saved_errno.
+     * }
+     * }</pre>
+     */
     public static void protectBridge() throws Throwable {
         requireArchitecture();
         try (final var arena = Arena.ofConfined()) {
@@ -65,7 +103,33 @@ public final class LinuxNative {
         }
     }
 
-    /** Replaces this JVM, never starts a post-filter subprocess. Does not return on success. */
+    /**
+     * Replaces this JVM, never starts a post-filter subprocess. Does not return on success.
+     * All buffers, pointer arrays, diagnostics and native bindings are prepared before restricting
+     * the current OS thread. The C control flow is:
+     * <pre>{@code
+     * // Pseudocode: resolve command[0], build UTF-8 NUL-terminated path,
+     * // argv and envp ("key=value" strings), and construct the filter first.
+     * struct sock_fprog *program = build_filter();
+     * if (prctl(PR_SET_NO_NEW_PRIVS, 1UL, 0UL, 0UL, 0UL) != 0) {
+     *     int saved_errno = errno;
+     *     report_errno(privileges_error, saved_errno);
+     * } else if (prctl(PR_SET_SECCOMP, (unsigned long) SECCOMP_MODE_FILTER,
+     *                  (unsigned long) program, 0UL, 0UL) != 0) {
+     *     int saved_errno = errno;
+     *     report_errno(filter_error, saved_errno);
+     * } else {
+     *     int result = execve(path, argv, envp);
+     *     int saved_errno = errno; // execve returns only on failure
+     *     report_errno(exec_error, saved_errno);
+     * }
+     * _exit(125);
+     * }</pre>
+     * <p>Java additionally catches foreign-call failures, writes a preallocated diagnostic and
+     * invokes {@code _exit(125)} in {@code finally}. There is no C exception equivalent.
+     * No TSYNC is requested: a successful execve removes sibling JVM threads; libc's Linux
+     * {@code _exit} uses {@code exit_group} to terminate them on failure.
+     */
     public static void exec(final List<String> command, final Map<String, String> environment) throws Throwable {
         final var x86 = requireArchitecture();
         final var executable = resolve(command.getFirst(), environment);
@@ -107,6 +171,19 @@ public final class LinuxNative {
         }
     }
 
+    /**
+     * Formats the captured errno without allocating or calling libc first.
+     * Here {@code size} includes the final newline and NUL, and {@code saved_errno} is read from
+     * the FFM call-state layout's named errno field, not from a hard-coded native offset.
+     * <pre>{@code
+     * int error = saved_errno;
+     * for (size_t offset = size - 3; offset >= size - 12; --offset) {
+     *     message[offset] = (char) ('0' + error % 10);
+     *     error /= 10;
+     * }
+     * write_error(message, size);
+     * }</pre>
+     */
     private static void reportErrno(final MemorySegment message, final MemorySegment state) throws Throwable {
         var errno = state.get(JAVA_INT, ERRNO_OFFSET);
         // Fixed-width decimal digits in a preallocated native buffer, before any other libc call.
@@ -117,11 +194,32 @@ public final class LinuxNative {
         writeError(message);
     }
 
+    /**
+     * Writes the diagnostic once, excluding its trailing NUL; short writes and failures are ignored.
+     * <pre>{@code
+     * ssize_t written = write(STDERR_FILENO, message, size - 1);
+     * }</pre>
+     */
     private static void writeError(final MemorySegment message) throws Throwable {
         // Best-effort diagnostic; even a failed/short write must lead directly to _exit.
         final long written = (long) WRITE_CALL.invokeExact(2, message, message.byteSize() - 1);
     }
 
+    /**
+     * Checks Java OS/architecture properties, pointer width and byte order before using the ABI.
+     * The corresponding C build assumptions are shown below; the Java check rejects unsupported
+     * configurations at runtime instead of using preprocessor errors or static assertions.
+     * <pre>{@code
+     * #if !defined(__linux__) || !(defined(__x86_64__) || defined(__aarch64__))
+     * #error Unsupported OS or architecture
+     * #endif
+     * #if __BYTE_ORDER__ != __ORDER_LITTLE_ENDIAN__
+     * #error Unsupported byte order
+     * #endif
+     * _Static_assert(sizeof(void *) == 8, "64-bit pointers required");
+     * // Return true for x86_64, false for aarch64 to select syscall/audit constants.
+     * }</pre>
+     */
     private static boolean requireArchitecture() {
         final var arch = System.getProperty("os.arch", "");
         if (!"Linux".equals(System.getProperty("os.name"))
@@ -148,6 +246,19 @@ public final class LinuxNative {
         throw new IllegalArgumentException("Sandbox executable not found: " + command);
     }
 
+    /**
+     * Builds the native argv/envp representation. Allocation and string conversion in this C
+     * pseudocode stand for arena-owned, aligned memory and UTF-8 encoding; embedded NULs are
+     * rejected in the Java input before encoding. Closing the arena frees all these allocations.
+     * <pre>{@code
+     * char **pointers = arena_alloc((count + 1) * sizeof(char *), _Alignof(char *));
+     * for (size_t i = 0; i < count; ++i) {
+     *     pointers[i] = arena_utf8_string(strings[i]); // includes trailing NUL
+     * }
+     * pointers[count] = NULL;
+     * return pointers;
+     * }</pre>
+     */
     private static MemorySegment strings(final Arena arena, final List<String> strings) {
         final var pointers = arena.allocate((strings.size() + 1L) * ADDRESS.byteSize(), ADDRESS.byteAlignment());
         for (var i = 0; i < strings.size(); i++) {
@@ -160,6 +271,51 @@ public final class LinuxNative {
         return pointers;
     }
 
+    /**
+     * Builds classic BPF instructions and serializes them into Linux's native seccomp structures.
+     * The Java {@code int[]} entries hold unsigned instruction fields as raw bits. Their C layout
+     * and the equivalent final copy are:
+     * <pre>{@code
+     * // From <linux/filter.h>:
+     * // struct sock_filter { __u16 code; __u8 jt; __u8 jf; __u32 k; };
+     * // struct sock_fprog { unsigned short len; struct sock_filter *filter; };
+     * _Static_assert(sizeof(struct sock_filter) == 8, "filter stride");
+     * _Static_assert(offsetof(struct sock_filter, code) == 0, "code offset");
+     * _Static_assert(offsetof(struct sock_filter, jt) == 2, "jt offset");
+     * _Static_assert(offsetof(struct sock_filter, jf) == 3, "jf offset");
+     * _Static_assert(offsetof(struct sock_filter, k) == 4, "k offset");
+     * _Static_assert(offsetof(struct sock_fprog, len) == 0, "len offset");
+     * _Static_assert(offsetof(struct sock_fprog, filter) == 8, "pointer offset");
+     * _Static_assert(sizeof(struct sock_fprog) == 16, "program size");
+     *
+     * // Pseudocode: code[] is the instruction list built below.
+     * struct sock_filter *instructions = arena_alloc(count * 8, 8);
+     * for (size_t i = 0; i < count; ++i) {
+     *     instructions[i] = (struct sock_filter) {
+     *         .code = (uint16_t) code[i][0], .jt = (uint8_t) code[i][1],
+     *         .jf = (uint8_t) code[i][2], .k = (uint32_t) code[i][3]
+     *     };
+     * }
+     * struct sock_fprog *program = arena_alloc(sizeof(*program), _Alignof(struct sock_fprog));
+     * program->len = (unsigned short) count;
+     * program->filter = instructions;
+     * return program;
+     * }</pre>
+     * <p>The FPROG layout explicitly inserts six bytes of padding after the two-byte len so the
+     * pointer is eight-byte aligned. The instruction allocation uses eight-byte alignment (more
+     * than the structure's required four); its eight-byte stride has no padding between fields.
+     * Setting ADDRESS stores the native pointer, not the Java segment object.
+     *
+     * <p>The instruction list uses {@code BPF_LD | BPF_W | BPF_ABS} (0x20),
+     * {@code BPF_JMP | BPF_JEQ | BPF_K} (0x15), {@code BPF_JMP | BPF_JSET | BPF_K} (0x45),
+     * {@code BPF_ALU | BPF_AND | BPF_K} (0x54) and {@code BPF_RET | BPF_K} (0x06).
+     * Absolute offsets 0, 4, 16 and 24 address {@code seccomp_data.nr}, {@code arch}, and the
+     * low words of {@code args[0]} and {@code args[1]}. Audit values are {@code AUDIT_ARCH_X86_64}
+     * (0xc000003e) or {@code AUDIT_ARCH_AARCH64} (0xc00000b7); bit 0x40000000 identifies x32
+     * syscall numbers. Return values are {@code SECCOMP_RET_KILL_PROCESS} (0x80000000),
+     * {@code SECCOMP_RET_ERRNO} (0x00050000) ORed with errno, and
+     * {@code SECCOMP_RET_ALLOW} (0x7fff0000); 1 is EPERM and 38 is ENOSYS on both supported ABIs.
+     */
     private static MemorySegment filter(final Arena arena, final boolean x86) {
         final var code = new ArrayList<int[]>();
         instruction(code, 0x20, 0, 0, 4); // seccomp_data.arch
@@ -230,11 +386,29 @@ public final class LinuxNative {
         return program;
     }
 
+    /**
+     * Appends a syscall equality test followed by an errno return; a mismatch skips the return.
+     * The C equivalent uses an instruction array with a running index:
+     * <pre>{@code
+     * code[count++] = (struct sock_filter) BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, syscall, 0, 1);
+     * code[count++] = (struct sock_filter) BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | error);
+     * }</pre>
+     */
     private static void block(final List<int[]> code, final int syscall, final int errno) {
         instruction(code, 0x15, 0, 1, syscall);
         instruction(code, 0x06, 0, 0, 0x00050000 | errno);
     }
 
+    /**
+     * Appends the logical fields of one classic BPF instruction; serialization happens in filter.
+     * In C, appending to an already allocated instruction array would be:
+     * <pre>{@code
+     * code[count++] = (struct sock_filter) {
+     *     .code = (uint16_t) op, .jt = (uint8_t) yes,
+     *     .jf = (uint8_t) no, .k = (uint32_t) value
+     * };
+     * }</pre>
+     */
     private static void instruction(
             final List<int[]> code, final int op, final int yes, final int no, final int value) {
         code.add(new int[] {op, yes, no, value});
