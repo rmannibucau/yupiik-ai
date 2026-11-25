@@ -32,9 +32,12 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.FileAlreadyExistsException;
 import java.nio.file.Files;
+import java.nio.file.LinkOption;
+import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
+import java.nio.file.attribute.BasicFileAttributes;
 import java.time.Clock;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
@@ -42,6 +45,7 @@ import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.ThreadLocalRandom;
@@ -151,7 +155,9 @@ public class FileSessionStore implements SessionStore {
             return new HousekeepingReport(0, 0, 0);
         }
         final var now = now();
-        final var retention = conf.retentionDays() > 0 ? conf.retentionDays() * MILLIS_PER_DAY : -1L;
+        final var retention = conf.clean() != null && conf.clean().retentionDays() > 0
+                ? conf.clean().retentionDays() * MILLIS_PER_DAY
+                : -1L;
         final var compress = conf.compressDays() > 0 ? conf.compressDays() * MILLIS_PER_DAY : -1L;
         var compressed = 0;
         var deleted = 0;
@@ -757,7 +763,7 @@ public class FileSessionStore implements SessionStore {
     }
 
     private static void deleteRecursively(final Path dir) throws IOException {
-        if (!Files.isDirectory(dir)) {
+        if (!Files.isDirectory(dir, LinkOption.NOFOLLOW_LINKS)) {
             Files.deleteIfExists(dir);
             return;
         }
@@ -768,6 +774,172 @@ public class FileSessionStore implements SessionStore {
         }
         Files.deleteIfExists(dir);
     }
+
+    /**
+     * Explicit, deletion-only maintenance. The process lock serializes local writers, not other
+     * JVMs: use offline when another process might be writing an old session. Symlinks are never
+     * traversed and unreadable metadata fails the operation instead of making a session eligible.
+     */
+    public CleanReport clean(final SessionCleanPolicy policy, final boolean dryRun) {
+        Objects.requireNonNull(policy, "policy");
+        if (!policy.enabled()) {
+            return new CleanReport(List.of(), 0, 0, 0);
+        }
+        fileLock.lock();
+        try {
+            final var home = Path.of(configuration.resolveStorageHome());
+            if (Files.isSymbolicLink(home) || Files.isSymbolicLink(dir())) {
+                throw new IOException("Session cleanup refuses a symbolic-link storage directory");
+            }
+            if (!Files.exists(dir(), LinkOption.NOFOLLOW_LINKS)) {
+                return new CleanReport(List.of(), 0, 0, 0);
+            }
+            final var ids = new LinkedHashSet<String>();
+            try (final var entries = Files.list(dir())) {
+                for (final var entry : entries.sorted().toList()) {
+                    final var attributes = attributes(entry);
+                    if (attributes == null || attributes.isSymbolicLink()) {
+                        continue;
+                    }
+                    final var name = entry.getFileName().toString();
+                    final String id;
+                    if (attributes.isDirectory()) {
+                        id = name;
+                    } else if (attributes.isRegularFile() && name.endsWith(GZ_SUFFIX)) {
+                        id = name.substring(0, name.length() - GZ_SUFFIX.length());
+                    } else if (attributes.isRegularFile() && name.endsWith(JSONL_SUFFIX)) {
+                        id = name.substring(0, name.length() - JSONL_SUFFIX.length());
+                    } else {
+                        continue;
+                    }
+                    if (!id.isBlank()
+                            && !".".equals(id)
+                            && !"..".equals(id)
+                            && !id.contains("/")
+                            && !id.contains("\\")) {
+                        ids.add(id);
+                    }
+                }
+            }
+            final var selected = new ArrayList<SessionInfo>();
+            final var now = now();
+            var kept = 0;
+            var protectedSessions = 0;
+            var bytes = 0L;
+            for (final var id : ids) {
+                // Re-read all metadata immediately before selection/deletion, under the writer lock.
+                final var candidate = cleanCandidate(home, id);
+                if (candidate == null) {
+                    continue;
+                }
+                if (id.equals(primarySessionId) || candidate.modifiedAt() > now - DEFAULT_HOUSEKEEPING_GRACE_MILLIS) {
+                    protectedSessions++;
+                    continue;
+                }
+                if (!policy.matches(now, candidate.modifiedAt(), candidate.bytes())) {
+                    kept++;
+                    continue;
+                }
+                final var checked = cleanCandidate(home, id);
+                if (!candidate.equals(checked)) {
+                    kept++;
+                    continue;
+                }
+                if (!dryRun) {
+                    for (final var owned : checked.roots()) {
+                        deleteRecursively(owned);
+                    }
+                }
+                selected.add(new SessionInfo(id, checked.modifiedAt(), checked.bytes()));
+                bytes = Math.addExact(bytes, checked.bytes());
+            }
+            return new CleanReport(List.copyOf(selected), kept, protectedSessions, bytes);
+        } catch (final IOException failure) {
+            throw new UncheckedIOException(
+                    "Cannot clean sessions in '" + dir() + "' (some sessions may already have been deleted)", failure);
+        } finally {
+            fileLock.unlock();
+        }
+    }
+
+    private CleanCandidate cleanCandidate(final Path home, final String id) throws IOException {
+        final var folder = sessionDir(id);
+        final var folderAttributes = attributes(folder);
+        if (folderAttributes != null && !folderAttributes.isDirectory()) {
+            return null; // Never resolve transcripts through a symlink or unexpected file.
+        }
+        final var roots = new ArrayList<Path>();
+        var modifiedAt = Long.MIN_VALUE;
+        for (final var transcript : List.of(path(id), Path.of(path(id) + ".gz"), legacyPath(id), legacyGz(id))) {
+            final var stat = attributes(transcript);
+            if (stat != null && stat.isSymbolicLink()) {
+                return null; // An ambiguous session must not be partially removed.
+            }
+            if (stat != null && stat.isRegularFile()) {
+                modifiedAt = Math.max(modifiedAt, stat.lastModifiedTime().toMillis());
+                if (transcript.getParent().equals(dir())) {
+                    roots.add(transcript);
+                }
+            }
+        }
+        if (modifiedAt == Long.MIN_VALUE) {
+            return null;
+        }
+        // A backup can outlive the plain transcript after compression.
+        addOwnedFile(roots, Path.of(legacyPath(id) + ".bak"));
+        addOwnedFile(roots, Path.of(legacyGz(id) + ".bak"));
+        if (folderAttributes != null) {
+            roots.add(folder);
+        }
+        if (SessionStorageLayout.isGeneratedSessionId(id)) {
+            addOwnedFile(roots, home.resolve("todos-" + id + ".json"));
+            final var snapshots = home.resolve("snapshots");
+            if (Files.isDirectory(snapshots, LinkOption.NOFOLLOW_LINKS)) {
+                addOwnedFile(roots, snapshots.resolve(id + ".snap"));
+            }
+            final var plans = home.resolve("plans");
+            if (Files.isDirectory(plans, LinkOption.NOFOLLOW_LINKS)) {
+                try (final var files = Files.list(plans)) {
+                    for (final var file : files.sorted().toList()) {
+                        if (file.getFileName().toString().endsWith("-" + id + ".plan.md")) {
+                            addOwnedFile(roots, file);
+                        }
+                    }
+                }
+            }
+        }
+        var bytes = 0L;
+        for (final var root : roots) {
+            try (final var files = Files.walk(root)) { // walk defaults to NOFOLLOW_LINKS.
+                for (final var file : files.toList()) {
+                    final var stat = attributes(file);
+                    if (stat != null && stat.isRegularFile()) {
+                        bytes = Math.addExact(bytes, stat.size());
+                    }
+                }
+            }
+        }
+        return new CleanCandidate(List.copyOf(roots), modifiedAt, bytes);
+    }
+
+    private static BasicFileAttributes attributes(final Path path) throws IOException {
+        try {
+            return Files.readAttributes(path, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
+        } catch (final NoSuchFileException missing) {
+            return null;
+        }
+    }
+
+    private static void addOwnedFile(final List<Path> roots, final Path file) throws IOException {
+        final var stat = attributes(file);
+        if (stat != null && stat.isRegularFile()) {
+            roots.add(file);
+        }
+    }
+
+    private record CleanCandidate(List<Path> roots, long modifiedAt, long bytes) {}
+
+    public record CleanReport(List<SessionInfo> sessions, int kept, int protectedSessions, long bytes) {}
 
     @Override
     public void markProject(final String id, final String dir) {

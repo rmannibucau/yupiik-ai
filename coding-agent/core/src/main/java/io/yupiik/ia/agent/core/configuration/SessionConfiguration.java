@@ -20,11 +20,8 @@ import io.yupiik.fusion.framework.build.api.json.JsonModel;
 
 @JsonModel
 public record SessionConfiguration(
-        @Property(
-                defaultValue = "15",
-                documentation =
-                        "Sessions inactive longer than this many days are dropped at startup (0 disables the cleanup).")
-        int retentionDays,
+        @Property(documentation = "Session cleanup age and size criteria.")
+        SessionCleanConfiguration clean,
 
         @Property(
                 defaultValue = "7",

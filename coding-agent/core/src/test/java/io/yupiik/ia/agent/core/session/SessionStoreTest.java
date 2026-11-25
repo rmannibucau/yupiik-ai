@@ -23,6 +23,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.fusion.json.JsonMapper;
+import io.yupiik.ia.agent.core.configuration.SessionCleanConfiguration;
 import io.yupiik.ia.agent.core.configuration.SessionConfiguration;
 import io.yupiik.ia.agent.core.configuration.TestConfigs;
 import io.yupiik.ia.agent.core.llm.Message;
@@ -60,7 +61,7 @@ class SessionStoreTest {
     }
 
     private FileSessionStore newStore() {
-        return newStore(new SessionConfiguration(30, 15, true));
+        return newStore(new SessionConfiguration(new SessionCleanConfiguration(30, null), 15, true));
     }
 
     private FileSessionStore newStore(final SessionConfiguration sessions) {
@@ -71,7 +72,8 @@ class SessionStoreTest {
         return new FileSessionStore(
                 TestConfigs.codingAgent(Map.of(
                         "yca.storageHome", dir.toString(),
-                        "yca.sessions.retentionDays", String.valueOf(sessions.retentionDays()),
+                        "yca.sessions.clean.retentionDays",
+                                String.valueOf(sessions.clean().retentionDays()),
                         "yca.sessions.compressDays", String.valueOf(sessions.compressDays()),
                         "yca.sessions.startupCleanup", String.valueOf(sessions.startupCleanup()))),
                 mapper,
@@ -97,7 +99,7 @@ class SessionStoreTest {
 
     @Test
     void disabledStartupPreservesSessionsAndOrphans() throws Exception {
-        final var store = newStore(new SessionConfiguration(30, 15, false));
+        final var store = newStore(new SessionConfiguration(new SessionCleanConfiguration(30, null), 15, false));
         final var expired = store.create();
         final var aged = store.create();
         setAge(store.path(expired), 40);
@@ -136,7 +138,7 @@ class SessionStoreTest {
 
     @Test
     void explicitCleanupAndHousekeepingWorkWithStartupDisabled() throws Exception {
-        final var store = newStore(new SessionConfiguration(30, 15, false));
+        final var store = newStore(new SessionConfiguration(new SessionCleanConfiguration(30, null), 15, false));
         final var expired = store.create();
         final var aged = store.create();
         setAge(store.path(expired), 40);
@@ -197,7 +199,7 @@ class SessionStoreTest {
 
     @Test
     void cleanupWithDefaultsDisabled() throws Exception {
-        final var store = newStore(new SessionConfiguration(0, 0, true));
+        final var store = newStore(new SessionConfiguration(new SessionCleanConfiguration(0, null), 0, true));
         final var first = store.create();
         final var second = store.create();
         setAge(store.path(first), 40);
@@ -278,7 +280,7 @@ class SessionStoreTest {
         // pin the clock so two creates land in the same wall-clock second: only the random suffix differs,
         // which is what makes the id collision-free without having to scan the store
         final var fixed = Clock.fixed(Instant.EPOCH, ZoneOffset.UTC);
-        final var store = newStore(new SessionConfiguration(30, 15, true), fixed);
+        final var store = newStore(new SessionConfiguration(new SessionCleanConfiguration(30, null), 15, true), fixed);
         final var first = store.create();
         final var second = store.create();
 
@@ -623,7 +625,7 @@ class SessionStoreTest {
 
     @Test
     void housekeepingDeletesEmptySessions() throws Exception {
-        final var store = newStore(new SessionConfiguration(0, 0, true));
+        final var store = newStore(new SessionConfiguration(new SessionCleanConfiguration(0, null), 0, true));
         final var onlyPrompt = store.create();
         store.append(onlyPrompt, SessionEntry.of(1, "user", "hi", null, null));
 

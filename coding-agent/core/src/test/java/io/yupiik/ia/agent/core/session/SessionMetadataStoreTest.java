@@ -222,7 +222,7 @@ class SessionMetadataStoreTest {
         final var props = Map.of(
                 "yca.storageHome",
                 home.toString(),
-                "yca.sessions.retentionDays",
+                "yca.sessions.clean.retentionDays",
                 "30",
                 "yca.sessions.compressDays",
                 "15",

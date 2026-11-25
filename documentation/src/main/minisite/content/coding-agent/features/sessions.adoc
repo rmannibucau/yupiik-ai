@@ -48,9 +48,10 @@ They are not migrated or moved.
 
 At startup and periodically while a shell runs, yca sweeps session storage:
 
-* *Expired sessions* are removed after `yca.sessions.retentionDays` since their last write.
-`0` requests unconditional age deletion; a negative value disables retention.
-The current process's resolved session and sessions written within the last 24 hours are protected from age deletion.
+* *Old sessions* are removed using `yca.sessions.clean.retentionDays` (default `15`).
+Nonpositive retention disables automatic age-based deletion.
+The optional `yca.sessions.clean.biggerThan` criterion applies to the explicit maintenance command, not automatic housekeeping.
+The current process's resolved session and sessions written within the last 24 hours are protected from age-based deletion.
 * *Empty sessions* are removed regardless of age.
 A transcript containing only the initial user prompt is considered empty.
 * *Aged transcripts* are gzipped after `yca.sessions.compressDays` since their last write.
@@ -59,6 +60,29 @@ The compressed transcript remains readable and resumable.
 Normal session writes append entries.
 A `replace` operation, such as a compaction/prune flush, first writes a `.bak` sibling and preserves entry timestamps.
 It refuses to overwrite a nonempty session with an empty history, protecting against a transient read error erasing a valid transcript.
+
+=== Explicit maintenance cleanup
+
+Preview cleanup with the exact dashed CLI option names:
+
+[source,shell]
+----
+yca maintenance sessions clean --older-than 3d --bigger-than 1M --dry-run true
+----
+
+Supplying either `--older-than` or `--bigger-than` replaces the configured criteria as a set: only the supplied CLI filters apply, combined with AND when both are supplied.
+When neither CLI filter is supplied, cleanup uses `yca.sessions.clean.retentionDays` and `yca.sessions.clean.biggerThan`.
+Nonpositive configured retention disables the age criterion; when no criterion is enabled, the command does nothing.
+The JSON configuration fields are `sessions.clean.retentionDays` and `sessions.clean.biggerThan` under `yca`; `olderThan` is a CLI concept, not a JSON field.
+Migrate `yca.sessions.retentionDays` to `yca.sessions.clean.retentionDays`; the former property has no compatibility alias.
+
+Age and size thresholds are strict: a session must be older than the age threshold and larger than the size threshold, not equal to either enabled threshold.
+Size is the total number of bytes in regular files owned by a session, including artifacts and legacy sidecars; gzip files count their actual compressed bytes, not their expanded size.
+Cleanup does not follow symbolic links.
+The current process's resolved session and sessions written within the last 24 hours remain protected.
+
+WARNING: `--dry-run true` applies only to explicit maintenance cleanup, not normal startup housekeeping, which can still mutate session storage.
+Run maintenance offline with other YCA processes stopped: no cross-process lock is available to protect another process's active session.
 
 == Per-tab provider and model
 
