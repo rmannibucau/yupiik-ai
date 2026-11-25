@@ -17,16 +17,21 @@ package io.yupiik.ia.agent.github.command;
 
 import static org.junit.jupiter.api.Assertions.assertSame;
 
-import io.yupiik.ia.agent.core.configuration.ConfigurationLoader;
+import io.yupiik.fusion.testing.Fusion;
+import io.yupiik.fusion.testing.FusionSupport;
 import io.yupiik.ia.agent.github.configuration.FixConfiguration;
 import io.yupiik.ia.agent.github.configuration.PollOptions;
 import io.yupiik.ia.agent.github.service.MentionParser;
 import io.yupiik.ia.agent.github.service.Poller;
+import io.yupiik.ia.agent.github.support.GithubConfigurationTestModule;
 import java.util.ArrayList;
-import java.util.Optional;
 import org.junit.jupiter.api.Test;
 
+@FusionSupport(modules = GithubConfigurationTestModule.class)
 class PollCommandTest {
+    @Fusion
+    private PollCommand.Options defaultOptions;
+
     @Test
     void passesEachCommandsOptionsToTheSharedPoller() {
         final var received = new ArrayList<PollOptions>();
@@ -49,7 +54,7 @@ class PollCommandTest {
                         return 0;
                     }
                 };
-        final var defaults = ConfigurationLoader.load(PollCommand.Options.class, ignored -> Optional.empty());
+        final var defaults = defaultOptions;
         final var custom = new PollCommand.Options(new PollOptions(
                 "2026-01-01T00:00:00Z",
                 2,

@@ -31,6 +31,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.LongSupplier;
 
 /** Internal process lifecycle; public adapters select the command and its approval protocol. */
 abstract class BaseExecApprovalUi implements ApprovalUi {
@@ -41,6 +42,7 @@ abstract class BaseExecApprovalUi implements ApprovalUi {
 
     private final Path executable;
     private final ResultPolicy resultPolicy;
+    private final LongSupplier nanoTime;
     private final ExecutorService executor;
     private final ScopedValue<Boolean> inWorker = ScopedValue.newInstance();
     private final ReentrantLock lock = new ReentrantLock();
@@ -48,8 +50,13 @@ abstract class BaseExecApprovalUi implements ApprovalUi {
     private boolean closed;
 
     protected BaseExecApprovalUi(final Path executable, final ResultPolicy resultPolicy) {
+        this(executable, resultPolicy, System::nanoTime);
+    }
+
+    protected BaseExecApprovalUi(final Path executable, final ResultPolicy resultPolicy, final LongSupplier nanoTime) {
         this.executable = trustedExecutable(executable);
         this.resultPolicy = Objects.requireNonNull(resultPolicy, "resultPolicy");
+        this.nanoTime = Objects.requireNonNull(nanoTime, "nanoTime");
         this.executor = Executors.newVirtualThreadPerTaskExecutor();
     }
 
@@ -57,7 +64,7 @@ abstract class BaseExecApprovalUi implements ApprovalUi {
 
     @Override
     public final ApprovalHandle present(final String text, final Duration remaining) {
-        final var started = System.nanoTime();
+        final var started = nanoTime.getAsLong();
         Objects.requireNonNull(remaining, "remaining");
         Objects.requireNonNull(text, "text");
         // Apply the coordinator's limit here too: no backend may approve a truncated target.
@@ -76,7 +83,7 @@ abstract class BaseExecApprovalUi implements ApprovalUi {
             if (closed) {
                 throw new IllegalStateException("Approval UI is closed");
             }
-            if (budget <= 0 || System.nanoTime() - started >= budget) {
+            if (budget <= 0 || nanoTime.getAsLong() - started >= budget) {
                 return new Handle(null, started, budget);
             }
             final Process process;
@@ -125,7 +132,7 @@ abstract class BaseExecApprovalUi implements ApprovalUi {
     private boolean awaitDecision(final Process process, final long started, final long budget)
             throws IOException, InterruptedException {
         if (resultPolicy == ResultPolicy.EXIT_ZERO) {
-            final var left = budget - (System.nanoTime() - started);
+            final var left = budget - (nanoTime.getAsLong() - started);
             return left > 0 && process.waitFor(left, TimeUnit.NANOSECONDS) && process.exitValue() == 0;
         }
         // Poll and drain only available bytes: no pipe read can outlive the deadline.
@@ -142,7 +149,7 @@ abstract class BaseExecApprovalUi implements ApprovalUi {
                 }
                 size += count;
             }
-            final var left = budget - (System.nanoTime() - started);
+            final var left = budget - (nanoTime.getAsLong() - started);
             if (size == output.length || left <= 0) {
                 return false;
             }
@@ -215,7 +222,7 @@ abstract class BaseExecApprovalUi implements ApprovalUi {
                 final boolean approved;
                 lock.lock();
                 try {
-                    approved = allow && !cancelled && !closed && System.nanoTime() - started < budget;
+                    approved = allow && !cancelled && !closed && nanoTime.getAsLong() - started < budget;
                     active.remove(this);
                 } finally {
                     lock.unlock();

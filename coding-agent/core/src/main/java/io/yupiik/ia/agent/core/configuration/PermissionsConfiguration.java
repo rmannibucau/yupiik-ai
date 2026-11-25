@@ -24,7 +24,7 @@ public record PermissionsConfiguration(
         @Property(
                 defaultValue = "io.yupiik.ia.agent.core.configuration.PermissionMode.ASK",
                 documentation =
-                        "Permission mode: ask, auto_edit (edits allowed, bash asks), yolo or all (everything allowed).")
+                        "Permission mode: ask, auto_edit (edits allowed, bash asks), yolo or all (tool approvals bypassed, configured denies and sandbox retained), full_yolo (all tool permissions and sandbox bypassed).")
         PermissionMode mode,
 
         @Property(

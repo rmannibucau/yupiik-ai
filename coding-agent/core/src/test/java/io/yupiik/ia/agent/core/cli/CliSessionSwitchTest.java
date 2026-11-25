@@ -25,6 +25,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.fusion.framework.api.event.Emitter;
 import io.yupiik.fusion.json.JsonMapper;
+import io.yupiik.fusion.testing.Fusion;
+import io.yupiik.fusion.testing.FusionSupport;
 import io.yupiik.ia.agent.core.agent.AgentEvent;
 import io.yupiik.ia.agent.core.agent.AgentLoop;
 import io.yupiik.ia.agent.core.agent.AgentProvider;
@@ -34,7 +36,7 @@ import io.yupiik.ia.agent.core.cli.prompt.LinedPrompt;
 import io.yupiik.ia.agent.core.cli.prompt.PromptOutput;
 import io.yupiik.ia.agent.core.configuration.AgentMode;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
-import io.yupiik.ia.agent.core.configuration.TestConfigs;
+import io.yupiik.ia.agent.core.configuration.ConfigurationTestModule;
 import io.yupiik.ia.agent.core.context.UsageTracker;
 import io.yupiik.ia.agent.core.events.PermissionsChangedEvent;
 import io.yupiik.ia.agent.core.llm.ChatClient;
@@ -50,6 +52,7 @@ import io.yupiik.ia.agent.core.permissions.PermissionService;
 import io.yupiik.ia.agent.core.question.FeedbackGate;
 import io.yupiik.ia.agent.core.question.UserFeedbackService;
 import io.yupiik.ia.agent.core.runtime.StatusReporter;
+import io.yupiik.ia.agent.core.sandbox.DisabledSandbox;
 import io.yupiik.ia.agent.core.session.AgentSessionService;
 import io.yupiik.ia.agent.core.session.FileSessionStore;
 import io.yupiik.ia.agent.core.shell.ConversationCoordinator;
@@ -75,6 +78,7 @@ import java.nio.file.Path;
 import java.time.Clock;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.Deque;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -88,6 +92,7 @@ import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.BooleanSupplier;
 import java.util.function.Supplier;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.api.io.TempDir;
@@ -97,15 +102,41 @@ import org.junit.jupiter.params.provider.ValueSource;
 
 @Isolated // The CLI installs a process-wide SIGINT handler; each run restores it below.
 @ExtendWith(TestJsonMapper.class)
+@FusionSupport(modules = CliSessionSwitchTest.SessionModule.class)
 class CliSessionSwitchTest {
     @TempDir
-    private Path home;
+    private static Path home;
+
+    @Fusion
+    CodingAgentConfiguration configuration;
+
+    @BeforeEach
+    void resetStorage() throws IOException {
+        try (final var paths = Files.walk(home)) {
+            for (final var path : paths.sorted(Comparator.reverseOrder()).toList()) {
+                if (!path.equals(home)) {
+                    Files.delete(path);
+                }
+            }
+        }
+    }
+
+    public static class SessionModule extends ConfigurationTestModule {
+        public SessionModule() {
+            super(Map.of(
+                    "yca.storageHome", home.resolve("storage").toString(),
+                    "yca.workingDir", home.resolve("invocation").toString(),
+                    "yca.projectDir", home.resolve("invocation").toString(),
+                    "yca.memory.enabled", "true",
+                    "yca.memory.maxChars", "8000"));
+        }
+    }
 
     @ParameterizedTest
     @ValueSource(strings = {"correct", "cancel"})
     void rejectedStartupCommandStopsTheScriptWithoutSendingLaterEntries(final String choice, final JsonMapper mapper)
             throws Exception {
-        final var f = new Fixture(home, mapper);
+        final var f = new Fixture(home, mapper, configuration);
         f.initialPrompts = List.of("/hlep", "must not be submitted");
         if ("correct".equals(choice)) {
             f.answerOption("Mistyped command");
@@ -123,7 +154,7 @@ class CliSessionSwitchTest {
     @ParameterizedTest
     @ValueSource(strings = {"/tmp/file.txt", "//server/share", "/hello/world", "/tmp/file.txt /help"})
     void slashPathsArePromptsWithoutAnInteraction(final String text, final JsonMapper mapper) throws Exception {
-        final var f = new Fixture(home, mapper);
+        final var f = new Fixture(home, mapper, configuration);
         f.line(text);
         f.run();
 
@@ -135,7 +166,7 @@ class CliSessionSwitchTest {
 
     @Test
     void onlyTheFirstTokenDeterminesSlashRouting(final JsonMapper mapper) throws Exception {
-        final var f = new Fixture(home, mapper);
+        final var f = new Fixture(home, mapper, configuration);
         f.line("/help /tmp/file.txt");
         f.run();
 
@@ -146,7 +177,7 @@ class CliSessionSwitchTest {
 
     @Test
     void confirmedSlashPromptIsNotClassifiedAgain(final JsonMapper mapper) throws Exception {
-        final var f = new Fixture(home, mapper);
+        final var f = new Fixture(home, mapper, configuration);
         f.line("/hlep");
         f.answerOption("Send as normal input");
         f.run();
@@ -161,7 +192,7 @@ class CliSessionSwitchTest {
     @ValueSource(strings = {"correct", "cancel"})
     void correctingOrCancellingIsLocalAndPreservesTheOriginalInput(final String choice, final JsonMapper mapper)
             throws Exception {
-        final var f = new Fixture(home, mapper);
+        final var f = new Fixture(home, mapper, configuration);
         final var original = "  /hlep  keep this draft  ";
         final var before = new String[1];
         f.input.add(() -> {
@@ -190,7 +221,7 @@ class CliSessionSwitchTest {
     @ParameterizedTest
     @ValueSource(strings = {"path", "prompt", "correct", "cancel"})
     void busyRoutingChangesTheQueueOnlyForPrompts(final String choice, final JsonMapper mapper) throws Exception {
-        final var f = new Fixture(home, mapper);
+        final var f = new Fixture(home, mapper, configuration);
         f.deferred = new CompletableFuture<>();
         f.line("running");
         final var text = "path".equals(choice) ? "/tmp/file.txt" : "/hlep";
@@ -225,7 +256,7 @@ class CliSessionSwitchTest {
     @ValueSource(strings = {"/tmp/file.txt", "/hlep"})
     void initialSlashPromptWaitsForItsActualTurnBeforeTheNextEntry(final String text, final JsonMapper mapper)
             throws Exception {
-        final var f = new Fixture(home, mapper);
+        final var f = new Fixture(home, mapper, configuration);
         final var awaited = new AtomicBoolean();
         // Completing on get makes the wait observable, with no worker, sleeps or timeout waits.
         final var turn = new CompletableFuture<Boolean>() {
@@ -265,7 +296,7 @@ class CliSessionSwitchTest {
 
     @Test
     void resumeABARebindsTurnsToolsPromptsHooksMemoryAndRouting(final JsonMapper mapper) throws Exception {
-        final var f = new Fixture(home, mapper);
+        final var f = new Fixture(home, mapper, configuration);
         f.line("first");
         f.line("/resume B");
         f.input.add(() -> {
@@ -323,7 +354,7 @@ class CliSessionSwitchTest {
 
     @Test
     void newUsesActiveRootAndFreshPermissionsGatesAndSessionState(final JsonMapper mapper) throws Exception {
-        final var f = new Fixture(home, mapper);
+        final var f = new Fixture(home, mapper, configuration);
         f.line("/resume B");
         f.input.add(() -> {
             final var old = f.registry.active("B").session();
@@ -358,7 +389,7 @@ class CliSessionSwitchTest {
     @ValueSource(strings = {"missing", "root", "create", "gates"})
     void failedResumeLeavesTheOriginalSessionRuntimeTranscriptAndRouteIntact(
             final String failure, final JsonMapper mapper) throws Exception {
-        final var f = new Fixture(home, mapper);
+        final var f = new Fixture(home, mapper, configuration);
         f.failRoot = "root".equals(failure);
         f.failCreate = "create".equals(failure);
         f.failGates = "gates".equals(failure);
@@ -388,7 +419,7 @@ class CliSessionSwitchTest {
     @ValueSource(strings = {"root", "create", "gates", "marker"})
     void failedNewDoesNotRetireTheLiveRuntimeOrLeaveAnEmptySession(final String failure, final JsonMapper mapper)
             throws Exception {
-        final var f = new Fixture(home, mapper);
+        final var f = new Fixture(home, mapper, configuration);
         f.failRoot = "root".equals(failure);
         f.failCreate = "create".equals(failure);
         f.failGates = "gates".equals(failure);
@@ -412,7 +443,7 @@ class CliSessionSwitchTest {
 
     @Test
     void legacyAndStaleResumeMetadataUseInvocationDefaultNotPreviousRuntime(final JsonMapper mapper) throws Exception {
-        final var f = new Fixture(home, mapper);
+        final var f = new Fixture(home, mapper, configuration);
         f.store.replace("legacy", List.of(Message.user("legacy history")));
         f.store.replace(
                 "stale", List.of(Message.projectDir(home.resolve("gone").toString()), Message.user("stale history")));
@@ -433,7 +464,7 @@ class CliSessionSwitchTest {
     @Test
     void pendingTurnAndQueuedPromptCannotSwitchAndCancellationStillTargetsSubmittedTurn(final JsonMapper mapper)
             throws Exception {
-        final var f = new Fixture(home, mapper);
+        final var f = new Fixture(home, mapper, configuration);
         f.deferred = new CompletableFuture<>();
         f.line("running A");
         f.line("/new");
@@ -509,17 +540,13 @@ class CliSessionSwitchTest {
         private int rootsResolved;
         private CompletableFuture<Boolean> deferred;
 
-        private Fixture(final Path home, final JsonMapper mapper) throws Exception {
+        private Fixture(final Path home, final JsonMapper mapper, final CodingAgentConfiguration configuration)
+                throws Exception {
             this.mapper = mapper;
+            this.configuration = configuration;
             invocation = project(home.resolve("invocation"), "invocation");
             alpha = project(home.resolve("alpha"), "alpha");
             beta = project(home.resolve("beta"), "beta");
-            configuration = TestConfigs.codingAgent(Map.of(
-                    "yca.storageHome", home.resolve("storage").toString(),
-                    "yca.workingDir", invocation.toString(),
-                    "yca.projectDir", invocation.toString(),
-                    "yca.memory.enabled", "true",
-                    "yca.memory.maxChars", "8000"));
             store = new FileSessionStore() {
                 private final Map<String, List<Message>> messages = new LinkedHashMap<>();
                 private int next;
@@ -737,7 +764,7 @@ class CliSessionSwitchTest {
                                     null,
                                     null,
                                     root);
-                            final var loop = new AgentLoop(root) {
+                            final var loop = new AgentLoop(root, new DisabledSandbox(root)) {
                                 @Override
                                 public String run(
                                         final String prompt,
@@ -762,7 +789,8 @@ class CliSessionSwitchTest {
                                             cancelled,
                                             chatSettings(),
                                             () -> false,
-                                            root);
+                                            root,
+                                            new DisabledSandbox(root));
                                     final var result = new ReadFileTool(Fixture.this.configuration)
                                             .execute(Map.of("path", "root.txt"), context);
                                     assertTrue(result.success(), result.output());
@@ -793,7 +821,8 @@ class CliSessionSwitchTest {
                                     new StatusReporter(),
                                     null,
                                     builder,
-                                    root);
+                                    root,
+                                    new DisabledSandbox(root));
                             created.add(owned);
                             return owned.runtime;
                         }

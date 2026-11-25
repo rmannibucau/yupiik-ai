@@ -57,7 +57,10 @@ import java.util.logging.Level;
 import java.util.logging.Logger;
 
 @DefaultScoped
-@Command(name = "run", description = "Run a single headless prompt and print the answer on stdout.")
+@Command(
+        name = "run",
+        description =
+                "Run a single headless prompt and print the answer on stdout. All modes accept --sandbox true|false (yca.sandbox.enabled); sandbox policy is independent of tool permissions.")
 public class RunCommand implements Runnable {
     private static final Logger LOGGER = Logger.getLogger(RunCommand.class.getName());
     private static final int MAX_PROMPT_FILE_BYTES = 8 * 1024 * 1024;
@@ -285,10 +288,14 @@ public class RunCommand implements Runnable {
         } catch (final RuntimeException ignored) {
             // no configuration backing the permission state: skip the startup warning
         }
-        permissions.setGate((title, detail, tool, args) -> {
+        permissions.setGate(request -> {
+            final var title =
+                    (request.origin() == ApprovalGate.Origin.SANDBOX ? "Sandbox restriction: " : "Tool permission: ")
+                            + request.title();
+            final var detail = request.detail();
             LOGGER.severe(() -> "denied: " + title
                     + " requires an approval in headless mode (" + detail
-                    + "); set yca.permissions.mode=auto_edit/yolo to allow unattended runs, or use the TUI.");
+                    + "); use an interactive frontend to review this restriction.");
             return ApprovalGate.Result.DENY;
         });
         runtime.feedback().setGate(feedbackGate);

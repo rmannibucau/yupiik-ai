@@ -20,11 +20,16 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import io.yupiik.fusion.testing.Fusion;
+import io.yupiik.fusion.testing.FusionSupport;
 import io.yupiik.ia.agent.core.agent.AgentEvent;
 import io.yupiik.ia.agent.core.agent.SystemPromptBuilder;
-import io.yupiik.ia.agent.core.configuration.TestConfigs;
+import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
+import io.yupiik.ia.agent.core.configuration.ConfigurationTestModule;
 import io.yupiik.ia.agent.core.memory.MemoryCompactor;
 import io.yupiik.ia.agent.core.memory.MemoryStore;
+import io.yupiik.ia.agent.core.permissions.PermissionService;
+import io.yupiik.ia.agent.core.sandbox.DisabledSandbox;
 import io.yupiik.ia.agent.core.session.AgentSessionService;
 import io.yupiik.ia.agent.core.shell.ConversationTranscript;
 import io.yupiik.ia.agent.core.shell.SessionRuntime;
@@ -36,6 +41,7 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -75,58 +81,74 @@ class InspectCommandsTest {
         assertTrue(content.contains("(no tool executing)"), "must say no tool is executing: " + content);
     }
 
-    @Test
-    void memoryShowAndCompactUseSessionRoot(
-            @TempDir final Path home, @TempDir final Path first, @TempDir final Path second) throws Exception {
-        final var config =
-                TestConfigs.codingAgent(Map.of("yca.storageHome", home.toString(), "yca.workingDir", first.toString()));
-        final var store = new MemoryStore(config);
-        Files.createDirectories(store.globalFile().getParent());
-        Files.writeString(store.globalFile(), "- shared fact\n");
-        Files.createDirectories(MemoryStore.projectFile(first).getParent());
-        Files.createDirectories(MemoryStore.projectFile(second).getParent());
-        Files.writeString(MemoryStore.projectFile(first), "- first fact\n");
-        Files.writeString(MemoryStore.projectFile(second), "- second fact\n- another fact\n");
-        final var compacted = new ArrayList<Path>();
-        final var compactor = new MemoryCompactor(null, null, null, null, null) {
-            @Override
-            public String compactNow(final Path root) {
-                compacted.add(root);
-                return "compacted " + root;
-            }
+    @Nested
+    @FusionSupport(modules = MemoryRootsModule.class)
+    class MemoryRoots {
+        @TempDir
+        static Path directory;
 
-            @Override
-            public CompactionState state(final Path root) {
-                return new CompactionState(1, root.equals(first) ? 101 : 202, 20);
-            }
-        };
-        final var commands = new InspectCommands(
-                new AgentSessionService(null, null, null, null, store, null, null, null, config, null, compactor));
-        for (final var root : List.of(first, second)) {
-            final var builder = new SystemPromptBuilder(testWorkdir) {
+        @Test
+        void memoryShowAndCompactUseSessionRoot(
+                @Fusion final CodingAgentConfiguration config, @TempDir final Path second) throws Exception {
+            final var first = Path.of(config.workingDir());
+            final var store = new MemoryStore(config);
+            Files.createDirectories(store.globalFile().getParent());
+            Files.writeString(store.globalFile(), "- shared fact\n");
+            Files.createDirectories(MemoryStore.projectFile(first).getParent());
+            Files.createDirectories(MemoryStore.projectFile(second).getParent());
+            Files.writeString(MemoryStore.projectFile(first), "- first fact\n");
+            Files.writeString(MemoryStore.projectFile(second), "- second fact\n- another fact\n");
+            final var compacted = new ArrayList<Path>();
+            final var compactor = new MemoryCompactor(null, null, null, null, null) {
                 @Override
-                public Path effectiveWorkdir() {
-                    return root;
+                public String compactNow(final Path root) {
+                    compacted.add(root);
+                    return "compacted " + root;
+                }
+
+                @Override
+                public CompactionState state(final Path root) {
+                    return new CompactionState(1, root.equals(first) ? 101 : 202, 20);
                 }
             };
-            final var env = new ShellEnv(
-                    null,
-                    null,
-                    new ShellSession()
-                            .sessionId("s1")
-                            .runtime(new SessionRuntime(null, null, null, null, null, null, null, builder, root)),
-                    new ConversationTranscript());
-            final var shown = content(command(commands, env, "/memory show"));
-            final var project = Files.readString(MemoryStore.projectFile(root));
-            assertTrue(shown.contains(project));
-            assertTrue(shown.contains("- shared fact"));
-            assertTrue(shown.contains(
-                    "-- project: " + project.length() + " chars, " + (root.equals(first) ? 1 : 2) + " bullets"));
-            assertTrue(shown.contains(root.equals(first) ? "before=101" : "before=202"));
-            assertFalse(shown.contains(root.equals(first) ? "second fact" : "first fact"));
-            assertTrue(content(command(commands, env, "/memory compact")).contains("compacted " + root));
+            final var commands = new InspectCommands(
+                    new AgentSessionService(null, null, null, null, store, null, null, null, config, null, compactor));
+            for (final var root : List.of(first, second)) {
+                final var builder = new SystemPromptBuilder(testWorkdir) {
+                    @Override
+                    public Path effectiveWorkdir() {
+                        return root;
+                    }
+                };
+                final var env = new ShellEnv(
+                        null,
+                        null,
+                        new ShellSession()
+                                .sessionId("s1")
+                                .runtime(new SessionRuntime(
+                                        null,
+                                        new PermissionService(config, root),
+                                        null,
+                                        null,
+                                        null,
+                                        null,
+                                        null,
+                                        builder,
+                                        root,
+                                        new DisabledSandbox(root))),
+                        new ConversationTranscript());
+                final var shown = content(command(commands, env, "/memory show"));
+                final var project = Files.readString(MemoryStore.projectFile(root));
+                assertTrue(shown.contains(project));
+                assertTrue(shown.contains("- shared fact"));
+                assertTrue(shown.contains(
+                        "-- project: " + project.length() + " chars, " + (root.equals(first) ? 1 : 2) + " bullets"));
+                assertTrue(shown.contains(root.equals(first) ? "before=101" : "before=202"));
+                assertFalse(shown.contains(root.equals(first) ? "second fact" : "first fact"));
+                assertTrue(content(command(commands, env, "/memory compact")).contains("compacted " + root));
+            }
+            assertEquals(List.of(first, second), compacted);
         }
-        assertEquals(List.of(first, second), compacted);
     }
 
     @Test
@@ -157,14 +179,34 @@ class InspectCommandsTest {
         final var commands = new InspectCommands(service);
         final var session = new ShellSession()
                 .sessionId("s1")
-                .runtime(new SessionRuntime(null, null, null, null, null, null, null, null, testWorkdir));
+                .runtime(new SessionRuntime(
+                        null,
+                        new PermissionService(testWorkdir) {},
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        testWorkdir,
+                        new DisabledSandbox(testWorkdir)));
         final var env = new ShellEnv(null, null, session, new ConversationTranscript());
         for (var i = 0; i < 2; i++) {
             final var shown = content(command(commands, env, "/memory"));
             assertTrue(shown.contains("legacy project"));
             assertTrue(shown.contains("-- project: 14 chars, 0 bullets"));
             assertTrue(content(command(commands, env, "/memory compact")).contains("legacy compaction"));
-            session.runtime(new SessionRuntime(null, null, null, null, null, null, null, null, testWorkdir));
+            session.runtime(new SessionRuntime(
+                    null,
+                    new PermissionService(testWorkdir) {},
+                    null,
+                    null,
+                    null,
+                    null,
+                    null,
+                    null,
+                    testWorkdir,
+                    new DisabledSandbox(testWorkdir)));
         }
         assertEquals(List.of("stats", "show", "compact", "stats", "show", "compact"), calls);
     }
@@ -198,5 +240,15 @@ class InspectCommandsTest {
             return message;
         }
         return String.valueOf(outcome);
+    }
+
+    public static class MemoryRootsModule extends ConfigurationTestModule {
+        public MemoryRootsModule() {
+            super(Map.of(
+                    "yca.storageHome",
+                    MemoryRoots.directory.toString(),
+                    "yca.workingDir",
+                    MemoryRoots.directory.resolve("first").toString()));
+        }
     }
 }

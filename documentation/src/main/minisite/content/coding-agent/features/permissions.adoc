@@ -2,16 +2,21 @@
 :minisite-breadcrumb: Home[../index.html] > Features[../features.html] > Permission modes
 :minisite-nav-prev-link: modes.html
 :minisite-nav-prev-label: Plan and build modes
-:minisite-nav-next-link: sandboxes.html
-:minisite-nav-next-label: External sandboxing (nono, AgentFS, isx)
+:minisite-nav-next-link: ../sandboxing/overview.html
+:minisite-nav-next-label: Sandboxing
 
 Choose how yca asks for approval before executing tools:
 
 * `ask` prompts for actions that need approval.
 * `auto_edit` allows file edits without prompting; other mutable actions still reach the gate unless a rule allows them.
-* `yolo` (alias `all`) bypasses approval prompts, but not deny rules.
+* `yolo` (alias `all`) bypasses ordinary tool approval prompts, but not deny rules.
+It keeps sandbox checks and human prompts for requested sandbox expansion.
+* `full_yolo` bypasses all tool permission policy, including deny rules and permission-layer plan checks, and disables the sandbox.
 
-Allow/deny glob lists apply in every mode.
+WARNING: `full_yolo` is not recommended: it is an explicit unrestricted host-execution mode, not a faster sandboxed mode.
+Use `yolo` with sandboxing enabled when you want automatic tool consent while retaining filesystem/network limits and human-reviewed capability expansion.
+
+Allow/deny glob lists apply in every mode except `full_yolo`.
 Entries can be tool names (`bash`) or command patterns (`rm *`, `bash:rm -rf *`).
 Each segment of a compound command must pass, and deny rules take precedence.
 
@@ -19,14 +24,22 @@ Plan mode also hides file-mutating tools (`edit_file`, `write_file`, `apply_patc
 See xref:modes.adoc[Plan and build modes] for this separate axis.
 
 IMPORTANT: Approval is not isolation.
-An approved command runs with the process's privileges; use xref:sandboxes.adoc[external sandboxing] to confine it.
+Permissions are the receptionist deciding whether an action has consent; the sandbox is the locked workshop limiting what an approved action can reach.
+Tool approvals, allow rules and `yolo` do not grant sandbox access or disable its restrictions.
+The built-in session sandbox defaults to enabled, but its Linux native backend and default policy have important limitations; see xref:../sandboxing/overview.adoc[Sandboxes and tool permissions] before relying on it.
+With sandboxing explicitly disabled, an approved command runs with the controller process's privileges.
+In TUI and web, `yolo` is yellow with a warning marker while sandboxing is active, and red with a warning marker without it.
+`full_yolo` is always red with a warning marker, regardless of configured sandbox settings.
+Other operational checks, such as tool availability, cancellation and argument validation, still apply; `full_yolo` is not a promise to make an unavailable tool exist.
 
 The diagram summarizes the approval path after a tool is available in the active mode:
 
 [mermaid]
 ....
 graph TD
-    C[Tool call] --> D{Denied by policy?}
+    C[Tool call] --> F{full_yolo?}
+    F -->|yes| H[Host execution - no permission or sandbox boundary]
+    F -->|no| D{Denied by policy?}
     D -->|yes| DENY[Blocked]
     D -->|no| A{Allow list or session grant?}
     A -->|yes| O[Allowed silently]
@@ -48,9 +61,14 @@ graph TD
 |`ask` (default) |prompt |prompt |allowed silently
 |`auto_edit` (alias `autoedit`) |allowed silently |prompt |allowed silently
 |`yolo` (alias `all`) |allowed silently |allowed silently |allowed silently
+|`full_yolo` (not recommended) |allowed silently; denies bypassed |allowed silently; sandbox disabled |allowed silently; sandbox disabled
 |===
 
 == Sample tools by category
+
+These categories describe tool consent, not sandbox availability.
+While sandboxed, adapted Java network tools still require authorized destinations, and unadapted skill, knowledge and other tools require trust regardless of category.
+MCP servers are trusted by default, not confined; see xref:../sandboxing/overview.adoc#_capability_approval_and_integration_limits[integration limits].
 
 [cols="1,2", opts=headers]
 |===
@@ -63,11 +81,10 @@ graph TD
 |MCP (read-only calls never prompted, others follow the mode) |`<server>_<tool>`
 |===
 
-IMPORTANT: `yolo` bypasses the approval gate but not the deny list:
-`yca.permissions.deny` (including denied bash segments) is enforced in every
-mode, including `yolo`.
-`yca.permissions.allow` and session grants are resolved before the mode, so they
-behave the same in all three modes.
+IMPORTANT: `yolo` bypasses the tool approval gate but not the deny list or separate sandbox approval gate:
+`yca.permissions.deny` (including denied bash segments) is enforced in `ask`, `auto_edit` and `yolo`, but explicitly bypassed by `full_yolo`.
+`yca.permissions.allow` and session grants are resolved before the mode in `ask`, `auto_edit` and `yolo`.
+`full_yolo` bypasses that permission policy entirely.
 
 NOTE: This page covers the permission mode axis. The orthogonal plan/build axis
 (`plan` is read-only) is covered in xref:modes.adoc[Plan and build modes].

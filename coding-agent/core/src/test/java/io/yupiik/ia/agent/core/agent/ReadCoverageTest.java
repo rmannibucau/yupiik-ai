@@ -19,6 +19,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import io.yupiik.ia.agent.core.sandbox.DisabledSandbox;
 import io.yupiik.ia.agent.core.tools.ToolContext;
 import io.yupiik.ia.agent.core.tools.builtin.ReadFileTool;
 import java.io.IOException;
@@ -52,7 +53,8 @@ class ReadCoverageTest {
         final var coverage = new ReadCoverage();
         final var key = ReadCoverage.key(file);
         final var output = tool.execute(
-                        Map.of("path", file.toString(), "offset", 2, "limit", 2000), ToolContext.empty(root))
+                        Map.of("path", file.toString(), "offset", 2, "limit", 2000),
+                        ToolContext.empty(root, new DisabledSandbox(root)))
                 .output();
         assertTrue(coverage.record(key, output));
         assertFalse(coverage.record(key, lines(2, 3)));
@@ -99,15 +101,19 @@ class ReadCoverageTest {
         final var key = ReadCoverage.key(root);
         assertTrue(coverage.record(
                 key,
-                tool.execute(Map.of("path", root.toString(), "limit", 1), ToolContext.empty(root))
+                tool.execute(
+                                Map.of("path", root.toString(), "limit", 1),
+                                ToolContext.empty(root, new DisabledSandbox(root)))
                         .output()));
         assertTrue(coverage.record(
                 key,
-                tool.execute(Map.of("path", root.toString(), "offset", 2), ToolContext.empty(root))
+                tool.execute(
+                                Map.of("path", root.toString(), "offset", 2),
+                                ToolContext.empty(root, new DisabledSandbox(root)))
                         .output()));
         assertFalse(coverage.record(
                 key,
-                tool.execute(Map.of("path", root.toString()), ToolContext.empty(root))
+                tool.execute(Map.of("path", root.toString()), ToolContext.empty(root, new DisabledSandbox(root)))
                         .output()));
         assertTrue(coverage.record(key, "Read directory " + root + ", entries 4-4\nnew\n"));
         assertTrue(coverage.record(key, lines(1, 4))); // separate coordinate space
@@ -191,7 +197,8 @@ class ReadCoverageTest {
                 null,
                 null,
                 null,
-                () -> false);
+                () -> false,
+                new DisabledSandbox(root));
         final var method =
                 ToolCallExecution.class.getDeclaredMethod("coverageKeys", String.class, Map.class, ToolContext.class);
         method.setAccessible(true);
@@ -209,6 +216,7 @@ class ReadCoverageTest {
                 null,
                 null,
                 root,
+                new DisabledSandbox(root),
                 -1,
                 null,
                 null,

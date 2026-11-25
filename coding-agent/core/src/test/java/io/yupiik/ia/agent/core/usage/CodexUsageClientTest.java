@@ -23,8 +23,10 @@ import com.sun.net.httpserver.HttpServer;
 import io.yupiik.fusion.httpclient.core.ExtendedHttpClient;
 import io.yupiik.fusion.httpclient.core.ExtendedHttpClientConfiguration;
 import io.yupiik.fusion.json.JsonMapper;
+import io.yupiik.fusion.testing.Fusion;
+import io.yupiik.fusion.testing.FusionSupport;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
-import io.yupiik.ia.agent.core.configuration.ConfigurationLoader;
+import io.yupiik.ia.agent.core.configuration.ConfigurationTestModule;
 import io.yupiik.ia.agent.core.llm.CodexAuthTemplateHelper;
 import io.yupiik.ia.agent.test.TestJsonMapper;
 import io.yupiik.llm.client.codex.CodexOAuthConfig;
@@ -35,8 +37,8 @@ import java.net.http.HttpClient;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.HashMap;
-import java.util.Optional;
+import java.util.Map;
+import java.util.UUID;
 import java.util.concurrent.CopyOnWriteArrayList;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -46,20 +48,26 @@ import org.junit.jupiter.api.io.TempDir;
 
 /** Tests the Codex usage quota client: endpoint path, auth headers and payload decoding. */
 @ExtendWith(TestJsonMapper.class)
+@FusionSupport(modules = CodexUsageClientTest.UsageModule.class)
 class CodexUsageClientTest {
 
     private HttpServer server;
     private String serverUrl;
 
     @TempDir
-    Path storage;
+    static Path root;
+
+    private Path storage;
+    private CodingAgentConfiguration configuration;
 
     private ExtendedHttpClient httpClient;
     private HttpClient delegate;
     private final CopyOnWriteArrayList<String[]> requestHeaders = new CopyOnWriteArrayList<>();
 
     @BeforeEach
-    void start() throws IOException {
+    void start(@Fusion final CodingAgentConfiguration configuration) throws IOException {
+        this.configuration = configuration;
+        storage = Path.of(configuration.resolveStorageHome());
         server = HttpServer.create(new InetSocketAddress("localhost", 0), 0);
         serverUrl = "http://localhost:" + server.getAddress().getPort();
         server.createContext("/", exchange -> {
@@ -134,16 +142,18 @@ class CodexUsageClientTest {
     }
 
     private CodexAuthTemplateHelper helper(final JsonMapper mapper) {
-        final var helper = new CodexAuthTemplateHelper(mapper, httpClient, config());
+        final var helper = new CodexAuthTemplateHelper(mapper, httpClient, configuration);
         helper.setOAuthConfig(
                 new CodexOAuthConfig(serverUrl, "test-client", "openid", serverUrl + "/codex/device", 1455));
         return helper;
     }
 
-    private CodingAgentConfiguration config() {
-        final var map = new HashMap<String, String>();
-        map.put("yca.storageHome", storage.toString());
-        return ConfigurationLoader.load(CodingAgentConfiguration.class, key -> Optional.ofNullable(map.get(key)));
+    public static class UsageModule extends ConfigurationTestModule {
+        public UsageModule() {
+            super(Map.of(
+                    "yca.storageHome",
+                    root.resolve(UUID.randomUUID().toString()).toString()));
+        }
     }
 
     private void seed(final JsonMapper mapper, final String provider, final CodexTokenStore store) throws IOException {

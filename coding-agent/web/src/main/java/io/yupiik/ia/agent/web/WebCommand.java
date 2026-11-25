@@ -38,7 +38,10 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * the default browser. Blocks until shut down.
  */
 @DefaultScoped
-@Command(name = "web", description = "Start the web UI and JSON-RPC/SSE server on the configured host and port.")
+@Command(
+        name = "web",
+        description =
+                "Start the web UI and JSON-RPC/SSE server on the configured host and port. All modes accept --sandbox true|false (yca.sandbox.enabled); sandbox policy is independent of tool permissions.")
 public class WebCommand implements Runnable, AutoCloseable {
     private final WebConf conf;
     private final SseBroker broker;

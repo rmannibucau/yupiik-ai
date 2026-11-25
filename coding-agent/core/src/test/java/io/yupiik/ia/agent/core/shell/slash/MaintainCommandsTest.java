@@ -19,10 +19,16 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import io.yupiik.fusion.testing.Fusion;
+import io.yupiik.fusion.testing.FusionSupport;
 import io.yupiik.ia.agent.core.agent.AgentLoop;
 import io.yupiik.ia.agent.core.agent.SystemPromptBuilder;
+import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
+import io.yupiik.ia.agent.core.configuration.ConfigurationTestModule;
 import io.yupiik.ia.agent.core.llm.ChatSettings;
 import io.yupiik.ia.agent.core.maven.MavenRepositoryKnowledgeService;
+import io.yupiik.ia.agent.core.permissions.PermissionService;
+import io.yupiik.ia.agent.core.sandbox.DisabledSandbox;
 import io.yupiik.ia.agent.core.shell.ConversationTranscript;
 import io.yupiik.ia.agent.core.shell.SessionRuntime;
 import io.yupiik.ia.agent.core.shell.ShellEnv;
@@ -40,7 +46,11 @@ import org.junit.jupiter.api.io.TempDir;
  * {@code keep=<n>} must reach the queued directive exactly as typed (the destructive urgent flag is
  * opt-in and must never leak into the plain {@code /compact} form).
  */
+@FusionSupport(modules = ConfigurationTestModule.class)
 class MaintainCommandsTest {
+    @Fusion
+    private CodingAgentConfiguration configuration;
+
     @TempDir
     private static Path testWorkdir;
 
@@ -103,7 +113,17 @@ class MaintainCommandsTest {
                 return List.of("runtime status");
             }
         };
-        final var runtime = new SessionRuntime(null, null, null, null, null, null, null, null, testWorkdir);
+        final var runtime = new SessionRuntime(
+                null,
+                new PermissionService(configuration, testWorkdir),
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                testWorkdir,
+                new DisabledSandbox(testWorkdir));
         assertEquals(
                 new ShellOutcome.Transcript("> maven-repository-knowledge:\nruntime status"),
                 runMaven(mavenCommand(service), "status", new ShellSession().runtime(runtime)));
@@ -125,8 +145,8 @@ class MaintainCommandsTest {
                 .join();
     }
 
-    private static ShellSession mavenSession(final Path root, final ChatSettings settings) {
-        final var loop = new AgentLoop(testWorkdir) {
+    private ShellSession mavenSession(final Path root, final ChatSettings settings) {
+        final var loop = new AgentLoop(testWorkdir, new DisabledSandbox(testWorkdir)) {
             @Override
             public ChatSettings chatSettings() {
                 return settings;
@@ -140,13 +160,24 @@ class MaintainCommandsTest {
                         return root;
                     }
                 };
-        return new ShellSession().runtime(new SessionRuntime(loop, null, null, null, null, null, null, builder, root));
+        return new ShellSession()
+                .runtime(new SessionRuntime(
+                        loop,
+                        new PermissionService(configuration, root),
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        builder,
+                        root,
+                        new DisabledSandbox(root)));
     }
 
     /** An agent loop that records the context-operation requests it receives. */
     private static final class RecordingLoop extends AgentLoop {
         private RecordingLoop() {
-            super(testWorkdir);
+            super(testWorkdir, new DisabledSandbox(testWorkdir));
         }
 
         private final List<String> requests = new ArrayList<>();
@@ -179,10 +210,20 @@ class MaintainCommandsTest {
                 .join();
     }
 
-    private static ShellSession busySession(final RecordingLoop loop) {
+    private ShellSession busySession(final RecordingLoop loop) {
         return new ShellSession()
                 .busy(true)
-                .runtime(new SessionRuntime(loop, null, null, null, null, null, null, null, testWorkdir));
+                .runtime(new SessionRuntime(
+                        loop,
+                        new PermissionService(configuration, testWorkdir),
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        testWorkdir,
+                        new DisabledSandbox(testWorkdir)));
     }
 
     @Test

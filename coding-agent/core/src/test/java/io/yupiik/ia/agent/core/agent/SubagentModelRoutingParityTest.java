@@ -20,11 +20,13 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.fusion.json.JsonMapper;
+import io.yupiik.fusion.testing.Fusion;
+import io.yupiik.fusion.testing.FusionSupport;
 import io.yupiik.ia.agent.core.configuration.AgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
+import io.yupiik.ia.agent.core.configuration.ConfigurationTestModule;
 import io.yupiik.ia.agent.core.configuration.ModelVariantConfiguration;
 import io.yupiik.ia.agent.core.configuration.SpawnSubagentToolConfiguration;
-import io.yupiik.ia.agent.core.configuration.TestConfigs;
 import io.yupiik.ia.agent.core.llm.ChatSettings;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import io.yupiik.ia.agent.test.TestJsonMapper;
@@ -41,23 +43,9 @@ import org.junit.jupiter.api.extension.ExtendWith;
  * drift between the approved tuple and the routed reference would fail here.
  */
 @ExtendWith(TestJsonMapper.class)
+@FusionSupport(modules = SubagentModelRoutingParityTest.TestModule.class)
 class SubagentModelRoutingParityTest {
     private JsonMapper mapper;
-
-    private CodingAgentConfiguration config(final Map<String, String> overrides) {
-        final var entries = new HashMap<String, String>();
-        entries.put("yca.provider.providers.length", "2");
-        entries.put("yca.provider.providers.0.id", "default");
-        entries.put("yca.provider.providers.0.model", "parent-model");
-        entries.put("yca.provider.providers.0.models.length", "1");
-        entries.put("yca.provider.providers.0.models.0.model", "parent-model");
-        entries.put("yca.provider.providers.1.id", "child");
-        entries.put("yca.provider.providers.1.model", "child-model");
-        entries.put("yca.provider.providers.1.models.length", "1");
-        entries.put("yca.provider.providers.1.models.0.model", "child-model");
-        entries.putAll(overrides);
-        return TestConfigs.codingAgent(entries);
-    }
 
     private ProviderManager manager(final CodingAgentConfiguration cfg) {
         return new ProviderManager(cfg, mapper);
@@ -70,9 +58,9 @@ class SubagentModelRoutingParityTest {
     }
 
     @Test
-    void gateApprovedModelIsWhatRunSettingsRouteTo(final JsonMapper mapper) {
+    void gateApprovedModelIsWhatRunSettingsRouteTo(
+            final JsonMapper mapper, @Fusion final CodingAgentConfiguration cfg) {
         this.mapper = mapper;
-        final var cfg = config(Map.of());
         final var pm = configuredPm(cfg);
         final var resolver = new AgentModelResolver(pm);
         final var policy = new SpawnSubagentToolConfiguration(List.of("reviewer"), List.of("child"), List.of());
@@ -87,9 +75,9 @@ class SubagentModelRoutingParityTest {
     }
 
     @Test
-    void profileModelRoutesOnTheProviderManagerAndPassesGate(final JsonMapper mapper) {
+    void profileModelRoutesOnTheProviderManagerAndPassesGate(
+            final JsonMapper mapper, @Fusion final CodingAgentConfiguration cfg) {
         this.mapper = mapper;
-        final var cfg = config(Map.of());
         final var pm = configuredPm(cfg);
         final var resolver = new AgentModelResolver(pm);
         final var profile = new AgentConfiguration(
@@ -107,11 +95,11 @@ class SubagentModelRoutingParityTest {
     }
 
     @Test
-    void bareDeclaredModelPinsToItsProviderNotTheProcessCurrent(final JsonMapper mapper) {
+    void bareDeclaredModelPinsToItsProviderNotTheProcessCurrent(
+            final JsonMapper mapper, @Fusion final CodingAgentConfiguration cfg) {
         this.mapper = mapper;
         // process current = "default" (no setProvider): a bare "child-model" must still route to
         // the provider that declares it, not to the process current provider.
-        final var cfg = config(Map.of());
         final var pm = manager(cfg);
         final var resolver = new AgentModelResolver(pm);
         final var policy = new SpawnSubagentToolConfiguration(List.of(), List.of("child"), List.of());
@@ -127,12 +115,12 @@ class SubagentModelRoutingParityTest {
     }
 
     @Test
-    void undeclaredBareModelFallsBackToInheritedProviderNotProcessCurrent(final JsonMapper mapper) {
+    void undeclaredBareModelFallsBackToInheritedProviderNotProcessCurrent(
+            final JsonMapper mapper, @Fusion final CodingAgentConfiguration cfg) {
         this.mapper = mapper;
         // the user-reported case: the session runs on "child" (codex), the process current is
         // "default", and the bare model is declared by no configured provider. It must follow the
         // spawning session's provider, not the process current.
-        final var cfg = config(Map.of());
         final var pm = manager(cfg);
         final var resolver = new AgentModelResolver(pm);
         final var policy = new SpawnSubagentToolConfiguration(List.of(), List.of("child"), List.of());
@@ -148,9 +136,9 @@ class SubagentModelRoutingParityTest {
     }
 
     @Test
-    void policyRejectsWhenProviderNotAllowedDespiteAModelThatResolves(final JsonMapper mapper) {
+    void policyRejectsWhenProviderNotAllowedDespiteAModelThatResolves(
+            final JsonMapper mapper, @Fusion final CodingAgentConfiguration cfg) {
         this.mapper = mapper;
-        final var cfg = config(Map.of());
         final var pm = configuredPm(cfg);
         final var resolver = new AgentModelResolver(pm);
         // allowedProviders only lists "default", but the model routes to "child": the gate must reject.
@@ -162,9 +150,9 @@ class SubagentModelRoutingParityTest {
     }
 
     @Test
-    void inheritedModelIsKeptWhenNothingElseIsConfigured(final JsonMapper mapper) {
+    void inheritedModelIsKeptWhenNothingElseIsConfigured(
+            final JsonMapper mapper, @Fusion final CodingAgentConfiguration cfg) {
         this.mapper = mapper;
-        final var cfg = config(Map.of());
         final var pm = configuredPm(cfg);
         final var resolver = new AgentModelResolver(pm);
         final var inherited = ChatSettings.EMPTY.withProviderId("child").withModel("child-model");
@@ -174,5 +162,25 @@ class SubagentModelRoutingParityTest {
         assertTrue(SubagentModelPolicy.allows(policy, effective), "the inherited selection remains usable");
         assertEquals("child-model", effective.settings().model());
         assertEquals("child", effective.settings().providerId());
+    }
+
+    public static class TestModule extends ConfigurationTestModule {
+        public TestModule() {
+            super(values());
+        }
+
+        private static Map<String, String> values() {
+            final var entries = new HashMap<String, String>();
+            entries.put("yca.provider.providers.length", "2");
+            entries.put("yca.provider.providers.0.id", "default");
+            entries.put("yca.provider.providers.0.model", "parent-model");
+            entries.put("yca.provider.providers.0.models.length", "1");
+            entries.put("yca.provider.providers.0.models.0.model", "parent-model");
+            entries.put("yca.provider.providers.1.id", "child");
+            entries.put("yca.provider.providers.1.model", "child-model");
+            entries.put("yca.provider.providers.1.models.length", "1");
+            entries.put("yca.provider.providers.1.models.0.model", "child-model");
+            return entries;
+        }
     }
 }

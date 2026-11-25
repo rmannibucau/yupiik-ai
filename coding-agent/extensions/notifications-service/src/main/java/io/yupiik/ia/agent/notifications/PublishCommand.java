@@ -6,6 +6,7 @@
  */
 package io.yupiik.ia.agent.notifications;
 
+import io.yupiik.fusion.framework.api.configuration.Configuration;
 import io.yupiik.fusion.framework.api.scope.DefaultScoped;
 import io.yupiik.fusion.framework.build.api.cli.Command;
 import java.io.IOException;
@@ -18,22 +19,28 @@ public class PublishCommand implements Runnable {
     private final NoticeConfiguration notice;
     private final NotificationEndpoint endpoint;
     private final Clock clock;
+    private final Configuration values;
 
     public PublishCommand(
             final ServiceConfiguration configuration,
             final NoticeConfiguration notice,
             final NotificationEndpoint endpoint,
-            final Clock clock) {
+            final Clock clock,
+            final Configuration values) {
         this.configuration = configuration;
         this.notice = notice;
         this.endpoint = endpoint;
         this.clock = clock;
+        this.values = values;
     }
 
     @Override
     public void run() {
         try {
-            endpoint.publish(configuration, Notice.fromConfiguration(notice, clock));
+            endpoint.publish(
+                    configuration,
+                    Notice.fromConfiguration(
+                            notice, clock, values.get("yca.notification.origin").orElse(null)));
         } catch (final IOException error) {
             throw new IllegalStateException("Cannot publish notification; ensure the notification service is running.");
         }

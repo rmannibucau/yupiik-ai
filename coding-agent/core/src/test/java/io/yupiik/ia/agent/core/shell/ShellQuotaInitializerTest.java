@@ -18,7 +18,13 @@ package io.yupiik.ia.agent.core.shell;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
+import io.yupiik.fusion.testing.Fusion;
+import io.yupiik.fusion.testing.FusionSupport;
 import io.yupiik.ia.agent.core.agent.AgentLoop;
+import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
+import io.yupiik.ia.agent.core.configuration.ConfigurationTestModule;
+import io.yupiik.ia.agent.core.permissions.PermissionService;
+import io.yupiik.ia.agent.core.sandbox.DisabledSandbox;
 import java.nio.file.Path;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.Test;
@@ -29,20 +35,34 @@ import org.junit.jupiter.api.io.TempDir;
  * refresh so the sidebar gauge shows usage before the first turn ran even when no provider switch
  * happens; shells without a runtime must be ignored (no NPE, no push).
  */
+@FusionSupport(modules = ConfigurationTestModule.class)
 class ShellQuotaInitializerTest {
+    @Fusion
+    private CodingAgentConfiguration configuration;
+
     @TempDir
     private static Path testWorkdir;
 
     @Test
     void registeredShellWithRuntimeRefreshesQuota() {
         final var refreshed = new AtomicInteger();
-        final var loop = new AgentLoop(testWorkdir) {
+        final var loop = new AgentLoop(testWorkdir, new DisabledSandbox(testWorkdir)) {
             @Override
             public void refreshUsage() {
                 refreshed.incrementAndGet();
             }
         };
-        final var runtime = new SessionRuntime(loop, null, null, null, null, null, null, null, testWorkdir);
+        final var runtime = new SessionRuntime(
+                loop,
+                new PermissionService(configuration, testWorkdir),
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                testWorkdir,
+                new DisabledSandbox(testWorkdir));
         final var session = new ShellSession().sessionId("t1").runtime(runtime);
         final var env = new ShellEnv(null, null, session, new ConversationTranscript());
 

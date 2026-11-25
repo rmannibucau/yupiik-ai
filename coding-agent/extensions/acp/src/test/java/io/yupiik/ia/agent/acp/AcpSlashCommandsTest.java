@@ -537,7 +537,12 @@ class AcpSlashCommandsTest {
         final var registry = registry("model", "[name]", (arg, supplied) -> {
             assertSame(env, supplied);
             assertSame(io.gate, supplied.io().approvalGate());
-            assertEquals(ApprovalGate.Result.DENY, supplied.io().approvalGate().approve("t", "d", "tool", Map.of()));
+            assertEquals(
+                    ApprovalGate.Result.DENY,
+                    supplied.io()
+                            .approvalGate()
+                            .approve(new ApprovalGate.Request(
+                                    ApprovalGate.Origin.PERMISSION, "t", "d", "tool", Map.of())));
             return supplied.io()
                     .pick("model", List.of("one", "two"))
                     .thenApply(selected -> ShellOutcome.status(selected.orElse("cancelled")));
@@ -622,7 +627,7 @@ class AcpSlashCommandsTest {
 
     private static final class FakeIO implements ShellIO {
         private final CompletableFuture<Optional<String>> reply = new CompletableFuture<>();
-        private final ApprovalGate gate = (title, detail, name, args) -> ApprovalGate.Result.DENY;
+        private final ApprovalGate gate = request -> ApprovalGate.Result.DENY;
         private int inputs;
 
         @Override

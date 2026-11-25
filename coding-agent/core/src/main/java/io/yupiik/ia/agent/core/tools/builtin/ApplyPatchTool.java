@@ -136,6 +136,10 @@ public class ApplyPatchTool implements EmbeddedTool {
         final var capture = new FileMutationCapture();
         try {
             final List<Change> changes = parse(patch);
+            // Authorize the entire patch before reading sources or changing any target.
+            for (final var change : changes) {
+                authorize(context, base, change);
+            }
             // Phase 1: validate and compute every change without touching the disk, so a failure
             // anywhere (context mismatch, missing file, escaping path) aborts the whole patch.
             final var ops = new ArrayList<PendingOp>();
@@ -147,7 +151,8 @@ public class ApplyPatchTool implements EmbeddedTool {
             final var deleted = new ArrayList<String>();
             // Phase 2: apply every validated change.
             for (final var op : ops) {
-                op.apply(applied, created, deleted, capture);
+                op.authorize(context);
+                op.apply(applied, created, deleted, capture, context);
             }
             final var sb = new StringBuilder();
             appendSummary(sb, "Applied", applied);
@@ -162,6 +167,17 @@ public class ApplyPatchTool implements EmbeddedTool {
         } catch (final Exception e) {
             return new ToolResult(
                     ToolResult.Status.ERROR, "Cannot apply patch: " + e.getMessage(), capture.mutations());
+        }
+    }
+
+    private static void authorize(final ToolContext context, final Path base, final Change change) {
+        final var path = resolve(base, change.path);
+        context.sandbox().requireWrite(path);
+        if (!change.create && !change.delete) {
+            context.sandbox().requireRead(path);
+        }
+        if (change.movePath != null) {
+            context.sandbox().requireWrite(resolve(base, change.movePath));
         }
     }
 
@@ -587,25 +603,32 @@ public class ApplyPatchTool implements EmbeddedTool {
     }
 
     private interface PendingOp {
+        void authorize(ToolContext context);
+
         void apply(
                 final List<String> applied,
                 final List<String> created,
                 final List<String> deleted,
-                final FileMutationCapture capture);
+                final FileMutationCapture capture,
+                final ToolContext context);
     }
 
     private record WriteOp(Path path, PendingContent content, boolean create, FileMutationCapture.Before before)
             implements PendingOp {
         @Override
+        public void authorize(final ToolContext context) {
+            context.sandbox().requireWrite(path);
+        }
+
+        @Override
         public void apply(
                 final List<String> applied,
                 final List<String> created,
                 final List<String> deleted,
-                final FileMutationCapture capture) {
+                final FileMutationCapture capture,
+                final ToolContext context) {
             try {
-                if (path.getParent() != null) {
-                    Files.createDirectories(path.getParent());
-                }
+                SandboxFiles.createParents(context, path);
                 final var bytes = toBytes(content);
                 var newFile = false;
                 if (create) {
@@ -637,11 +660,17 @@ public class ApplyPatchTool implements EmbeddedTool {
 
     private record DeleteOp(Path path) implements PendingOp {
         @Override
+        public void authorize(final ToolContext context) {
+            context.sandbox().requireWrite(path);
+        }
+
+        @Override
         public void apply(
                 final List<String> applied,
                 final List<String> created,
                 final List<String> deleted,
-                final FileMutationCapture capture) {
+                final FileMutationCapture capture,
+                final ToolContext context) {
             try {
                 if (Files.deleteIfExists(path)) {
                     // This operation never read the file: deletion permission is not an extra read grant.
@@ -657,15 +686,20 @@ public class ApplyPatchTool implements EmbeddedTool {
     private record MoveOp(Path source, Path target, PendingContent content, FileMutationCapture.Before before)
             implements PendingOp {
         @Override
+        public void authorize(final ToolContext context) {
+            context.sandbox().requireWrite(source);
+            context.sandbox().requireWrite(target);
+        }
+
+        @Override
         public void apply(
                 final List<String> applied,
                 final List<String> created,
                 final List<String> deleted,
-                final FileMutationCapture capture) {
+                final FileMutationCapture capture,
+                final ToolContext context) {
             try {
-                if (target.getParent() != null) {
-                    Files.createDirectories(target.getParent());
-                }
+                SandboxFiles.createParents(context, target);
                 final var bytes = toBytes(content);
                 var newFile = false;
                 try {

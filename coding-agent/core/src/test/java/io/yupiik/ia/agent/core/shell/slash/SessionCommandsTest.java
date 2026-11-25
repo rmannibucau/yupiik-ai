@@ -20,13 +20,19 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import io.yupiik.fusion.testing.Fusion;
+import io.yupiik.fusion.testing.FusionSupport;
 import io.yupiik.ia.agent.core.agent.AgentEvent;
 import io.yupiik.ia.agent.core.agent.AgentLoop;
+import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
+import io.yupiik.ia.agent.core.configuration.ConfigurationTestModule;
 import io.yupiik.ia.agent.core.llm.Message;
 import io.yupiik.ia.agent.core.llm.Tool;
 import io.yupiik.ia.agent.core.llm.ToolCall;
 import io.yupiik.ia.agent.core.permissions.ApprovalGate;
+import io.yupiik.ia.agent.core.permissions.PermissionService;
 import io.yupiik.ia.agent.core.question.FeedbackGate;
+import io.yupiik.ia.agent.core.sandbox.DisabledSandbox;
 import io.yupiik.ia.agent.core.session.SessionStore;
 import io.yupiik.ia.agent.core.shell.ConversationTranscript;
 import io.yupiik.ia.agent.core.shell.SessionRuntime;
@@ -47,7 +53,11 @@ import java.util.concurrent.CompletionStage;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+@FusionSupport(modules = ConfigurationTestModule.class)
 class SessionCommandsTest {
+    @Fusion
+    private CodingAgentConfiguration configuration;
+
     @TempDir
     private static Path testWorkdir;
 
@@ -370,19 +380,20 @@ class SessionCommandsTest {
         env.session().sessionId("s1");
         env.session()
                 .runtime(new SessionRuntime(
-                        new AgentLoop(testWorkdir) {
+                        new AgentLoop(testWorkdir, new DisabledSandbox(testWorkdir)) {
                             {
                                 lastLlmPayload = payload;
                             }
                         },
+                        new PermissionService(configuration, testWorkdir),
                         null,
                         null,
                         null,
                         null,
                         null,
                         null,
-                        null,
-                        testWorkdir));
+                        testWorkdir,
+                        new DisabledSandbox(testWorkdir)));
         return env;
     }
 

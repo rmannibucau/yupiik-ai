@@ -26,15 +26,20 @@ import com.sun.net.httpserver.HttpServer;
 import io.yupiik.fusion.httpclient.core.ExtendedHttpClient;
 import io.yupiik.fusion.httpclient.core.ExtendedHttpClientConfiguration;
 import io.yupiik.fusion.json.JsonMapper;
-import io.yupiik.ia.agent.core.configuration.TestConfigs;
+import io.yupiik.fusion.testing.Fusion;
+import io.yupiik.fusion.testing.FusionSupport;
+import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
+import io.yupiik.ia.agent.core.configuration.ConfigurationTestModule;
+import io.yupiik.ia.agent.core.configuration.ToolsConfiguration;
+import io.yupiik.ia.agent.core.configuration.WebSearchConfiguration;
 import io.yupiik.ia.agent.core.configuration.WebSearchProvider;
+import io.yupiik.ia.agent.core.configuration.WebSearchProviderConfiguration;
 import io.yupiik.ia.agent.test.TestJsonMapper;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.http.HttpClient;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -48,7 +53,14 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.api.io.TempDir;
 
 @ExtendWith(TestJsonMapper.class)
+@FusionSupport(modules = ConfigurationTestModule.class)
 class WebSearchManagerTest {
+    private CodingAgentConfiguration baseline;
+
+    @BeforeEach
+    void configuration(@Fusion final CodingAgentConfiguration configuration) {
+        baseline = configuration;
+    }
 
     @TempDir
     Path tempDir;
@@ -187,8 +199,7 @@ class WebSearchManagerTest {
             final var now = new long[] {1_000_000};
             final var manager = new WebSearchManager(
                     mapper,
-                    TestConfigs.codingAgent(twoProviders(
-                            WebSearchProvider.EXA, limited.url(), WebSearchProvider.PARALLEL, healthy.url())),
+                    twoProviders(WebSearchProvider.EXA, limited.url(), WebSearchProvider.PARALLEL, healthy.url()),
                     client,
                     name -> null,
                     () -> now[0]);
@@ -212,13 +223,11 @@ class WebSearchManagerTest {
                 final var active = Mock.start(mapper).payload(tinyfishPayload())) {
             final var manager = manager(
                     mapper,
-                    config(
-                            "yca.tools.websearch.providers.length", "2",
-                            "yca.tools.websearch.providers.0.provider", "EXA",
-                            "yca.tools.websearch.providers.0.enabled", "false",
-                            "yca.tools.websearch.providers.0.url", disabled.url(),
-                            "yca.tools.websearch.providers.1.provider", "TINYFISH",
-                            "yca.tools.websearch.providers.1.url", active.url()));
+                    providers(List.of(
+                            new WebSearchProviderConfiguration(
+                                    WebSearchProvider.EXA, false, disabled.url(), null, List.of()),
+                            new WebSearchProviderConfiguration(
+                                    WebSearchProvider.TINYFISH, true, active.url(), null, List.of()))));
             assertEquals(1, manager.search("apache maven build tool", 8).size());
             assertTrue(disabled.headers.isEmpty());
             assertEquals(1, active.calls.size());
@@ -253,10 +262,7 @@ class WebSearchManagerTest {
     @Test
     void exaApiKeyIsUrlParameterNotBearer() throws Exception {
         try (final var mock = Mock.start(mapper).payload(exaPayload())) {
-            final var manager = manager(
-                    mapper,
-                    singleProvider(
-                            WebSearchProvider.EXA, mock.url(), "yca.tools.websearch.providers.0.apiKey", "secret"));
+            final var manager = manager(mapper, singleProvider(WebSearchProvider.EXA, mock.url(), "secret"));
             assertEquals(2, manager.search("apache maven build tool", 8).size());
             assertTrue(mock.paths.stream().anyMatch(p -> p.contains("exaApiKey=secret")));
             assertNull(mock.header("Authorization"));
@@ -273,7 +279,7 @@ class WebSearchManagerTest {
             };
             final var manager = new WebSearchManager(
                     mapper,
-                    TestConfigs.codingAgent(singleProvider(WebSearchProvider.PARALLEL, mock.url())),
+                    singleProvider(WebSearchProvider.PARALLEL, mock.url()),
                     client,
                     envFunction,
                     System::currentTimeMillis);
@@ -311,62 +317,94 @@ class WebSearchManagerTest {
 
     @Test
     void noProviderEnabledFailsFast() throws Exception {
-        final var manager = manager(mapper, config("yca.tools.websearch.providers.length", "0"));
+        final var manager = manager(mapper, providers(List.of()));
         assertFalse(manager.hasEnabledProviders());
         final var error = assertThrows(IOException.class, () -> manager.search("apache maven build tool", 8));
         assertTrue(error.getMessage().contains("No web search provider is enabled"));
     }
 
-    private WebSearchManager manager(final JsonMapper mapper, final Map<String, String> overrides) {
-        return manager(mapper, overrides, name -> null);
+    private WebSearchManager manager(final JsonMapper mapper, final CodingAgentConfiguration configuration) {
+        return manager(mapper, configuration, name -> null);
     }
 
     private WebSearchManager manager(
-            final JsonMapper mapper, final Map<String, String> overrides, final Function<String, String> environment) {
-        return new WebSearchManager(
-                mapper, TestConfigs.codingAgent(overrides), client, environment, System::currentTimeMillis);
+            final JsonMapper mapper,
+            final CodingAgentConfiguration configuration,
+            final Function<String, String> environment) {
+        return new WebSearchManager(mapper, configuration, client, environment, System::currentTimeMillis);
     }
 
-    private Map<String, String> singleProvider(
-            final WebSearchProvider provider, final String url, final String... extraPairs) {
-        final var map = config(
-                "yca.tools.websearch.providers.length",
-                "1",
-                "yca.tools.websearch.providers.0.provider",
-                provider.name(),
-                "yca.tools.websearch.providers.0.url",
-                url);
-        for (var i = 0; i < extraPairs.length; i += 2) {
-            map.put(extraPairs[i], extraPairs[i + 1]);
-        }
-        return map;
+    private CodingAgentConfiguration singleProvider(final WebSearchProvider provider, final String url) {
+        return singleProvider(provider, url, null);
     }
 
-    private Map<String, String> twoProviders(
+    private CodingAgentConfiguration singleProvider(
+            final WebSearchProvider provider, final String url, final String apiKey) {
+        return providers(List.of(new WebSearchProviderConfiguration(provider, true, url, apiKey, List.of())));
+    }
+
+    private CodingAgentConfiguration twoProviders(
             final WebSearchProvider first,
             final String firstUrl,
             final WebSearchProvider second,
             final String secondUrl) {
-        return config(
-                "yca.tools.websearch.providers.length",
-                "2",
-                "yca.tools.websearch.providers.0.provider",
-                first.name(),
-                "yca.tools.websearch.providers.0.url",
-                firstUrl,
-                "yca.tools.websearch.providers.1.provider",
-                second.name(),
-                "yca.tools.websearch.providers.1.url",
-                secondUrl);
+        return providers(List.of(
+                new WebSearchProviderConfiguration(first, true, firstUrl, null, List.of()),
+                new WebSearchProviderConfiguration(second, true, secondUrl, null, List.of())));
     }
 
-    private Map<String, String> config(final String... pairs) {
-        final var map = new HashMap<String, String>();
-        map.put("yca.storageHome", tempDir.toString());
-        for (var i = 0; i < pairs.length; i += 2) {
-            map.put(pairs[i], pairs[i + 1]);
-        }
-        return map;
+    private CodingAgentConfiguration providers(final List<WebSearchProviderConfiguration> providers) {
+        final var tools = baseline.tools();
+        return new CodingAgentConfiguration(
+                baseline.storageHome(),
+                baseline.home(),
+                baseline.workingDir(),
+                baseline.projectDir(),
+                baseline.provider(),
+                baseline.model(),
+                baseline.llm(),
+                baseline.compaction(),
+                baseline.pruning(),
+                baseline.compression(),
+                baseline.memory(),
+                baseline.todos(),
+                baseline.optimize(),
+                baseline.permissions(),
+                baseline.sandbox(),
+                baseline.mcp(),
+                baseline.mavenRepositoryKnowledge(),
+                baseline.structuralCodeGraph(),
+                baseline.sessions(),
+                baseline.skills(),
+                baseline.agents(),
+                baseline.mode(),
+                baseline.httpClient(),
+                new ToolsConfiguration(
+                        tools.builtin(),
+                        tools.spawnSubagent(),
+                        new WebSearchConfiguration(
+                                providers,
+                                tools.websearch().numResults(),
+                                tools.websearch().timeoutSeconds()),
+                        tools.manageContext(),
+                        tools.parallelReadonly(),
+                        tools.maxOutputChars(),
+                        tools.repeatSuccessThreshold(),
+                        tools.alwaysSuggestMavenKnowledge(),
+                        tools.shell(),
+                        tools.bashOverrides()),
+                baseline.subagents(),
+                baseline.schedulerThreads(),
+                baseline.metrics(),
+                baseline.maxLineLength(),
+                baseline.resumeAliases(),
+                baseline.slashcommands(),
+                baseline.prompt(),
+                baseline.labels(),
+                baseline.logging(),
+                baseline.hooks(),
+                baseline.notifications(),
+                baseline.secrets());
     }
 
     private static String exaPayload() {
@@ -388,22 +426,20 @@ class WebSearchManagerTest {
     }
 
     private static String parallelPayload() {
-        return "{\"search_id\":\"s1\",\"results\":["
-                + "{\"url\":\"https://example.com/a\",\"title\":\"First\",\"publish_date\":\"2026-06-30\",\"excerpts\":[\"part one\",\"part two\"]},"
-                + "{\"url\":\"https://example.com/b\",\"title\":\"Second\",\"publish_date\":null,\"excerpts\":[]}"
-                + "]}";
+        return "{\"search_id\":\"s1\",\"results\":[{\"url\":\"https://example.com/a\",\"title\":\"First\",\"publish_date\":\"2026-06-30\",\"excerpts\":[\"part"
+                + " one\",\"part two\"]},"
+                + "{\"url\":\"https://example.com/b\",\"title\":\"Second\",\"publish_date\":null,\"excerpts\":[]}]}";
     }
 
     private static String firecrawlPayload() {
-        return "{\"success\":true,\"data\":{\"web\":["
-                + "{\"url\":\"https://example.com\",\"title\":\"Example\",\"description\":\"Example domain\",\"position\":1}"
-                + "]}}";
+        return "{\"success\":true,\"data\":{\"web\":[{\"url\":\"https://example.com\",\"title\":\"Example\",\"description\":\"Example"
+                + " domain\",\"position\":1}]}}";
     }
 
     private static String tinyfishPayload() {
-        return "{\"query\":\"apache maven\",\"results\":["
-                + "{\"position\":1,\"site_name\":\"Example\",\"snippet\":\"Snippet text\",\"title\":\"Example Title\",\"url\":\"https://example.com\"}"
-                + "],\"total_results\":1,\"page\":1}";
+        return "{\"query\":\"apache"
+                + " maven\",\"results\":[{\"position\":1,\"site_name\":\"Example\",\"snippet\":\"Snippet"
+                + " text\",\"title\":\"Example Title\",\"url\":\"https://example.com\"}],\"total_results\":1,\"page\":1}";
     }
 
     /** Minimal MCP endpoint: initialize + notifications succeed, tools/call answer is configurable. */

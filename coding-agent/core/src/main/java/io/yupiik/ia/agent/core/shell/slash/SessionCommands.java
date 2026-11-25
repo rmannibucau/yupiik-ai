@@ -28,7 +28,6 @@ import io.yupiik.ia.agent.core.session.AgentSessionService;
 import io.yupiik.ia.agent.core.session.SessionStore;
 import io.yupiik.ia.agent.core.shell.ShellEnv;
 import io.yupiik.ia.agent.core.shell.ShellOutcome;
-import io.yupiik.ia.agent.core.tools.ToolContext;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -486,7 +485,7 @@ public class SessionCommands implements SlashCommandSet {
             return ShellOutcome.transcript(markdown);
         }
         try {
-            final var target = ToolContext.empty(workdir).resolvePath(path);
+            final var target = workdir.resolve(path).normalize();
             if (target.getParent() != null) {
                 Files.createDirectories(target.getParent());
             }

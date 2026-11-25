@@ -19,9 +19,15 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.fusion.json.JsonMapper;
+import io.yupiik.fusion.testing.Fusion;
+import io.yupiik.fusion.testing.FusionSupport;
 import io.yupiik.ia.agent.core.agent.AgentEvent;
+import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
+import io.yupiik.ia.agent.core.configuration.ConfigurationTestModule;
 import io.yupiik.ia.agent.core.context.UsageTracker;
 import io.yupiik.ia.agent.core.llm.Usage;
+import io.yupiik.ia.agent.core.permissions.PermissionService;
+import io.yupiik.ia.agent.core.sandbox.DisabledSandbox;
 import io.yupiik.ia.agent.core.shell.AnsiShellFrontend;
 import io.yupiik.ia.agent.core.shell.SessionRuntime;
 import io.yupiik.ia.agent.core.shell.ShellSession;
@@ -35,7 +41,11 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.api.io.TempDir;
 
 @ExtendWith(TestJsonMapper.class)
+@FusionSupport(modules = ConfigurationTestModule.class)
 class CliUsagePrinterTest {
+    @Fusion
+    private CodingAgentConfiguration configuration;
+
     @TempDir
     private static Path eventWorkdir;
 
@@ -75,7 +85,17 @@ class CliUsagePrinterTest {
                 ToolOutputVisibility.COLLAPSED);
         frontend.onEvent(new AgentEvent.UsageUpdated(usage, 68, 14, "s1", eventWorkdir));
         final var session = new ShellSession()
-                .runtime(new SessionRuntime(null, null, null, tracker, null, null, null, null, testWorkdir));
+                .runtime(new SessionRuntime(
+                        null,
+                        new PermissionService(configuration, testWorkdir),
+                        null,
+                        tracker,
+                        null,
+                        null,
+                        null,
+                        null,
+                        testWorkdir,
+                        new DisabledSandbox(testWorkdir)));
         final var lines = new ArrayList<String>();
         final var printer = new CliUsagePrinter(
                 new CliCommand.CliConf("", "", "", false, true, "compact", false, "collapsed", true),

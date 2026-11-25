@@ -264,7 +264,11 @@ public class AnsiShellIO implements ShellIO {
 
     @Override
     public ApprovalGate approvalGate() {
-        return (title, detail, toolName, args) -> {
+        return request -> {
+            final var title =
+                    (request.origin() == ApprovalGate.Origin.SANDBOX ? "Sandbox restriction: " : "Tool permission: ")
+                            + request.title();
+            final var detail = request.detail();
             onInteractionStart.run();
             renderLock.lock();
             try {

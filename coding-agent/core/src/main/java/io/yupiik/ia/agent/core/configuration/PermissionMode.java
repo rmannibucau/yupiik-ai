@@ -23,10 +23,11 @@ import java.util.Locale;
 public enum PermissionMode {
     ASK,
     AUTO_EDIT,
-    YOLO;
+    YOLO,
+    FULL_YOLO;
 
     /** User-facing string forms accepted by /permissions and CLI parsing, matching {@link #fromConfigurationString}. */
-    public static final List<String> VALUES = List.of("ask", "auto_edit", "yolo");
+    public static final List<String> VALUES = List.of("ask", "auto_edit", "yolo", "full_yolo");
 
     public static boolean isValue(final String value) {
         return value != null && (fromConfigurationString(value) != ASK || "ask".equals(strip(value)));
@@ -43,6 +44,7 @@ public enum PermissionMode {
         return switch (strip(value)) {
             case "auto_edit", "autoedit" -> AUTO_EDIT;
             case "yolo", "all" -> YOLO;
+            case "full_yolo" -> FULL_YOLO;
             default -> ASK;
         };
     }

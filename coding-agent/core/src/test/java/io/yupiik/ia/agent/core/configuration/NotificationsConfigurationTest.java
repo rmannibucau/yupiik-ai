@@ -17,35 +17,72 @@ package io.yupiik.ia.agent.core.configuration;
 
 import static org.junit.jupiter.api.Assertions.*;
 
+import io.yupiik.fusion.testing.Fusion;
+import io.yupiik.fusion.testing.FusionSupport;
 import io.yupiik.ia.agent.core.llm.JsonMappers;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 
 class NotificationsConfigurationTest {
-    @Test
-    void propertyDefaultsAndIndependentSwitches() {
-        final var defaults = TestConfigs.codingAgent(Map.of()).notifications();
-        assertFalse(defaults.enabled());
-        assertEquals(new NotificationsOnConfiguration(null, null), defaults.on());
-        final var partial = TestConfigs.codingAgent(
-                        Map.of("yca.notifications.enabled", "true", "yca.notifications.on.tools.ask_user", "false"))
-                .notifications();
-        assertTrue(partial.enabled());
-        assertEquals(
-                new NotificationsEventConfiguration(true, true), partial.on().event());
-        assertEquals(
-                new NotificationsToolsConfiguration(false, true), partial.on().tools());
-        final var disabled = TestConfigs.codingAgent(Map.of(
-                        "yca.notifications.on.event.turnEnd", "false",
-                        "yca.notifications.on.event.approval", "false",
-                        "yca.notifications.on.tools.ask_user", "false",
-                        "yca.notifications.on.tools.btw", "false"))
-                .notifications()
-                .on();
-        assertEquals(new NotificationsEventConfiguration(false, false), disabled.event());
-        assertEquals(new NotificationsToolsConfiguration(false, false), disabled.tools());
+    @Nested
+    @FusionSupport(modules = ConfigurationTestModule.class)
+    class Defaults {
+        @Test
+        void defaultsAreDisabled(@Fusion final CodingAgentConfiguration configuration) {
+            final var defaults = configuration.notifications();
+            assertFalse(defaults.enabled());
+            assertEquals(new NotificationsOnConfiguration(null, null), defaults.on());
+        }
+    }
+
+    @Nested
+    @FusionSupport(modules = PartialModule.class)
+    class Partial {
+        @Test
+        void switchesAreIndependent(@Fusion final CodingAgentConfiguration configuration) {
+            final var partial = configuration.notifications();
+            assertTrue(partial.enabled());
+            assertEquals(
+                    new NotificationsEventConfiguration(true, true),
+                    partial.on().event());
+            assertEquals(
+                    new NotificationsToolsConfiguration(false, true),
+                    partial.on().tools());
+        }
+    }
+
+    @Nested
+    @FusionSupport(modules = DisabledModule.class)
+    class Disabled {
+        @Test
+        void allSwitchesCanBeDisabled(@Fusion final CodingAgentConfiguration configuration) {
+            final var disabled = configuration.notifications().on();
+            assertEquals(new NotificationsEventConfiguration(false, false), disabled.event());
+            assertEquals(new NotificationsToolsConfiguration(false, false), disabled.tools());
+        }
+    }
+
+    public static class PartialModule extends ConfigurationTestModule {
+        public PartialModule() {
+            super(Map.of("yca.notifications.enabled", "true", "yca.notifications.on.tools.ask_user", "false"));
+        }
+    }
+
+    public static class DisabledModule extends ConfigurationTestModule {
+        public DisabledModule() {
+            super(Map.of(
+                    "yca.notifications.on.event.turnEnd",
+                    "false",
+                    "yca.notifications.on.event.approval",
+                    "false",
+                    "yca.notifications.on.tools.ask_user",
+                    "false",
+                    "yca.notifications.on.tools.btw",
+                    "false"));
+        }
     }
 
     @Test

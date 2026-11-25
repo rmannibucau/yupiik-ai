@@ -17,11 +17,13 @@ package io.yupiik.ia.agent.acp;
 
 import static org.junit.jupiter.api.Assertions.*;
 
+import io.yupiik.fusion.testing.Fusion;
+import io.yupiik.fusion.testing.FusionSupport;
 import io.yupiik.ia.agent.core.configuration.AgentMode;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
-import io.yupiik.ia.agent.core.configuration.ConfigurationLoader;
 import io.yupiik.ia.agent.core.mcp.McpManager;
 import io.yupiik.ia.agent.core.permissions.PermissionService;
+import io.yupiik.ia.agent.core.sandbox.DisabledSandbox;
 import io.yupiik.ia.agent.core.tools.EmbeddedTool;
 import io.yupiik.ia.agent.core.tools.ToolContext;
 import io.yupiik.ia.agent.core.tools.ToolRegistry;
@@ -31,17 +33,19 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.io.TempDir;
 
+@FusionSupport(modules = AcpConfigurationTestModule.class)
 class SessionMcpTest {
+    @Fusion
+    private CodingAgentConfiguration configuration;
+
     @Test
     @Timeout(30)
     void paginatesRejectsCollisionsAndRollsBackStartup(@TempDir final Path tmp) throws Exception {
         try (final var mapper = CodecsTest.mapper()) {
-            final var configuration = ConfigurationLoader.load(CodingAgentConfiguration.class, key -> Optional.empty());
             final var manager = new McpManager(configuration, mapper, List.of(), null, null);
             final var pid = tmp.resolve("pid");
             final var descriptor = new McpManager.StdioServer(
@@ -73,7 +77,8 @@ class SessionMcpTest {
                         () -> false,
                         null,
                         () -> false,
-                        tmp);
+                        tmp,
+                        new DisabledSandbox(tmp));
                 final var result = owned.tools().getFirst().execute(Map.of(), context);
                 assertTrue(result.success(), result.output());
                 final var output = result.output();

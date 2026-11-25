@@ -71,6 +71,11 @@
       <version>${commonmark.version}</version>
     </dependency>
     <dependency>
+      <groupId>io.yupiik.fusion</groupId>
+      <artifactId>fusion-testing</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
       <groupId>org.junit.jupiter</groupId>
       <artifactId>junit-jupiter</artifactId>
     </dependency>

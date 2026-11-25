@@ -13,7 +13,8 @@ import java.util.regex.Pattern;
 
 /** Versioned, deliberately minimal local reminder. Never contains tool arguments or assistant reply excerpts. */
 @JsonModel
-public record Notice(int version, String session, String title, String type, String source, long timestamp) {
+public record Notice(
+        int version, String session, String title, String type, String source, long timestamp, String origin) {
     private static final Set<String> TYPES =
             Set.of("turn_end", "input_required", "approval_required", "session_acknowledged");
     private static final Pattern CONTROLS = Pattern.compile("[\\p{Cntrl}\\s]+");
@@ -28,19 +29,22 @@ public record Notice(int version, String session, String title, String type, Str
                 || type == null
                 || !TYPES.contains(type)
                 || !("main".equals(source) || "btw".equals(source))
-                || timestamp < 0) {
+                || timestamp < 0
+                || (origin != null && !Set.of("PERMISSION", "SANDBOX").contains(origin))) {
             throw new IllegalArgumentException("Invalid notification envelope.");
         }
     }
 
-    public static Notice fromConfiguration(final NoticeConfiguration configuration, final Clock clock) {
+    public static Notice fromConfiguration(
+            final NoticeConfiguration configuration, final Clock clock, final String origin) {
         return new Notice(
                 1,
                 label(configuration.session()),
                 label(configuration.title()),
                 configuration.type(),
                 configuration.source(),
-                configuration.timestamp() == null ? clock.millis() : configuration.timestamp());
+                configuration.timestamp() == null ? clock.millis() : configuration.timestamp(),
+                origin);
     }
 
     private static String label(final String text) {

@@ -21,78 +21,242 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import io.yupiik.fusion.testing.Fusion;
+import io.yupiik.fusion.testing.FusionSupport;
 import io.yupiik.ia.agent.core.configuration.AgentMode;
+import io.yupiik.ia.agent.core.configuration.BashPermissionsConfiguration;
+import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.CommandOptionsConfiguration;
 import io.yupiik.ia.agent.core.configuration.CommandPermissionConfiguration;
 import io.yupiik.ia.agent.core.configuration.CommandStartMatcherConfiguration;
+import io.yupiik.ia.agent.core.configuration.ConfigurationTestModule;
 import io.yupiik.ia.agent.core.configuration.PermissionMode;
-import io.yupiik.ia.agent.core.configuration.TestConfigs;
+import io.yupiik.ia.agent.core.configuration.PermissionsConfiguration;
 import io.yupiik.ia.agent.core.tools.ToolCategory;
 import java.nio.file.Path;
-import java.util.HashMap;
+import java.util.Arrays;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+@FusionSupport(modules = PermissionServiceTest.Sources.class)
 class PermissionServiceTest {
 
     @TempDir
-    Path storageHome;
+    static Path storageHome;
+
+    @Fusion
+    private CodingAgentConfiguration baseline;
+
+    public static class Sources extends ConfigurationTestModule {
+        public Sources() {
+            super(Map.of("yca.storageHome", storageHome.toString()));
+        }
+    }
 
     private PermissionService service(final PermissionMode mode, final List<String> allow, final List<String> deny) {
-        return service(mode, allow, deny, Map.of());
+        return service(mode, allow, deny, baseline.permissions().bash().rules());
     }
 
     private PermissionService service(
             final PermissionMode mode,
             final List<String> allow,
             final List<String> deny,
-            final Map<String, String> extra) {
-        final var props = new HashMap<String, String>();
-        props.put("yca.storageHome", storageHome.toString());
-        props.put("yca.permissions.mode", mode.name().toLowerCase(Locale.ROOT));
-        props.put("yca.permissions.allow", String.join(",", allow));
-        props.put("yca.permissions.deny", String.join(",", deny));
-        props.putAll(extra);
-        final var configuration = TestConfigs.codingAgent(props);
-        final var service = new PermissionService(configuration, (configuration).resolveWorkingDir());
+            final List<CommandPermissionConfiguration> rules) {
+        final var bash = baseline.permissions().bash();
+        final var configuration = withPermissions(
+                baseline,
+                new PermissionsConfiguration(
+                        mode,
+                        allow,
+                        deny,
+                        new BashPermissionsConfiguration(rules, bash.readOnlyPromptHints(), bash.maxCombined())));
+        final var service = new PermissionService(configuration, configuration.resolveWorkingDir());
         // these build-mode behaviour tests rely on a BUILD baseline; plan mode is
         // exercised explicitly via setMode(AgentMode.PLAN) in dedicated tests
         service.setMode(AgentMode.BUILD);
         return service;
     }
 
-    /** Encodes `yca.permissions.bash.rules` entries with the same mode for plan and default (default inherits plan). */
-    private static Map<String, String> rules(final PermissionMode plan, final String... commandStarts) {
-        final var props = new HashMap<String, String>();
-        props.put("yca.permissions.bash.rules.length", String.valueOf(commandStarts.length));
-        for (var i = 0; i < commandStarts.length; i++) {
-            final var prefix = "yca.permissions.bash.rules." + i;
-            props.put(prefix + ".matcher.commandStart.options", commandStarts[i]);
-            if (plan != null) {
-                props.put(prefix + ".plan", plan.name().toLowerCase(Locale.ROOT));
-            }
+    @Test
+    void fullYoloParsingAndPermissionBypass() {
+        for (final var value : List.of("full_yolo", "full-yolo", " FULL_YOLO ")) {
+            assertTrue(PermissionMode.isValue(value));
+            assertEquals(PermissionMode.FULL_YOLO, PermissionMode.fromConfigurationString(value));
         }
-        return props;
+        assertTrue(PermissionMode.VALUES.contains("full_yolo"));
+        assertEquals(PermissionMode.YOLO, PermissionMode.fromConfigurationString("all"));
+        final var service = service(PermissionMode.YOLO, List.of(), List.of("write", "rm *", "bash:git *"));
+        service.setMode(AgentMode.PLAN);
+        assertFalse(service.check("write", ToolCategory.EDIT, Map.of()).allowed());
+        assertFalse(service.check("bash", ToolCategory.BASH, Map.of("command", "rm file"))
+                .allowed());
+        service.setGate(request -> {
+            throw new AssertionError("FULL_YOLO must never ask");
+        });
+        service.setPermissionMode(PermissionMode.FULL_YOLO);
+        assertTrue(service.check("write", ToolCategory.EDIT, Map.of()).allowed());
+        assertTrue(service.check("bash", ToolCategory.BASH, Map.of("command", "rm file; git push"))
+                .allowed());
+        assertTrue(service.check("other", ToolCategory.EDIT, Map.of()).allowed());
+        service.setPermissionMode(PermissionMode.YOLO);
+        assertFalse(service.check("write", ToolCategory.EDIT, Map.of()).allowed());
     }
 
-    /** A single rule with dedicated exclude options, eg. `sed` rejecting `-i`. */
-    private static Map<String, String> ruleWithExcludes(
+    @Test
+    void permissionModeChangesExpirePendingGrantsIncludingChildren() throws Exception {
+        for (final var result : List.of(ApprovalGate.Result.ALLOW_ONCE, ApprovalGate.Result.ALLOW_SESSION)) {
+            for (final var child : List.of(false, true)) {
+                final var service = service(PermissionMode.ASK, List.of(), List.of());
+                final var target = child ? service.forkForChild() : service;
+                final var entered = new CountDownLatch(1);
+                final var release = new CountDownLatch(1);
+                target.setGate(request -> {
+                    entered.countDown();
+                    try {
+                        assertTrue(release.await(10, TimeUnit.SECONDS));
+                    } catch (final InterruptedException error) {
+                        Thread.currentThread().interrupt();
+                        throw new IllegalStateException(error);
+                    }
+                    return result;
+                });
+                try (final var executor = Executors.newVirtualThreadPerTaskExecutor()) {
+                    final var pending = executor.submit(() -> target.check("write", ToolCategory.EDIT, Map.of()));
+                    try {
+                        assertTrue(entered.await(10, TimeUnit.SECONDS));
+                        service.setPermissionMode(PermissionMode.FULL_YOLO);
+                        service.setPermissionMode(PermissionMode.ASK);
+                    } finally {
+                        release.countDown();
+                    }
+                    assertFalse(pending.get(10, TimeUnit.SECONDS).allowed());
+                    assertTrue(target.sessionGrants().isEmpty());
+                }
+            }
+        }
+    }
+
+    @Test
+    void childCannotRetainFullYoloOrSessionGrantsAfterParentModeChange() {
+        final var parent = service(PermissionMode.FULL_YOLO, List.of(), List.of("write"));
+        final var child = parent.forkForChild();
+        child.setPermissionMode(PermissionMode.FULL_YOLO);
+        child.grantSession("other");
+        assertTrue(child.check("write", ToolCategory.EDIT, Map.of()).allowed());
+        parent.setPermissionMode(PermissionMode.ASK);
+        assertEquals(PermissionMode.ASK, child.permissionMode());
+        assertFalse(child.check("write", ToolCategory.EDIT, Map.of()).allowed());
+        assertFalse(child.check("other", ToolCategory.EDIT, Map.of()).allowed());
+        assertTrue(child.sessionGrants().isEmpty());
+    }
+
+    @Test
+    void sandboxApprovalIsIndependentOfToolPermissionMode() {
+        for (final var mode : PermissionMode.values()) {
+            final var service = service(mode, List.of("*"), List.of());
+            final var request = new AtomicReference<ApprovalGate.Request>();
+            service.setGate(approval -> {
+                request.set(approval);
+                return ApprovalGate.Result.ALLOW_SESSION;
+            });
+            assertEquals(
+                    ApprovalGate.Result.ALLOW_SESSION,
+                    service.approveSandbox("Network access", "Sandbox blocked host", Map.of("host", "example.org")));
+            assertEquals(ApprovalGate.Origin.SANDBOX, request.get().origin());
+            assertEquals("sandbox", request.get().toolName());
+            assertEquals("Network access", request.get().title());
+            assertEquals("Sandbox blocked host", request.get().detail());
+            assertEquals(Map.of("host", "example.org"), request.get().args());
+            service.setGate(approval -> ApprovalGate.Result.DENY);
+            assertEquals(ApprovalGate.Result.DENY, service.approveSandbox("Read", "Outside root", Map.of()));
+            service.setGate(null);
+            assertEquals(ApprovalGate.Result.DENY, service.approveSandbox("Read", "Outside root", Map.of()));
+            service.setGate(approval -> null);
+            assertEquals(ApprovalGate.Result.DENY, service.approveSandbox("Read", "Outside root", Map.of()));
+        }
+    }
+
+    @Test
+    void toolApprovalRetainsPermissionOrigin() {
+        final var service = service(PermissionMode.ASK, List.of(), List.of());
+        final var origin = new AtomicReference<ApprovalGate.Origin>();
+        service.setGate(request -> {
+            origin.set(request.origin());
+            return ApprovalGate.Result.ALLOW_ONCE;
+        });
+        assertTrue(service.check("write", ToolCategory.EDIT, Map.of("path", "file"))
+                .allowed());
+        assertEquals(ApprovalGate.Origin.PERMISSION, origin.get());
+    }
+
+    private static List<CommandPermissionConfiguration> rules(
+            final PermissionMode plan, final String... commandStarts) {
+        return Arrays.stream(commandStarts)
+                .map(start -> new CommandPermissionConfiguration(
+                        new CommandStartMatcherConfiguration(
+                                new CommandOptionsConfiguration(List.of(start)), List.of()),
+                        plan,
+                        null))
+                .toList();
+    }
+
+    private static List<CommandPermissionConfiguration> ruleWithExcludes(
             final PermissionMode plan, final String commandStart, final String... excludedOptions) {
-        final var props = new HashMap<String, String>();
-        props.put("yca.permissions.bash.rules.length", "1");
-        props.put("yca.permissions.bash.rules.0.matcher.commandStart.options", commandStart);
-        props.put("yca.permissions.bash.rules.0.matcher.excludeOptions.length", String.valueOf(excludedOptions.length));
-        for (var i = 0; i < excludedOptions.length; i++) {
-            props.put("yca.permissions.bash.rules.0.matcher.excludeOptions." + i + ".options", excludedOptions[i]);
-        }
-        if (plan != null) {
-            props.put("yca.permissions.bash.rules.0.plan", plan.name().toLowerCase(Locale.ROOT));
-        }
-        return props;
+        return List.of(new CommandPermissionConfiguration(
+                new CommandStartMatcherConfiguration(
+                        new CommandOptionsConfiguration(List.of(commandStart)),
+                        Arrays.stream(excludedOptions)
+                                .map(option -> new CommandOptionsConfiguration(List.of(option)))
+                                .toList()),
+                plan,
+                null));
+    }
+
+    private static CodingAgentConfiguration withPermissions(
+            final CodingAgentConfiguration baseline, final PermissionsConfiguration permissions) {
+        return new CodingAgentConfiguration(
+                baseline.storageHome(),
+                baseline.home(),
+                baseline.workingDir(),
+                baseline.projectDir(),
+                baseline.provider(),
+                baseline.model(),
+                baseline.llm(),
+                baseline.compaction(),
+                baseline.pruning(),
+                baseline.compression(),
+                baseline.memory(),
+                baseline.todos(),
+                baseline.optimize(),
+                permissions,
+                baseline.sandbox(),
+                baseline.mcp(),
+                baseline.mavenRepositoryKnowledge(),
+                baseline.structuralCodeGraph(),
+                baseline.sessions(),
+                baseline.skills(),
+                baseline.agents(),
+                baseline.mode(),
+                baseline.httpClient(),
+                baseline.tools(),
+                baseline.subagents(),
+                baseline.schedulerThreads(),
+                baseline.metrics(),
+                baseline.maxLineLength(),
+                baseline.resumeAliases(),
+                baseline.slashcommands(),
+                baseline.prompt(),
+                baseline.labels(),
+                baseline.logging(),
+                baseline.hooks(),
+                baseline.notifications(),
+                baseline.secrets());
     }
 
     @Test
@@ -104,8 +268,8 @@ class PermissionServiceTest {
 
     @Test
     void defaultModeIsPlanWhenConfigUnset() {
-        final var configuration = TestConfigs.codingAgent(Map.of("yca.storageHome", storageHome.toString()));
-        final var service = new PermissionService(configuration, (configuration).resolveWorkingDir());
+        final var configuration = baseline;
+        final var service = new PermissionService(configuration, configuration.resolveWorkingDir());
         assertEquals(AgentMode.PLAN, service.mode());
     }
 
@@ -190,7 +354,11 @@ class PermissionServiceTest {
             final var service = service(PermissionMode.ASK, List.of(), List.of());
             service.setMode(agentMode);
             final var detail = new AtomicReference<String>();
-            service.setGate((title, d, tool, args) -> {
+            service.setGate(request -> {
+                final var title = request.title();
+                final var d = request.detail();
+                final var tool = request.toolName();
+                final var args = request.args();
                 detail.set(d);
                 return ApprovalGate.Result.ALLOW_ONCE;
             });
@@ -211,7 +379,7 @@ class PermissionServiceTest {
     void bashUserDenialCarriesTheFailingSegmentCause() {
         final var service = service(PermissionMode.ASK, List.of(), List.of());
         service.setMode(AgentMode.PLAN);
-        service.setGate((title, detail, tool, args) -> ApprovalGate.Result.DENY);
+        service.setGate(request -> ApprovalGate.Result.DENY);
         final var decision = service.check("bash", ToolCategory.BASH, Map.of("command", "git add -A"));
         assertFalse(decision.allowed());
         assertTrue(decision.reason().contains("refused by the user"));
@@ -234,11 +402,11 @@ class PermissionServiceTest {
     @Test
     void gateApprovedAndRefused() {
         final var service = service(PermissionMode.ASK, List.of(), List.of());
-        service.setGate((title, detail, tool, args) -> ApprovalGate.Result.ALLOW_ONCE);
+        service.setGate(request -> ApprovalGate.Result.ALLOW_ONCE);
         assertTrue(service.check("write_file", ToolCategory.EDIT, Map.of()).allowed());
 
         final var refused = service(PermissionMode.ASK, List.of(), List.of());
-        refused.setGate((title, detail, tool, args) -> ApprovalGate.Result.DENY);
+        refused.setGate(request -> ApprovalGate.Result.DENY);
         final var decision = refused.check("write_file", ToolCategory.EDIT, Map.of());
         assertFalse(decision.allowed());
         assertEquals("refused by the user", decision.reason());
@@ -281,7 +449,8 @@ class PermissionServiceTest {
         final var service = service(PermissionMode.ASK, List.of(), List.of());
         final AtomicReference<String> asked = new AtomicReference<>();
         service.setMode(AgentMode.PLAN);
-        service.setGate((title, detail, tool, args) -> {
+        service.setGate(request -> {
+            final var title = request.title();
             asked.set(title);
             return ApprovalGate.Result.ALLOW_ONCE;
         });
@@ -297,7 +466,8 @@ class PermissionServiceTest {
         final var service = service(PermissionMode.ASK, List.of(), List.of());
         final AtomicReference<String> asked = new AtomicReference<>();
         service.setMode(AgentMode.PLAN);
-        service.setGate((title, detail, tool, args) -> {
+        service.setGate(request -> {
+            final var title = request.title();
             asked.set(title);
             return ApprovalGate.Result.ALLOW_ONCE;
         });
@@ -389,9 +559,9 @@ class PermissionServiceTest {
         final var service = service(PermissionMode.ASK, List.of(), List.of());
         service.setMode(AgentMode.PLAN);
         final var inspection =
-                "cat fusion-handlebars/src/main/java/io/yupiik/fusion/framework/handlebars/helper/Truthiness.java"
-                        + " | awk 'NR>=16'; echo ====NEW-IF;"
-                        + " grep -n newIf fusion-handlebars/src/main/java/io/yupiik/fusion/framework/handlebars/helper/Truthiness.java";
+                "cat fusion-handlebars/src/main/java/io/yupiik/fusion/framework/handlebars/helper/Truthiness.java |"
+                        + " awk 'NR>=16'; echo ====NEW-IF; grep -n newIf"
+                        + " fusion-handlebars/src/main/java/io/yupiik/fusion/framework/handlebars/helper/Truthiness.java";
         assertTrue(service.check("bash", ToolCategory.BASH, Map.of("command", inspection))
                 .allowed());
         // harmless read-only forms stay allowed
@@ -494,7 +664,7 @@ class PermissionServiceTest {
     @Test
     void buildModeUsesPermissionModeForMcp() {
         final var service = service(PermissionMode.ASK, List.of(), List.of());
-        service.setGate((title, detail, tool, args) -> ApprovalGate.Result.DENY);
+        service.setGate(request -> ApprovalGate.Result.DENY);
         assertFalse(
                 service.check("ctx_write", ToolCategory.MCP, Map.of(), false).allowed());
     }
@@ -525,7 +695,7 @@ class PermissionServiceTest {
     @Test
     void sessionGrantViaGate() {
         final var service = service(PermissionMode.ASK, List.of(), List.of());
-        service.setGate((title, detail, tool, args) -> ApprovalGate.Result.ALLOW_SESSION);
+        service.setGate(request -> ApprovalGate.Result.ALLOW_SESSION);
         assertTrue(service.check("bash", ToolCategory.BASH, Map.of("command", "mvn install"))
                 .allowed());
         assertTrue(service.check("bash", ToolCategory.BASH, Map.of("command", "mvn test"))
@@ -591,12 +761,11 @@ class PermissionServiceTest {
     @Test
     void ruleDefaultOverridesPlan() {
         // docker run: plan asks (no gate -> denied), build mode default=all allows silently
-        final var props = new HashMap<String, String>();
-        props.put("yca.permissions.bash.rules.length", "1");
-        props.put("yca.permissions.bash.rules.0.matcher.commandStart.options", "docker run");
-        props.put("yca.permissions.bash.rules.0.plan", "ask");
-        props.put("yca.permissions.bash.rules.0.default", "all");
-        final var service = service(PermissionMode.ASK, List.of(), List.of(), props);
+        final var configuredRules = List.of(new CommandPermissionConfiguration(
+                new CommandStartMatcherConfiguration(new CommandOptionsConfiguration(List.of("docker run")), List.of()),
+                PermissionMode.ASK,
+                PermissionMode.YOLO));
+        final var service = service(PermissionMode.ASK, List.of(), List.of(), configuredRules);
         assertTrue(service.check("bash", ToolCategory.BASH, Map.of("command", "docker run nginx"))
                 .allowed());
         service.setMode(AgentMode.PLAN);
@@ -615,11 +784,11 @@ class PermissionServiceTest {
     @Test
     void rulePlanFallsBackToDefaultWhenPlanAbsent() {
         // no `plan` key: plan mode resolves through `default`
-        final var props = new HashMap<String, String>();
-        props.put("yca.permissions.bash.rules.length", "1");
-        props.put("yca.permissions.bash.rules.0.matcher.commandStart.options", "docker run");
-        props.put("yca.permissions.bash.rules.0.default", "all");
-        final var service = service(PermissionMode.ASK, List.of(), List.of(), props);
+        final var configuredRules = List.of(new CommandPermissionConfiguration(
+                new CommandStartMatcherConfiguration(new CommandOptionsConfiguration(List.of("docker run")), List.of()),
+                null,
+                PermissionMode.YOLO));
+        final var service = service(PermissionMode.ASK, List.of(), List.of(), configuredRules);
         service.setMode(AgentMode.PLAN);
         assertTrue(service.check("bash", ToolCategory.BASH, Map.of("command", "docker run nginx"))
                 .allowed());
@@ -627,15 +796,16 @@ class PermissionServiceTest {
 
     @Test
     void ruleAskConsultsGateInBothModes() {
-        final var props = new HashMap<String, String>();
-        props.put("yca.permissions.bash.rules.length", "1");
-        props.put("yca.permissions.bash.rules.0.matcher.commandStart.options", "docker run");
-        props.put("yca.permissions.bash.rules.0.plan", "ask");
+        final var configuredRules = List.of(new CommandPermissionConfiguration(
+                new CommandStartMatcherConfiguration(new CommandOptionsConfiguration(List.of("docker run")), List.of()),
+                PermissionMode.ASK,
+                null));
         for (final var agentMode : List.of(AgentMode.BUILD, AgentMode.PLAN)) {
-            final var service = service(PermissionMode.ASK, List.of(), List.of(), props);
+            final var service = service(PermissionMode.ASK, List.of(), List.of(), configuredRules);
             service.setMode(agentMode);
             final AtomicReference<String> asked = new AtomicReference<>();
-            service.setGate((title, detail, tool, args) -> {
+            service.setGate(request -> {
+                final var title = request.title();
                 asked.set(title);
                 return ApprovalGate.Result.ALLOW_ONCE;
             });
@@ -684,12 +854,12 @@ class PermissionServiceTest {
 
     @Test
     void sessionGrantUsesMatchedRuleCommandStart() {
-        final var props = new HashMap<String, String>();
-        props.put("yca.permissions.bash.rules.length", "1");
-        props.put("yca.permissions.bash.rules.0.matcher.commandStart.options", "docker run");
-        props.put("yca.permissions.bash.rules.0.plan", "ask");
-        final var service = service(PermissionMode.ASK, List.of(), List.of(), props);
-        service.setGate((title, detail, tool, args) -> ApprovalGate.Result.ALLOW_SESSION);
+        final var configuredRules = List.of(new CommandPermissionConfiguration(
+                new CommandStartMatcherConfiguration(new CommandOptionsConfiguration(List.of("docker run")), List.of()),
+                PermissionMode.ASK,
+                null));
+        final var service = service(PermissionMode.ASK, List.of(), List.of(), configuredRules);
+        service.setGate(request -> ApprovalGate.Result.ALLOW_SESSION);
         assertTrue(service.check("bash", ToolCategory.BASH, Map.of("command", "docker run nginx"))
                 .allowed());
         assertTrue(
@@ -697,7 +867,7 @@ class PermissionServiceTest {
                 "the grant must be keyed by the rule commandStart, not the first word");
 
         // the fine grained grant unlocks docker run commands without consulting the gate...
-        service.setGate((title, detail, tool, args) -> ApprovalGate.Result.DENY);
+        service.setGate(request -> ApprovalGate.Result.DENY);
         assertTrue(service.check("bash", ToolCategory.BASH, Map.of("command", "docker run -p 80:80 nginx"))
                 .allowed());
         // ...but not other docker commands nor compound commands
@@ -709,13 +879,8 @@ class PermissionServiceTest {
 
     @Test
     void dynamicRulesExtendTheEffectiveRulesAndAreSessionScoped() {
-        final var registry =
-                new BashRulesRegistry(TestConfigs.codingAgent(Map.of("yca.storageHome", storageHome.toString())));
-        final var service = new PermissionService(
-                TestConfigs.codingAgent(Map.of("yca.storageHome", storageHome.toString())),
-                null,
-                registry,
-                (TestConfigs.codingAgent(Map.of("yca.storageHome", storageHome.toString()))).resolveWorkingDir());
+        final var registry = new BashRulesRegistry(baseline);
+        final var service = new PermissionService(baseline, null, registry, baseline.resolveWorkingDir());
         service.setMode(AgentMode.BUILD);
         // mvn is not part of the default read-only families: denied without an override
         assertFalse(service.check("bash", ToolCategory.BASH, Map.of("command", "mvn install"))

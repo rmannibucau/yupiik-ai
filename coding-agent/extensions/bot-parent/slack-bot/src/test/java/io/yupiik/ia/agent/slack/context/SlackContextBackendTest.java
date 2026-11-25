@@ -19,13 +19,11 @@ import static org.junit.jupiter.api.Assertions.*;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 import com.sun.net.httpserver.HttpServer;
-import io.yupiik.fusion.framework.api.ConfiguringContainer;
-import io.yupiik.fusion.framework.api.RuntimeContainer;
 import io.yupiik.fusion.json.JsonMapper;
-import io.yupiik.fusion.json.internal.framework.JsonModule;
 import io.yupiik.fusion.kubernetes.client.KubernetesClient;
 import io.yupiik.fusion.kubernetes.client.KubernetesClientConfiguration;
-import io.yupiik.ia.agent.bot.runtime.BotRuntimeModule;
+import io.yupiik.fusion.testing.Fusion;
+import io.yupiik.fusion.testing.FusionSupport;
 import io.yupiik.ia.agent.bot.runtime.execution.DockerExecutionBackend;
 import io.yupiik.ia.agent.bot.runtime.execution.KubernetesExecutionBackend;
 import io.yupiik.ia.agent.bot.runtime.execution.NonoExecutionBackend;
@@ -34,6 +32,7 @@ import io.yupiik.ia.agent.slack.configuration.AgentSlackContextConfiguration;
 import io.yupiik.ia.agent.slack.context.agent.SlackContextClient;
 import io.yupiik.ia.agent.slack.context.agent.SlackContextTool;
 import io.yupiik.ia.agent.slack.service.SlackExecutionPolicy;
+import io.yupiik.ia.agent.slack.support.SlackConfigurationTestModule;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -50,7 +49,11 @@ import org.junit.jupiter.api.io.TempDir;
 
 /** Real backend handoff with fake launchers/API, not Docker, Nono or a Kubernetes cluster. */
 @Timeout(15)
+@FusionSupport(modules = SlackConfigurationTestModule.class)
 class SlackContextBackendTest {
+    @Fusion
+    private JsonMapper json;
+
     @TempDir
     private static Path testWorkdir;
 
@@ -66,15 +69,15 @@ class SlackContextBackendTest {
         nonRoot(attempt);
         final var original = Files.readString(attempt.resolve("configuration.json"));
         final var executable = script("docker", """
-                for last; do :; done
-                if [ "$2" = inspect ]; then
-                  case "$last" in
-                    *-services|*-egress) printf 'Error: No such container: %s\\n' "$last"; exit 1 ;;
-                    *-services-net|*-external) printf 'Error: No such network: %s\\n' "$last"; exit 1 ;;
-                  esac
-                fi
-                printf '%s\\n' "$@" > "$0.args"
-                """);
+            for last; do :; done
+            if [ "$2" = inspect ]; then
+              case "$last" in
+                *-services|*-egress) printf 'Error: No such container: %s\\n' "$last"; exit 1 ;;
+                *-services-net|*-external) printf 'Error: No such network: %s\\n' "$last"; exit 1 ;;
+              esac
+            fi
+            printf '%s\\n' "$@" > "$0.args"
+            """);
         final var backend = new DockerExecutionBackend(
                 SlackExecutionPolicy.POLICY,
                 executable.toString(),
@@ -94,11 +97,10 @@ class SlackContextBackendTest {
         assertEquals("/attempt/storage", option(args, "--yca-storage-home"));
         assertEquals("false", option(args, "--yca-configuration-project-enabled"));
         assertEquals(original, Files.readString(attempt.resolve("configuration.json")));
-        try (final var container = mapperContainer();
-                final var json = container.lookup(JsonMapper.class)) {
-            final var context = context(json.instance(), attempt.resolve("configuration.json"));
+        {
+            final var context = context(json, attempt.resolve("configuration.json"));
             assertEquals(DIRECTORY, context.get("directory"));
-            assertUsable(json.instance(), context, attempt.resolve("storage/slack-context"));
+            assertUsable(json, context, attempt.resolve("storage/slack-context"));
         }
     }
 
@@ -113,13 +115,12 @@ class SlackContextBackendTest {
                 home.resolve("nono-state"),
                 PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rwx------")));
         final var executable = script("nono", """
-                if [ "$1" = run ]; then printf '%s\\n' "$@" > "$0.args"; exit 0; fi
-                printf '[{"session_id":"0123456789abcdef","status":"exited","exit_code":0}]'
-                """);
-        try (final var container = mapperContainer();
-                final var json = container.lookup(JsonMapper.class)) {
+            if [ "$1" = run ]; then printf '%s\\n' "$@" > "$0.args"; exit 0; fi
+            printf '[{"session_id":"0123456789abcdef","status":"exited","exit_code":0}]'
+            """);
+        {
             final var backend = new NonoExecutionBackend(
-                    json.instance(),
+                    json,
                     executable.toString(),
                     agent,
                     runtime,
@@ -133,7 +134,7 @@ class SlackContextBackendTest {
             assertEquals(staged.toString(), option(args, "--yca-configuration-json"));
             assertEquals(attempt.resolve("storage").toString(), option(args, "--yca-storage-home"));
             assertEquals("false", option(args, "--yca-configuration-project-enabled"));
-            final var document = json.instance().fromString(AgentConfigurationDocument.class, Files.readString(staged));
+            final var document = json.fromString(AgentConfigurationDocument.class, Files.readString(staged));
             final var context = map(document.configuration().get("slackContext"));
             assertEquals(attempt.resolve("storage/slack-context").toString(), context.get("directory"));
             assertEquals(BINDING, context.get("channel"));
@@ -151,14 +152,13 @@ class SlackContextBackendTest {
             assertEquals(
                     "Repair " + attempt.resolve("storage/slack-context"),
                     map(document.completionSettings().get("run")).get("result-correction-prompt"));
-            final var profile = map(json.instance()
-                    .fromString(Object.class, Files.readString(state.resolve("yca-slack-context/profile.json"))));
+            final var profile = map(
+                    json.fromString(Object.class, Files.readString(state.resolve("yca-slack-context/profile.json"))));
             final var writable = (List<?>) map(profile.get("filesystem")).get("allow");
             assertTrue(writable.contains(attempt.resolve("storage").toString()));
             assertFalse(writable.contains(attempt.toString()));
             assertEquals(original, Files.readString(attempt.resolve("configuration.json")));
-            assertUsable(
-                    json.instance(), context, Path.of(context.get("directory").toString()));
+            assertUsable(json, context, Path.of(context.get("directory").toString()));
         }
     }
 
@@ -167,11 +167,9 @@ class SlackContextBackendTest {
         final var attempt = attempt();
         final var original = Files.readString(attempt.resolve("configuration.json"));
         try (final var cluster = new Cluster();
-                final var container = mapperContainer();
-                final var json = container.lookup(JsonMapper.class);
                 final var client = cluster.client()) {
             final var backend = new KubernetesExecutionBackend(
-                    json.instance(),
+                    json,
                     client,
                     "bots",
                     "attempts",
@@ -184,7 +182,7 @@ class SlackContextBackendTest {
                     "yca-agent",
                     "hidden");
             assertEquals(0, backend.execute(attempt, "yca-slack-context", "summary", Map.of(), Map.of()));
-            final var job = map(json.instance().fromString(Object.class, cluster.createdJob));
+            final var job = map(json.fromString(Object.class, cluster.createdJob));
             final var pod = map(map(map(job.get("spec")).get("template")).get("spec"));
             final var agent = map(((List<?>) pod.get("containers")).getFirst());
             final var mounts = (List<?>) agent.get("volumeMounts");
@@ -214,12 +212,12 @@ class SlackContextBackendTest {
             assertEquals("/attempt/storage", option(args, "--yca-storage-home"));
             assertEquals("false", option(args, "--yca-configuration-project-enabled"));
             assertEquals(original, Files.readString(attempt.resolve("configuration.json")));
-            final var context = context(json.instance(), attempt.resolve("configuration.json"));
+            final var context = context(json, attempt.resolve("configuration.json"));
             assertEquals(DIRECTORY, context.get("directory"));
             final var mountedMailbox =
                     home.resolve(storage.get("subPath").toString()).resolve("slack-context");
             assertEquals(attempt.resolve("storage/slack-context"), mountedMailbox);
-            assertUsable(json.instance(), context, mountedMailbox);
+            assertUsable(json, context, mountedMailbox);
         }
     }
 
@@ -233,12 +231,12 @@ class SlackContextBackendTest {
                 PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rwx------")));
         // Worker-prepared shape, with nested maps/lists to guard Nono's recursive relocation.
         Files.writeString(attempt.resolve("configuration.json"), """
-                {"yca":{"slackContext":{"enabled":true,"directory":"/attempt/storage/slack-context",
-                "channel":"CBINDING","timeoutSeconds":3},
-                "nested":[{"mailbox":"/attempt/storage/slack-context"},["/attempt/storage/slack-context/request.json"]],
-                "literal":"outside /attempt-other/slack-context"},
-                "run":{"result-correction-prompt":"Repair /attempt/storage/slack-context"}}
-                """);
+            {"yca":{"slackContext":{"enabled":true,"directory":"/attempt/storage/slack-context",
+            "channel":"CBINDING","timeoutSeconds":3},
+            "nested":[{"mailbox":"/attempt/storage/slack-context"},["/attempt/storage/slack-context/request.json"]],
+            "literal":"outside /attempt-other/slack-context"},
+            "run":{"result-correction-prompt":"Repair /attempt/storage/slack-context"}}
+            """);
         return attempt;
     }
 
@@ -254,13 +252,6 @@ class SlackContextBackendTest {
         Files.writeString(executable, "#!/bin/sh\n" + body);
         Files.setPosixFilePermissions(executable, PosixFilePermissions.fromString("rwx------"));
         return executable;
-    }
-
-    private RuntimeContainer mapperContainer() {
-        return ConfiguringContainer.of()
-                .disableAutoDiscovery(true)
-                .register(new BotRuntimeModule(), new JsonModule())
-                .start();
     }
 
     private Map<?, ?> context(final JsonMapper json, final Path file) throws Exception {
@@ -328,9 +319,9 @@ class SlackContextBackendTest {
                         }
                     } else if (path.endsWith("/pods")) {
                         output = job ? """
-                                {"items":[{"metadata":{"name":"yca-pod"},"status":{"phase":"Succeeded",
-                                "containerStatuses":[{"state":{"terminated":{"exitCode":0}}}]}}]}
-                                """ : "{\"items\":[]}";
+                            {"items":[{"metadata":{"name":"yca-pod"},"status":{"phase":"Succeeded",
+                            "containerStatuses":[{"state":{"terminated":{"exitCode":0}}}]}}]}
+                            """ : "{\"items\":[]}";
                     } else if (path.endsWith("/log")) {
                         output = "agent output\n";
                     } else if ((path.contains("/jobs/") && !job) || (path.contains("/secrets/") && !secret)) {

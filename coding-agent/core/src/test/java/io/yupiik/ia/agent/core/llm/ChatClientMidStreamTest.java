@@ -21,10 +21,15 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.sun.net.httpserver.HttpServer;
+import io.yupiik.fusion.framework.api.container.FusionBean;
+import io.yupiik.fusion.framework.api.container.bean.ProvidedInstanceBean;
+import io.yupiik.fusion.framework.api.scope.DefaultScoped;
 import io.yupiik.fusion.json.JsonMapper;
+import io.yupiik.fusion.testing.Fusion;
+import io.yupiik.fusion.testing.FusionSupport;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
+import io.yupiik.ia.agent.core.configuration.ConfigurationTestModule;
 import io.yupiik.ia.agent.core.configuration.NativeProviderConfiguration;
-import io.yupiik.ia.agent.core.configuration.TestConfigs;
 import io.yupiik.ia.agent.core.wiring.HttpClientProducer;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import io.yupiik.ia.agent.test.TestJsonMapper;
@@ -46,6 +51,8 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
+import java.util.stream.Stream;
+import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.api.io.TempDir;
@@ -59,110 +66,121 @@ import org.junit.jupiter.api.io.TempDir;
 class ChatClientMidStreamTest {
 
     @TempDir
-    Path storageHome;
+    static Path storageHome;
 
-    @Test
-    void cancellationBeforeHeadersReturnsPromptlyAndReleasesLateStream(final JsonMapper mapper) throws Exception {
-        final var received = new CountDownLatch(1);
-        final var sendHeaders = new CountDownLatch(1);
-        final var cancelled = new AtomicBoolean();
-        final var server = HttpServer.create(new InetSocketAddress("localhost", 0), 0);
-        server.createContext("/", exchange -> {
-            try (exchange) {
-                exchange.getRequestBody().readAllBytes();
-                received.countDown();
-                try {
-                    if (!sendHeaders.await(5, TimeUnit.SECONDS)) {
+    @Nested
+    @FusionSupport(modules = HttpModule.class)
+    class CancellationBeforeHeadersReturnsPromptlyAndReleasesLateStream {
+        @Test
+        void cancellationBeforeHeadersReturnsPromptlyAndReleasesLateStream(
+                final JsonMapper mapper, @Fusion final CodingAgentConfiguration cfg, @Fusion final HttpServer server)
+                throws Exception {
+            final var received = new CountDownLatch(1);
+            final var sendHeaders = new CountDownLatch(1);
+            final var cancelled = new AtomicBoolean();
+            server.createContext("/", exchange -> {
+                try (exchange) {
+                    exchange.getRequestBody().readAllBytes();
+                    received.countDown();
+                    try {
+                        if (!sendHeaders.await(5, TimeUnit.SECONDS)) {
+                            return;
+                        }
+                    } catch (final InterruptedException e) {
+                        Thread.currentThread().interrupt();
                         return;
                     }
-                } catch (final InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                    return;
+                    final var body = "data: [DONE]\n\n".getBytes(StandardCharsets.UTF_8);
+                    exchange.getResponseHeaders().set("Content-Type", "text/event-stream");
+                    exchange.sendResponseHeaders(200, body.length);
+                    exchange.getResponseBody().write(body);
                 }
-                final var body = "data: [DONE]\n\n".getBytes(StandardCharsets.UTF_8);
-                exchange.getResponseHeaders().set("Content-Type", "text/event-stream");
-                exchange.sendResponseHeaders(200, body.length);
-                exchange.getResponseBody().write(body);
-            }
-        });
-        server.start();
-        try {
-            final var cfg = configuration(server.getAddress().getPort());
-            try (final var http =
-                            new HttpClientProducer().httpClient(cfg, new NativeProviderConfiguration(null, null));
-                    final var client =
-                            new ChatClient(cfg, mapper, new ProviderManager(cfg, mapper), Clock.systemUTC(), http)) {
-                final var result = CompletableFuture.supplyAsync(() ->
-                        assertThrows(IOException.class, () -> client.stream(request(), event -> {}, cancelled::get)));
-                try {
-                    assertTrue(received.await(5, TimeUnit.SECONDS), "request must be waiting for headers");
-                    cancelled.set(true);
-                    assertEquals("Cancelled", result.get(2, TimeUnit.SECONDS).getMessage());
-                } finally {
-                    cancelled.set(true);
-                    sendHeaders.countDown();
-                }
-                // maxConcurrent=1: this cannot complete if the abandoned late publisher leaks its permit.
-                final var next = CompletableFuture.supplyAsync(() -> {
+            });
+            server.start();
+            try {
+                try (final var http =
+                                new HttpClientProducer().httpClient(cfg, new NativeProviderConfiguration(null, null));
+                        final var client = new ChatClient(
+                                cfg, mapper, new ProviderManager(cfg, mapper), Clock.systemUTC(), http)) {
+                    final var result = CompletableFuture.supplyAsync(() -> assertThrows(
+                            IOException.class, () -> client.stream(request(), event -> {}, cancelled::get)));
                     try {
-                        return client.stream(request(), event -> {}, () -> false);
-                    } catch (final Exception e) {
-                        throw new RuntimeException(e);
+                        assertTrue(received.await(5, TimeUnit.SECONDS), "request must be waiting for headers");
+                        cancelled.set(true);
+                        assertEquals(
+                                "Cancelled", result.get(2, TimeUnit.SECONDS).getMessage());
+                    } finally {
+                        cancelled.set(true);
+                        sendHeaders.countDown();
                     }
-                });
-                assertEquals("assistant", next.get(5, TimeUnit.SECONDS).role());
+                    // maxConcurrent=1: this cannot complete if the abandoned late publisher leaks its permit.
+                    final var next = CompletableFuture.supplyAsync(() -> {
+                        try {
+                            return client.stream(request(), event -> {}, () -> false);
+                        } catch (final Exception e) {
+                            throw new RuntimeException(e);
+                        }
+                    });
+                    assertEquals("assistant", next.get(5, TimeUnit.SECONDS).role());
+                }
+            } finally {
+                sendHeaders.countDown();
+                server.stop(0);
             }
-        } finally {
-            sendHeaders.countDown();
-            server.stop(0);
         }
     }
 
-    @Test
-    void midStreamDisconnectSurfacesAsMidStreamFailure(final JsonMapper mapper) throws Exception {
-        final var sse = String.join(
-                "\n",
-                "data:"
-                        + " {\"id\":\"1\",\"model\":\"test-model\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"he\"},\"finish_reason\":null}]}",
-                "",
-                "data:"
-                        + " {\"id\":\"1\",\"model\":\"test-model\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"llo\"},\"finish_reason\":null}]}",
-                "",
-                "data: [DONE]",
-                "");
-        final var sseBytes = sse.getBytes(StandardCharsets.UTF_8);
-        final var firstChunkDelivered = new CountDownLatch(2);
-        final var serverDone = new CountDownLatch(1);
-        try (final var server = new ServerSocket(0, 1, InetAddress.getByName("localhost"))) {
-            final var serverThread = new Thread(() -> serveOne(server, sseBytes, firstChunkDelivered, serverDone));
-            serverThread.start();
+    @Nested
+    @FusionSupport(modules = SocketModule.class)
+    class MidStreamDisconnectSurfacesAsMidStreamFailure {
+        @Test
+        void midStreamDisconnectSurfacesAsMidStreamFailure(
+                final JsonMapper mapper, @Fusion final CodingAgentConfiguration cfg, @Fusion final ServerSocket server)
+                throws Exception {
+            final var sse = String.join(
+                    "\n",
+                    "data:"
+                            + " {\"id\":\"1\",\"model\":\"test-model\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"he\"},\"finish_reason\":null}]}",
+                    "",
+                    "data:"
+                            + " {\"id\":\"1\",\"model\":\"test-model\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"llo\"},\"finish_reason\":null}]}",
+                    "",
+                    "data: [DONE]",
+                    "");
+            final var sseBytes = sse.getBytes(StandardCharsets.UTF_8);
+            final var firstChunkDelivered = new CountDownLatch(2);
+            final var serverDone = new CountDownLatch(1);
+            try (server) {
+                final var serverThread = new Thread(() -> serveOne(server, sseBytes, firstChunkDelivered, serverDone));
+                serverThread.start();
 
-            final var port = server.getLocalPort();
-            final var cfg = configuration(port);
-            try (final var http =
-                            new HttpClientProducer().httpClient(cfg, new NativeProviderConfiguration(null, null));
-                    final var client =
-                            new ChatClient(cfg, mapper, new ProviderManager(cfg, mapper), Clock.systemUTC(), http)) {
-                final var deltas = new CopyOnWriteArrayList<LlmStreamEvent>();
-                final Consumer<LlmStreamEvent> onDelta = delta -> {
-                    if (delta instanceof TextDelta) {
-                        firstChunkDelivered.countDown();
+                try (final var http =
+                                new HttpClientProducer().httpClient(cfg, new NativeProviderConfiguration(null, null));
+                        final var client = new ChatClient(
+                                cfg, mapper, new ProviderManager(cfg, mapper), Clock.systemUTC(), http)) {
+                    final var deltas = new CopyOnWriteArrayList<LlmStreamEvent>();
+                    final Consumer<LlmStreamEvent> onDelta = delta -> {
+                        if (delta instanceof TextDelta) {
+                            firstChunkDelivered.countDown();
+                        }
+                        deltas.add(delta);
+                    };
+                    try {
+                        final var failure =
+                                assertThrows(IOException.class, () -> client.stream(request(), onDelta, () -> false));
+                        assertInstanceOf(MidStreamFailureException.class, failure);
+                        assertTrue(
+                                ((MidStreamFailureException) failure)
+                                        .partialText()
+                                        .contains("hello"),
+                                "the partial text seen before the cut must be preserved");
+                    } finally {
+                        assertTrue(serverDone.await(5, TimeUnit.SECONDS), "server thread must finish");
                     }
-                    deltas.add(delta);
-                };
-                try {
-                    final var failure =
-                            assertThrows(IOException.class, () -> client.stream(request(), onDelta, () -> false));
-                    assertInstanceOf(MidStreamFailureException.class, failure);
                     assertTrue(
-                            ((MidStreamFailureException) failure).partialText().contains("hello"),
-                            "the partial text seen before the cut must be preserved");
-                } finally {
-                    assertTrue(serverDone.await(5, TimeUnit.SECONDS), "server thread must finish");
+                            deltas.stream().anyMatch(TextDelta.class::isInstance),
+                            "deltas delivered before the cut must still reach the consumer");
                 }
-                assertTrue(
-                        deltas.stream().anyMatch(TextDelta.class::isInstance),
-                        "deltas delivered before the cut must still reach the consumer");
             }
         }
     }
@@ -203,8 +221,53 @@ class ChatClientMidStreamTest {
         }
     }
 
-    private CodingAgentConfiguration configuration(final int port) {
-        return TestConfigs.codingAgent(Map.ofEntries(
+    private ChatCompletionRequest request() {
+        return new ChatCompletionRequest(
+                "test-model", List.of(Message.user("hi")), null, null, null, null, null, null, null, null);
+    }
+
+    public static class HttpModule extends ConfigurationTestModule {
+        private final HttpServer server;
+
+        public HttpModule() throws IOException {
+            this(HttpServer.create(new InetSocketAddress("localhost", 0), 0));
+        }
+
+        private HttpModule(final HttpServer server) {
+            super(configurationValues(server.getAddress().getPort()));
+            this.server = server;
+        }
+
+        @Override
+        public Stream<FusionBean<?>> beans() {
+            return Stream.concat(
+                    super.beans(),
+                    Stream.of(new ProvidedInstanceBean<>(DefaultScoped.class, HttpServer.class, () -> server)));
+        }
+    }
+
+    public static class SocketModule extends ConfigurationTestModule {
+        private final ServerSocket server;
+
+        public SocketModule() throws IOException {
+            this(new ServerSocket(0, 1, InetAddress.getByName("localhost")));
+        }
+
+        private SocketModule(final ServerSocket server) {
+            super(configurationValues(server.getLocalPort()));
+            this.server = server;
+        }
+
+        @Override
+        public Stream<FusionBean<?>> beans() {
+            return Stream.concat(
+                    super.beans(),
+                    Stream.of(new ProvidedInstanceBean<>(DefaultScoped.class, ServerSocket.class, () -> server)));
+        }
+    }
+
+    private static Map<String, String> configurationValues(final int port) {
+        return Map.ofEntries(
                 Map.entry("yca.storageHome", storageHome.toString()),
                 Map.entry("yca.provider.providers.length", "1"),
                 Map.entry("yca.provider.providers.0.id", "default"),
@@ -220,11 +283,6 @@ class ChatClientMidStreamTest {
                 Map.entry("yca.llm.rateLimitRequestsPerMinute", "0"),
                 Map.entry("yca.llm.maxConcurrent", "1"),
                 Map.entry("yca.llm.retryOnContextOverflow", "true"),
-                Map.entry("yca.llm.maxIterations", "250")));
-    }
-
-    private ChatCompletionRequest request() {
-        return new ChatCompletionRequest(
-                "test-model", List.of(Message.user("hi")), null, null, null, null, null, null, null, null);
+                Map.entry("yca.llm.maxIterations", "250"));
     }
 }

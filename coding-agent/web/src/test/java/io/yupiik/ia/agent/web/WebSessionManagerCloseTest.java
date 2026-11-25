@@ -20,7 +20,9 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.fusion.json.JsonMapper;
-import io.yupiik.ia.agent.core.configuration.CodingAgentConfigurations;
+import io.yupiik.fusion.testing.Fusion;
+import io.yupiik.fusion.testing.FusionSupport;
+import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.context.BackoffSleeper;
 import io.yupiik.ia.agent.core.session.SessionStore;
 import io.yupiik.ia.agent.core.shell.SessionLifecycle;
@@ -33,6 +35,7 @@ import io.yupiik.ia.agent.core.shell.slash.SlashRegistry;
 import io.yupiik.ia.agent.core.wiring.PrecisionDurationMarkerProvider;
 import java.nio.file.Path;
 import java.time.Clock;
+import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.function.BooleanSupplier;
@@ -52,11 +55,18 @@ import org.junit.jupiter.api.io.TempDir;
  * queue intact.
  */
 @ExtendWith(TestWebJsonMapper.class)
+@FusionSupport(modules = WebSessionManagerCloseTest.SessionModule.class)
 @Timeout(30)
 class WebSessionManagerCloseTest {
 
     @TempDir
-    Path storageHome;
+    static Path storageHome;
+
+    public static class SessionModule extends WebConfigurationTestModule {
+        public SessionModule() {
+            super(Map.of("yca.storageHome", storageHome.toString()));
+        }
+    }
 
     private JsonMapper mapper;
     private WebSessionManager manager;
@@ -64,12 +74,8 @@ class WebSessionManagerCloseTest {
     private CancelCapturingTurnRunner turnRunner;
 
     @BeforeEach
-    void setup(final JsonMapper mapper) {
+    void setup(final JsonMapper mapper, @Fusion final CodingAgentConfiguration configuration) {
         this.mapper = mapper;
-        final var configuration = CodingAgentConfigurations.builder()
-                .baseUrl("http://localhost:0")
-                .storageHome(storageHome.toString())
-                .build();
         final var sessionStore = new SessionStore() {};
         final var runtimeFactory = new SessionRuntimeFactory(
                 null,

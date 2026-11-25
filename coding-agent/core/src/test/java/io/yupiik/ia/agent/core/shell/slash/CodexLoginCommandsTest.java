@@ -21,9 +21,11 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.fusion.json.JsonMapper;
+import io.yupiik.fusion.testing.Fusion;
+import io.yupiik.fusion.testing.FusionSupport;
 import io.yupiik.ia.agent.core.agent.AgentEvent;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
-import io.yupiik.ia.agent.core.configuration.ConfigurationLoader;
+import io.yupiik.ia.agent.core.configuration.ConfigurationTestModule;
 import io.yupiik.ia.agent.core.llm.CodexLoginService;
 import io.yupiik.ia.agent.core.permissions.ApprovalGate;
 import io.yupiik.ia.agent.core.question.FeedbackGate;
@@ -35,11 +37,12 @@ import io.yupiik.ia.agent.core.shell.ShellSession;
 import io.yupiik.ia.agent.core.shell.ToolOutputVisibility;
 import io.yupiik.ia.agent.test.TestJsonMapper;
 import java.nio.file.Path;
-import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
+import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.api.io.TempDir;
@@ -48,44 +51,62 @@ import org.junit.jupiter.api.io.TempDir;
 @ExtendWith(TestJsonMapper.class)
 class CodexLoginCommandsTest {
 
-    @Test
-    void registersCodexLogin(final JsonMapper mapper, final @TempDir Path storage) throws Exception {
-        final var commands = commands(mapper, storage);
-        final var names =
-                commands.commands().stream().map(c -> c.spec().command()).toList();
-        assertTrue(names.contains("codex"), "expected a /codex command, got " + names);
+    @Nested
+    @FusionSupport(modules = RegistersCodexLoginScenarioModule.class)
+    class RegistersCodexLoginScenario {
+        @TempDir
+        static Path directory;
+
+        @Test
+        void registersCodexLogin(final JsonMapper mapper, @Fusion final CodingAgentConfiguration configuration)
+                throws Exception {
+            final var commands = commands(mapper, configuration);
+            final var names =
+                    commands.commands().stream().map(c -> c.spec().command()).toList();
+            assertTrue(names.contains("codex"), "expected a /codex command, got " + names);
+        }
     }
 
-    @Test
-    void missingProviderIsAnError(final JsonMapper mapper, final @TempDir Path storage) throws Exception {
-        final var commands = commands(mapper, storage);
-        final var action = commands.commands().get(0).action();
-        final CompletionStage<ShellOutcome> result = action.apply("", env());
-        final ShellOutcome outcome = result.toCompletableFuture().get();
-        assertInstanceOf(ShellOutcome.Error.class, outcome, outcome.toString());
-        assertTrue(((ShellOutcome.Error) outcome).message().contains("provider"), outcome.toString());
+    @Nested
+    @FusionSupport(modules = MissingProviderIsAnErrorScenarioModule.class)
+    class MissingProviderIsAnErrorScenario {
+        @TempDir
+        static Path directory;
+
+        @Test
+        void missingProviderIsAnError(final JsonMapper mapper, @Fusion final CodingAgentConfiguration configuration)
+                throws Exception {
+            final var commands = commands(mapper, configuration);
+            final var action = commands.commands().get(0).action();
+            final CompletionStage<ShellOutcome> result = action.apply("", env());
+            final ShellOutcome outcome = result.toCompletableFuture().get();
+            assertInstanceOf(ShellOutcome.Error.class, outcome, outcome.toString());
+            assertTrue(((ShellOutcome.Error) outcome).message().contains("provider"), outcome.toString());
+        }
     }
 
-    @Test
-    void optionValueParsing() {
-        assertNull(CodexLoginCommands.optionValue(List.of("login", "codex", "--enterprise"), "--workspace"));
-        assertEquals(
-                "ws-1",
-                CodexLoginCommands.optionValue(List.of("login", "codex", "--workspace", "ws-1"), "--workspace"));
-        assertEquals(
-                "ws-2",
-                CodexLoginCommands.optionValue(
-                        List.of("login", "codex", "--enterprise", "--workspace", "ws-2", "--device"), "--workspace"));
+    @Nested
+    @FusionSupport(modules = OptionValueParsingScenarioModule.class)
+    class OptionValueParsingScenario {
+        @TempDir
+        static Path directory;
+
+        @Test
+        void optionValueParsing() {
+            assertNull(CodexLoginCommands.optionValue(List.of("login", "codex", "--enterprise"), "--workspace"));
+            assertEquals(
+                    "ws-1",
+                    CodexLoginCommands.optionValue(List.of("login", "codex", "--workspace", "ws-1"), "--workspace"));
+            assertEquals(
+                    "ws-2",
+                    CodexLoginCommands.optionValue(
+                            List.of("login", "codex", "--enterprise", "--workspace", "ws-2", "--device"),
+                            "--workspace"));
+        }
     }
 
-    private static CodexLoginCommands commands(final JsonMapper mapper, final Path storage) {
-        return new CodexLoginCommands(new CodexLoginService(mapper, null, config(storage)));
-    }
-
-    private static CodingAgentConfiguration config(final Path storage) {
-        final var map = new HashMap<String, String>();
-        map.put("yca.storageHome", storage.toString());
-        return ConfigurationLoader.load(CodingAgentConfiguration.class, key -> Optional.ofNullable(map.get(key)));
+    private static CodexLoginCommands commands(final JsonMapper mapper, final CodingAgentConfiguration configuration) {
+        return new CodexLoginCommands(new CodexLoginService(mapper, null, configuration));
     }
 
     private static ShellEnv env() {
@@ -135,5 +156,23 @@ class CodexLoginCommandsTest {
             }
         };
         return new ShellEnv(frontend, io, new ShellSession(), null);
+    }
+
+    public static class RegistersCodexLoginScenarioModule extends ConfigurationTestModule {
+        public RegistersCodexLoginScenarioModule() {
+            super(Map.of("yca.storageHome", RegistersCodexLoginScenario.directory.toString()));
+        }
+    }
+
+    public static class MissingProviderIsAnErrorScenarioModule extends ConfigurationTestModule {
+        public MissingProviderIsAnErrorScenarioModule() {
+            super(Map.of("yca.storageHome", MissingProviderIsAnErrorScenario.directory.toString()));
+        }
+    }
+
+    public static class OptionValueParsingScenarioModule extends ConfigurationTestModule {
+        public OptionValueParsingScenarioModule() {
+            super(Map.of("yca.storageHome", OptionValueParsingScenario.directory.toString()));
+        }
     }
 }

@@ -18,6 +18,7 @@ package io.yupiik.ia.agent.core.codegraph;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import io.yupiik.ia.agent.core.sandbox.DisabledSandbox;
 import io.yupiik.ia.agent.core.tools.ToolContext;
 import java.nio.file.Path;
 import java.util.List;
@@ -40,14 +41,17 @@ class CodeFindCodeToolTest {
                 List.of(),
                 Map.of(),
                 1L)));
-        final var simple = tool.execute(Map.of("query", "RowSet"), ToolContext.empty(fakeRoot));
+        final var simple =
+                tool.execute(Map.of("query", "RowSet"), ToolContext.empty(fakeRoot, new DisabledSandbox(fakeRoot)));
         assertTrue(simple.success());
         final var simpleText = simple.output();
         assertTrue(simpleText.contains("INTERFACE  org.hop.RowSet"), simpleText);
         assertTrue(simpleText.contains("TYPE  org.hop.RowSetImpl"), simpleText);
         assertFalse(simpleText.contains("Pipeline"), simpleText);
 
-        final var byKind = tool.execute(Map.of("query", "rowset", "kind", "interface"), ToolContext.empty(fakeRoot));
+        final var byKind = tool.execute(
+                Map.of("query", "rowset", "kind", "interface"),
+                ToolContext.empty(fakeRoot, new DisabledSandbox(fakeRoot)));
         final var kindText = byKind.output();
         assertTrue(kindText.contains("INTERFACE  org.hop.RowSet"), kindText);
         assertFalse(kindText.contains("RowSetImpl"), kindText);
@@ -56,7 +60,8 @@ class CodeFindCodeToolTest {
     @Test
     void reportsNoSymbolWhenMissing() {
         final var tool = new CodeFindCodeTool(fake(GraphStore.empty()));
-        final var result = tool.execute(Map.of("query", "doesNotExist"), ToolContext.empty(fakeRoot));
+        final var result = tool.execute(
+                Map.of("query", "doesNotExist"), ToolContext.empty(fakeRoot, new DisabledSandbox(fakeRoot)));
         assertTrue(result.success());
         assertTrue(result.output().contains("No symbol matching 'doesNotExist'."));
     }
@@ -64,7 +69,7 @@ class CodeFindCodeToolTest {
     @Test
     void requiresQuery() {
         final var tool = new CodeFindCodeTool(fake(GraphStore.empty()));
-        final var result = tool.execute(Map.of(), ToolContext.empty(fakeRoot));
+        final var result = tool.execute(Map.of(), ToolContext.empty(fakeRoot, new DisabledSandbox(fakeRoot)));
         assertFalse(result.success());
     }
 
@@ -78,7 +83,8 @@ class CodeFindCodeToolTest {
                 List.of(),
                 Map.of(),
                 1L)));
-        final var result = tool.execute(Map.of("query", "a", "max", "1"), ToolContext.empty(fakeRoot));
+        final var result = tool.execute(
+                Map.of("query", "a", "max", "1"), ToolContext.empty(fakeRoot, new DisabledSandbox(fakeRoot)));
         assertTrue(result.output().contains("capped at 1"));
     }
 

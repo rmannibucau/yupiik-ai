@@ -18,6 +18,9 @@ package io.yupiik.ia.agent.acp;
 import static org.junit.jupiter.api.Assertions.*;
 
 import io.yupiik.ai.acp.protocol.*;
+import io.yupiik.fusion.testing.Fusion;
+import io.yupiik.fusion.testing.FusionSupport;
+import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.llm.ChatSettings;
 import io.yupiik.ia.agent.core.session.SessionStore;
 import java.io.ByteArrayInputStream;
@@ -27,7 +30,14 @@ import java.nio.charset.StandardCharsets;
 import java.util.List;
 import org.junit.jupiter.api.Test;
 
+@FusionSupport(modules = OptionConfigurationTestModule.class)
 class FramingTest {
+    @Fusion
+    private CodingAgentConfiguration configuration;
+
+    @Fusion
+    private AcpCommand.Conf commandOptions;
+
     @Test
     void acceptsLargeMessagesCrLfAndFinalLineWithoutNewline() throws Exception {
         try (final var mapper = CodecsTest.mapper()) {
@@ -53,7 +63,7 @@ class FramingTest {
 
     private String exchange(final byte[] bytes) throws Exception {
         try (final var mapper = CodecsTest.mapper();
-                final var support = new OptionTestSupport(mapper, settings -> {
+                final var support = new OptionTestSupport(configuration, commandOptions, mapper, settings -> {
                     fail("Framing must not discover models");
                     return null;
                 });

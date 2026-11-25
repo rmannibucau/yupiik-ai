@@ -18,10 +18,11 @@ package io.yupiik.ia.agent.github.service;
 import static org.junit.jupiter.api.Assertions.*;
 
 import io.yupiik.fusion.json.JsonMapper;
+import io.yupiik.fusion.testing.Fusion;
+import io.yupiik.fusion.testing.FusionSupport;
 import io.yupiik.ia.agent.bot.runtime.DockerControlConfiguration;
 import io.yupiik.ia.agent.bot.runtime.admission.HostAdmission;
 import io.yupiik.ia.agent.bot.runtime.admission.HostAdmissionConfiguration;
-import io.yupiik.ia.agent.core.configuration.ConfigurationLoader;
 import io.yupiik.ia.agent.core.configuration.ProviderBudgetConfiguration;
 import io.yupiik.ia.agent.github.command.WorkerCommand.Options;
 import io.yupiik.ia.agent.github.configuration.GithubBotConfiguration;
@@ -31,19 +32,43 @@ import io.yupiik.ia.agent.github.model.TaskState;
 import io.yupiik.ia.agent.github.store.TaskStore;
 import io.yupiik.ia.agent.github.support.BotJsonMapper;
 import io.yupiik.ia.agent.github.support.BotTestConfiguration;
+import io.yupiik.ia.agent.github.support.GithubConfigurationTestModule;
 import io.yupiik.ia.agent.github.support.TaskFixtures;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.attribute.PosixFilePermissions;
+import java.util.Comparator;
 import java.util.Map;
 import java.util.Optional;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.api.parallel.Execution;
+import org.junit.jupiter.api.parallel.ExecutionMode;
 
+@Execution(ExecutionMode.SAME_THREAD) // The class owns one stable configuration and its fixture paths/transport.
+@FusionSupport(modules = WorkerAdmissionTest.Source.class)
 class WorkerAdmissionTest {
+    @Fusion
+    private Options injectedOptions;
+
+    @Fusion
+    private GithubExecutorConfiguration injectedExecutor;
+
     @TempDir
-    Path home;
+    static Path home;
+
+    @BeforeEach
+    void resetState() throws Exception {
+        try (final var paths = Files.walk(home)) {
+            for (final var path : paths.sorted(Comparator.reverseOrder()).toList()) {
+                if (!path.equals(home)) {
+                    Files.delete(path);
+                }
+            }
+        }
+    }
 
     @Test
     void fullHostBudgetLeavesTaskUnclaimedAndDoesNotPrepare() throws IOException {
@@ -123,7 +148,7 @@ class WorkerAdmissionTest {
     }
 
     private WorkerOptions options() {
-        return ConfigurationLoader.load(Options.class, key -> Optional.empty()).worker();
+        return injectedOptions.worker();
     }
 
     private Worker worker(
@@ -134,9 +159,7 @@ class WorkerAdmissionTest {
         final var values = Map.of(
                 "github.executor.attemptRoot", home.resolve("attempts").toString(),
                 "github.executor.docker.executable", home.resolve("docker").toString());
-        final var execution = ConfigurationLoader.load(
-                        GithubExecutorConfiguration.class, key -> Optional.ofNullable(values.get(key)))
-                .shared();
+        final var execution = injectedExecutor.shared();
         return new Worker(
                 conf,
                 store,
@@ -159,5 +182,13 @@ class WorkerAdmissionTest {
                 key -> Optional.ofNullable(values.get(key)),
                 new ProviderBudgetConfiguration(null, null, null),
                 new DockerControlConfiguration("", ""));
+    }
+
+    public static class Source extends GithubConfigurationTestModule {
+        public Source() {
+            super(Map.of(
+                    "github.executor.attemptRoot", home.resolve("attempts").toString(),
+                    "github.executor.docker.executable", home.resolve("docker").toString()));
+        }
     }
 }

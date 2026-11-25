@@ -21,16 +21,22 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import io.yupiik.fusion.testing.Fusion;
+import io.yupiik.fusion.testing.FusionSupport;
 import io.yupiik.ia.agent.core.agent.AgentEvent;
 import io.yupiik.ia.agent.core.agent.AgentLoop;
 import io.yupiik.ia.agent.core.agent.SubagentRegistry;
 import io.yupiik.ia.agent.core.agent.SystemPromptBuilder;
+import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
+import io.yupiik.ia.agent.core.configuration.ConfigurationTestModule;
 import io.yupiik.ia.agent.core.llm.ChatSettings;
 import io.yupiik.ia.agent.core.llm.CodexLoginService;
 import io.yupiik.ia.agent.core.llm.Message;
 import io.yupiik.ia.agent.core.maven.MavenRepositoryKnowledgeService;
 import io.yupiik.ia.agent.core.permissions.ApprovalGate;
+import io.yupiik.ia.agent.core.permissions.PermissionService;
 import io.yupiik.ia.agent.core.question.FeedbackGate;
+import io.yupiik.ia.agent.core.sandbox.DisabledSandbox;
 import io.yupiik.ia.agent.core.session.AgentSessionService;
 import io.yupiik.llm.client.codex.CodexNotAuthenticatedException;
 import io.yupiik.llm.client.codex.model.CodexTokenStore;
@@ -53,7 +59,11 @@ import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+@FusionSupport(modules = ConfigurationTestModule.class)
 class TurnRunnerTest {
+    @Fusion
+    private CodingAgentConfiguration configuration;
+
     @TempDir
     private static Path testWorkdir;
 
@@ -64,7 +74,17 @@ class TurnRunnerTest {
         final var loop = new RecordingLoop();
         final var frontend = new RecordingFrontend();
         final var session = new ShellSession()
-                .runtime(new SessionRuntime(null, null, null, null, null, null, null, null, testWorkdir));
+                .runtime(new SessionRuntime(
+                        null,
+                        new PermissionService(configuration, testWorkdir),
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        testWorkdir,
+                        new DisabledSandbox(testWorkdir)));
         final var env = new ShellEnv(frontend, new FixedIo(true), session, null);
         final var runner = new TurnRunner(noIndexing(), EXECUTOR, agentSessionService());
 
@@ -93,7 +113,17 @@ class TurnRunnerTest {
                 new RecordingFrontend(),
                 new FixedIo(true),
                 new ShellSession()
-                        .runtime(new SessionRuntime(null, null, null, null, null, null, null, null, testWorkdir)),
+                        .runtime(new SessionRuntime(
+                                null,
+                                new PermissionService(configuration, testWorkdir),
+                                null,
+                                null,
+                                null,
+                                null,
+                                null,
+                                null,
+                                testWorkdir,
+                                new DisabledSandbox(testWorkdir))),
                 null);
         final var runner = new TurnRunner(noIndexing(), EXECUTOR, agentSessionService());
 
@@ -109,7 +139,17 @@ class TurnRunnerTest {
     void busyIsVisibleDuringTheTurn() {
         final var loop = new RecordingLoop();
         final var session = new ShellSession()
-                .runtime(new SessionRuntime(null, null, null, null, null, null, null, null, testWorkdir));
+                .runtime(new SessionRuntime(
+                        null,
+                        new PermissionService(configuration, testWorkdir),
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        testWorkdir,
+                        new DisabledSandbox(testWorkdir)));
         final var seenBusy = new AtomicBoolean(false);
         final var env = new ShellEnv(new RecordingFrontend(), new FixedIo(true), session, null);
         final var runner = new TurnRunner(noIndexing(), EXECUTOR, agentSessionService());
@@ -130,7 +170,17 @@ class TurnRunnerTest {
                 new RecordingFrontend(),
                 new FixedIo(false),
                 new ShellSession()
-                        .runtime(new SessionRuntime(null, null, null, null, null, null, null, null, testWorkdir)),
+                        .runtime(new SessionRuntime(
+                                null,
+                                new PermissionService(configuration, testWorkdir),
+                                null,
+                                null,
+                                null,
+                                null,
+                                null,
+                                null,
+                                testWorkdir,
+                                new DisabledSandbox(testWorkdir))),
                 null);
         final var runner = new TurnRunner(indexing(3), EXECUTOR, agentSessionService());
 
@@ -147,7 +197,17 @@ class TurnRunnerTest {
     void missingPromptBuilderKeepsLegacyIndexGate() throws Exception {
         final var loop = new RecordingLoop();
         final var session = new ShellSession()
-                .runtime(new SessionRuntime(loop, null, null, null, null, null, null, null, testWorkdir));
+                .runtime(new SessionRuntime(
+                        loop,
+                        new PermissionService(configuration, testWorkdir),
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        testWorkdir,
+                        new DisabledSandbox(testWorkdir)));
         final var env = new ShellEnv(new RecordingFrontend(), new FixedIo(false), session, null);
         final var runner = new TurnRunner(indexing(3), EXECUTOR, agentSessionService());
 
@@ -194,13 +254,33 @@ class TurnRunnerTest {
                 new RecordingFrontend(),
                 new FixedIo(false),
                 new ShellSession()
-                        .runtime(new SessionRuntime(loopA, null, null, null, null, null, null, builderA, rootA)),
+                        .runtime(new SessionRuntime(
+                                loopA,
+                                new PermissionService(configuration, rootA),
+                                null,
+                                null,
+                                null,
+                                null,
+                                null,
+                                builderA,
+                                rootA,
+                                new DisabledSandbox(rootA))),
                 null);
         final var envB = new ShellEnv(
                 new RecordingFrontend(),
                 new FixedIo(false),
                 new ShellSession()
-                        .runtime(new SessionRuntime(loopB, null, null, null, null, null, null, builderB, rootB)),
+                        .runtime(new SessionRuntime(
+                                loopB,
+                                new PermissionService(configuration, rootB),
+                                null,
+                                null,
+                                null,
+                                null,
+                                null,
+                                builderB,
+                                rootB,
+                                new DisabledSandbox(rootB))),
                 null);
 
         assertTrue(runner.submit(new TurnRunner.TurnRequest(loopA, envA, "a", null, "first", List::of, () -> false))
@@ -223,7 +303,17 @@ class TurnRunnerTest {
         final var loop = new RecordingLoop();
         final var frontend = new RecordingFrontend();
         final var session = new ShellSession()
-                .runtime(new SessionRuntime(null, null, null, null, null, null, null, null, testWorkdir));
+                .runtime(new SessionRuntime(
+                        null,
+                        new PermissionService(configuration, testWorkdir),
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        testWorkdir,
+                        new DisabledSandbox(testWorkdir)));
         final var agentSession = new RecordingAgentSessionService();
         final var env = new ShellEnv(frontend, new FixedIo(true), session, null);
         final var runner = new TurnRunner(noIndexing(), EXECUTOR, agentSession);
@@ -246,7 +336,17 @@ class TurnRunnerTest {
                 new RecordingFrontend(),
                 new FixedIo(true),
                 new ShellSession()
-                        .runtime(new SessionRuntime(null, null, null, null, null, null, null, null, testWorkdir)),
+                        .runtime(new SessionRuntime(
+                                null,
+                                new PermissionService(configuration, testWorkdir),
+                                null,
+                                null,
+                                null,
+                                null,
+                                null,
+                                null,
+                                testWorkdir,
+                                new DisabledSandbox(testWorkdir))),
                 null);
         final var latched = new AtomicReference<String>();
         final var interrupted = new AtomicBoolean(false);
@@ -274,7 +374,17 @@ class TurnRunnerTest {
                 new RecordingFrontend(),
                 new FixedIo(true),
                 new ShellSession()
-                        .runtime(new SessionRuntime(null, null, null, null, null, null, null, null, testWorkdir)),
+                        .runtime(new SessionRuntime(
+                                null,
+                                new PermissionService(configuration, testWorkdir),
+                                null,
+                                null,
+                                null,
+                                null,
+                                null,
+                                null,
+                                testWorkdir,
+                                new DisabledSandbox(testWorkdir))),
                 null);
         final var latched = new AtomicReference<String>();
         final var interrupted = new AtomicBoolean(false);
@@ -324,7 +434,17 @@ class TurnRunnerTest {
         };
         final var runner = new TurnRunner(noIndexing(), EXECUTOR, agentSessionService(), recordingRegistry(latched));
         final var session = new ShellSession()
-                .runtime(new SessionRuntime(null, null, null, null, null, null, null, null, testWorkdir));
+                .runtime(new SessionRuntime(
+                        null,
+                        new PermissionService(configuration, testWorkdir),
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        testWorkdir,
+                        new DisabledSandbox(testWorkdir)));
         final var first = runner.submit(new TurnRunner.TurnRequest(
                         loop,
                         new ShellEnv(new RecordingFrontend(), new FixedIo(true), session, null),
@@ -341,7 +461,16 @@ class TurnRunnerTest {
                                 new FixedIo(true),
                                 new ShellSession()
                                         .runtime(new SessionRuntime(
-                                                null, null, null, null, null, null, null, null, testWorkdir)),
+                                                null,
+                                                new PermissionService(configuration, testWorkdir),
+                                                null,
+                                                null,
+                                                null,
+                                                null,
+                                                null,
+                                                null,
+                                                testWorkdir,
+                                                new DisabledSandbox(testWorkdir))),
                                 null),
                         "keep-running",
                         null,
@@ -373,7 +502,17 @@ class TurnRunnerTest {
                     new RecordingFrontend(),
                     new FixedIo(true),
                     new ShellSession()
-                            .runtime(new SessionRuntime(null, null, null, null, null, null, null, null, testWorkdir)),
+                            .runtime(new SessionRuntime(
+                                    null,
+                                    new PermissionService(configuration, testWorkdir),
+                                    null,
+                                    null,
+                                    null,
+                                    null,
+                                    null,
+                                    null,
+                                    testWorkdir,
+                                    new DisabledSandbox(testWorkdir))),
                     null);
             final var runner = new TurnRunner(noIndexing(), executor, agentSessionService());
             runner.submit(new TurnRunner.TurnRequest(
@@ -509,7 +648,7 @@ class TurnRunnerTest {
 
     private static final class RecordingLoop extends AgentLoop {
         private RecordingLoop() {
-            super(testWorkdir);
+            super(testWorkdir, new DisabledSandbox(testWorkdir));
         }
 
         private final AtomicReference<String> prompt = new AtomicReference<>();
@@ -570,7 +709,17 @@ class TurnRunnerTest {
                 frontend,
                 new FixedIo(true),
                 new ShellSession()
-                        .runtime(new SessionRuntime(null, null, null, null, null, null, null, null, testWorkdir)),
+                        .runtime(new SessionRuntime(
+                                null,
+                                new PermissionService(configuration, testWorkdir),
+                                null,
+                                null,
+                                null,
+                                null,
+                                null,
+                                null,
+                                testWorkdir,
+                                new DisabledSandbox(testWorkdir))),
                 null);
         final var runner = new TurnRunner(noIndexing(), EXECUTOR, agentSessionService(), null, captor);
 

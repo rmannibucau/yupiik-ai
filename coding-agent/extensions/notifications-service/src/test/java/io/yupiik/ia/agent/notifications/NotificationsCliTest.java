@@ -221,9 +221,9 @@ class NotificationsCliTest {
                 final var mapper = container.lookup(JsonMapper.class)) {
             final var unread = new UnreadNotifications();
             final var endpoint = new NotificationEndpoint(mapper.instance());
-            unread.publish(new Notice(1, "session", "Main", "turn_end", "main", 1));
-            unread.publish(new Notice(1, "session", "Btw", "input_required", "btw", 2));
-            final var newer = new Notice(1, "newer", "Newer", "turn_end", "main", 3);
+            unread.publish(new Notice(1, "session", "Main", "turn_end", "main", 1, null));
+            unread.publish(new Notice(1, "session", "Btw", "input_required", "btw", 2, null));
+            final var newer = new Notice(1, "newer", "Newer", "turn_end", "main", 3, null);
             unread.publish(newer);
             try (final var listener = endpoint.listen(new ServiceConfiguration(0, TOKEN, true, null), unread)) {
                 for (final var type : List.of("session_acknowledged", "approval_required")) {

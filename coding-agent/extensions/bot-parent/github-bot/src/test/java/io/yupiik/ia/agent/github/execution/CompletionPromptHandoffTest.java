@@ -18,13 +18,15 @@ package io.yupiik.ia.agent.github.execution;
 import static org.junit.jupiter.api.Assertions.*;
 
 import io.yupiik.fusion.json.JsonMapper;
+import io.yupiik.fusion.testing.Fusion;
+import io.yupiik.fusion.testing.FusionSupport;
 import io.yupiik.ia.agent.bot.runtime.model.AgentConfigurationDocument;
-import io.yupiik.ia.agent.core.configuration.ConfigurationLoader;
 import io.yupiik.ia.agent.github.configuration.GithubExecutorConfiguration;
 import io.yupiik.ia.agent.github.configuration.PromptConfiguration;
 import io.yupiik.ia.agent.github.configuration.WorkerOptions;
 import io.yupiik.ia.agent.github.configuration.WorkerOptions.SourceMode;
 import io.yupiik.ia.agent.github.support.BotJsonMapper;
+import io.yupiik.ia.agent.github.support.GithubConfigurationTestModule;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.LinkedHashMap;
@@ -34,7 +36,14 @@ import java.util.Optional;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+@FusionSupport(modules = GithubConfigurationTestModule.class)
 class CompletionPromptHandoffTest {
+    @Fusion
+    private PromptConfiguration prompts;
+
+    @Fusion
+    private GithubExecutorConfiguration executorRoot;
+
     @TempDir
     Path home;
 
@@ -165,10 +174,6 @@ class CompletionPromptHandoffTest {
     }
 
     private AttemptPreparation preparation(final JsonMapper json) {
-        return new AttemptPreparation(
-                json,
-                ConfigurationLoader.load(PromptConfiguration.class, key -> Optional.empty()),
-                ConfigurationLoader.load(GithubExecutorConfiguration.class, key -> Optional.empty())
-                        .shared());
+        return new AttemptPreparation(json, prompts, executorRoot.shared());
     }
 }

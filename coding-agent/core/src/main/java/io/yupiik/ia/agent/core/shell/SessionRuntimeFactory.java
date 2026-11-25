@@ -46,6 +46,7 @@ import io.yupiik.ia.agent.core.permissions.BashRulesRegistry;
 import io.yupiik.ia.agent.core.permissions.PermissionService;
 import io.yupiik.ia.agent.core.question.UserFeedbackService;
 import io.yupiik.ia.agent.core.runtime.StatusReporter;
+import io.yupiik.ia.agent.core.sandbox.SessionSandbox;
 import io.yupiik.ia.agent.core.security.SecretRedactor;
 import io.yupiik.ia.agent.core.session.SessionMetadata;
 import io.yupiik.ia.agent.core.session.SessionStore;
@@ -164,108 +165,125 @@ public class SessionRuntimeFactory {
             throw new IllegalArgumentException("workdir must be absolute and normalized: " + workdir);
         }
         final var permissions = new PermissionService(configuration, emitter, bashRulesRegistry, workdir);
-        final var feedback = new UserFeedbackService();
-        final var usage = new UsageTracker(providerManager, chatClient, contextWindowCache, clock);
-        final var todos = new TodoStore(configuration, mapper, sessionKey);
-        todos.load();
-        final var status = new StatusReporter();
-        final var contextView = new ContextView(configuration.compression());
-        final var compactionCoordinator = new CompactionCoordinator(
-                configuration, chatClient, usage, providerManager, emitter, sessionId, backoffSleeper, workdir);
-        final var contextManager = new ContextManager(configuration, usage, compactionCoordinator);
-        final var memoryCompactor =
-                new MemoryCompactor(chatClient, configuration, memoryStore, providerManager, usage, emitter, sessionId);
-        final var memoryExtractor = new MemoryExtractor(
-                chatClient,
-                configuration,
-                providerManager,
-                memoryStore,
-                mapper,
-                executor,
-                emitter,
-                clock,
-                usage,
-                sessionId,
-                memoryCompactor,
-                memoryProductionPolicy,
-                secretRedactor,
-                workdir);
-        final var systemPromptBuilder = new SystemPromptBuilder(
-                configuration,
-                memoryStore,
-                todos,
+        final var sandbox = new SessionSandbox(
+                configuration.sandbox(),
+                configuration.resolveWorkingDir(),
+                workdir,
                 permissions,
-                agentProvider,
-                providerManager,
-                todoPromptResolver,
-                mavenRepositoryKnowledge,
-                secretRedactor,
-                workdir);
-        final var loop = new AgentLoop(
-                chatClient,
-                sessionTools,
-                toolExecutionService,
-                configuration,
-                permissions,
-                usage,
-                quotaStore,
-                contextManager,
-                contextView,
-                sessionStore,
-                systemPromptBuilder,
-                memoryExtractor,
-                status,
-                emitter,
-                mapper,
-                structuralCodeGraph,
-                providerManager,
-                agentProvider,
-                clock,
-                snapshotStore,
-                todos,
-                executor,
-                sessionId,
-                null,
-                null,
-                feedback,
-                precisionDurationMarker,
-                null,
-                notificationService,
-                null,
-                null,
-                null,
-                workdir);
-        // bounded initialization telemetry: mark the runtime wiring window so pre-first-request
-        // startup is decomposable (runtime creation -> model resolution -> prompt build -> initial prompt)
-        emitPhase(emitter, sessionId, AgentEvent.Phase.RUNTIME_CREATE_START, workdir);
-        if (mavenRepositoryKnowledge != null) {
-            mavenRepositoryKnowledge.warmUp(workdir);
-        }
-        // per-session sub-agent admission budget: the yca.subagents.maxConcurrent cap, owned by the
-        // session object (dies with it, no registry-side map to clean up). SubagentRunner passes
-        // the same budget to child loops, so nesting never creates another pool of permits.
-        if (configuration != null && configuration.subagents() != null) {
-            loop.subagentBudget(new SubagentBudget(configuration.subagents().maxConcurrent()));
-        }
-        if (emitter != null) {
-            emitter.emit(new SessionStartedEvent(
-                    new EventContext(null, null, null, workdir.toString(), null, null, null, null),
+                SessionSandbox.tempDirFor(configuration.resolveWorkingDir()));
+        try {
+            final var feedback = new UserFeedbackService();
+            final var usage = new UsageTracker(providerManager, chatClient, contextWindowCache, clock);
+            final var todos = new TodoStore(configuration, mapper, sessionKey);
+            todos.load();
+            final var status = new StatusReporter();
+            final var contextView = new ContextView(configuration.compression());
+            final var compactionCoordinator = new CompactionCoordinator(
+                    configuration, chatClient, usage, providerManager, emitter, sessionId, backoffSleeper, workdir);
+            final var contextManager = new ContextManager(configuration, usage, compactionCoordinator);
+            final var memoryCompactor = new MemoryCompactor(
+                    chatClient, configuration, memoryStore, providerManager, usage, emitter, sessionId);
+            final var memoryExtractor = new MemoryExtractor(
+                    chatClient,
+                    configuration,
+                    providerManager,
+                    memoryStore,
+                    mapper,
+                    executor,
+                    emitter,
+                    clock,
+                    usage,
                     sessionId,
-                    sessionKey));
+                    memoryCompactor,
+                    memoryProductionPolicy,
+                    secretRedactor,
+                    workdir);
+            final var systemPromptBuilder = new SystemPromptBuilder(
+                    configuration,
+                    memoryStore,
+                    todos,
+                    permissions,
+                    agentProvider,
+                    providerManager,
+                    todoPromptResolver,
+                    mavenRepositoryKnowledge,
+                    secretRedactor,
+                    workdir);
+            final var loop = new AgentLoop(
+                    chatClient,
+                    sessionTools,
+                    toolExecutionService,
+                    configuration,
+                    permissions,
+                    usage,
+                    quotaStore,
+                    contextManager,
+                    contextView,
+                    sessionStore,
+                    systemPromptBuilder,
+                    memoryExtractor,
+                    status,
+                    emitter,
+                    mapper,
+                    structuralCodeGraph,
+                    providerManager,
+                    agentProvider,
+                    clock,
+                    snapshotStore,
+                    todos,
+                    executor,
+                    sessionId,
+                    null,
+                    null,
+                    feedback,
+                    precisionDurationMarker,
+                    null,
+                    notificationService,
+                    null,
+                    null,
+                    null,
+                    workdir,
+                    sandbox);
+            // bounded initialization telemetry: mark the runtime wiring window so pre-first-request
+            // startup is decomposable (runtime creation -> model resolution -> prompt build -> initial prompt)
+            emitPhase(emitter, sessionId, AgentEvent.Phase.RUNTIME_CREATE_START, workdir);
+            if (mavenRepositoryKnowledge != null) {
+                mavenRepositoryKnowledge.warmUp(workdir);
+            }
+            // per-session sub-agent admission budget: the yca.subagents.maxConcurrent cap, owned by the
+            // session object (dies with it, no registry-side map to clean up). SubagentRunner passes
+            // the same budget to child loops, so nesting never creates another pool of permits.
+            if (configuration != null && configuration.subagents() != null) {
+                loop.subagentBudget(new SubagentBudget(configuration.subagents().maxConcurrent()));
+            }
+            if (emitter != null) {
+                emitter.emit(new SessionStartedEvent(
+                        new EventContext(null, null, null, workdir.toString(), null, null, null, null),
+                        sessionId,
+                        sessionKey));
+            }
+            emitPhase(emitter, sessionId, AgentEvent.Phase.RUNTIME_CREATE_END, workdir);
+            return new SessionRuntime(
+                    loop,
+                    permissions,
+                    feedback,
+                    usage,
+                    todos,
+                    status,
+                    contextManager,
+                    systemPromptBuilder,
+                    memoryProductionPolicy,
+                    sessionId,
+                    workdir,
+                    sandbox);
+        } catch (final RuntimeException | Error failure) {
+            try {
+                sandbox.close();
+            } catch (final RuntimeException | Error closeFailure) {
+                failure.addSuppressed(closeFailure);
+            }
+            throw failure;
         }
-        emitPhase(emitter, sessionId, AgentEvent.Phase.RUNTIME_CREATE_END, workdir);
-        return new SessionRuntime(
-                loop,
-                permissions,
-                feedback,
-                usage,
-                todos,
-                status,
-                contextManager,
-                systemPromptBuilder,
-                memoryProductionPolicy,
-                sessionId,
-                workdir);
     }
 
     /** Convenience: the key and the initial session id are the same value. */

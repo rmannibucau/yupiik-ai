@@ -144,7 +144,7 @@ function RequestDialog({ request, onAnswer, pendingCount = 1 }: Omit<SessionRequ
       <div ref={dialog} role="dialog" aria-modal="true" aria-labelledby={titleId} aria-busy={busy} tabIndex={-1}
         onKeyDown={onKeyDown} className="max-h-[85vh] w-full max-w-lg overflow-y-auto rounded-2xl border p-4 shadow-xl"
         style={{ borderColor: 'var(--yca-border)', background: 'var(--yca-panel-2)', color: 'var(--yca-text)' }}>
-        <h2 id={titleId} className="mb-3 text-sm font-semibold">{approval ? 'Tool approval' : isPicker ? text(params.prompt, 'Select an option') : confirmation ? text(params.prompt, 'Confirm') : 'Questions'}</h2>
+        <h2 id={titleId} className="mb-3 text-sm font-semibold">{approval ? (params.origin === 'SANDBOX' ? 'Sandbox approval' : 'Tool approval') : isPicker ? text(params.prompt, 'Select an option') : confirmation ? text(params.prompt, 'Confirm') : 'Questions'}</h2>
         {pendingCount > 1 && <p className="mb-2 text-xs" role="status">{pendingCount} requests waiting</p>}
         <fieldset disabled={busy} className="min-w-0 border-0 p-0">
           {approval ? (

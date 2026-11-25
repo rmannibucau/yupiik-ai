@@ -19,6 +19,7 @@ import io.yupiik.fusion.framework.api.event.Emitter;
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.configuration.AgentMode;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
+import io.yupiik.ia.agent.core.configuration.PermissionMode;
 import io.yupiik.ia.agent.core.context.ContextView;
 import io.yupiik.ia.agent.core.context.UsageTracker;
 import io.yupiik.ia.agent.core.events.HookResult;
@@ -29,6 +30,7 @@ import io.yupiik.ia.agent.core.llm.ToolCall;
 import io.yupiik.ia.agent.core.permissions.PermissionService;
 import io.yupiik.ia.agent.core.question.UserFeedbackService;
 import io.yupiik.ia.agent.core.runtime.StatusReporter;
+import io.yupiik.ia.agent.core.sandbox.Sandbox;
 import io.yupiik.ia.agent.core.todo.TodoStore;
 import io.yupiik.ia.agent.core.tools.EmbeddedTool;
 import io.yupiik.ia.agent.core.tools.ToolCategory;
@@ -43,6 +45,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
@@ -78,6 +81,7 @@ public class ToolCallExecution {
     private final Supplier<String> subagentId;
     private final Supplier<String> subagentName;
     private final Supplier<Path> sessionWorkdir;
+    private final Sandbox sandbox;
     private final Supplier<SubagentBudget> subagentBudget;
     private final Supplier<Set<String>> effectiveAllowedTools;
     private final Supplier<Set<String>> servedToolNames;
@@ -114,7 +118,8 @@ public class ToolCallExecution {
             final Supplier<Set<String>> effectiveAllowedTools,
             final Supplier<Set<String>> servedToolNames,
             final Supplier<ChatSettings> chatSettings,
-            final BooleanSupplier sessionClosed) {
+            final BooleanSupplier sessionClosed,
+            final Sandbox sandbox) {
         this.toolRegistry = toolRegistry;
         this.toolExecutionService = toolExecutionService;
         this.permissionService = permissionService;
@@ -136,6 +141,7 @@ public class ToolCallExecution {
         this.servedToolNames = servedToolNames;
         this.chatSettings = chatSettings;
         this.sessionClosed = sessionClosed;
+        this.sandbox = Objects.requireNonNull(sandbox, "sandbox");
     }
 
     /**
@@ -288,6 +294,7 @@ public class ToolCallExecution {
         final var served = servedToolNames.get();
         if (permissionService != null
                 && permissionService.mode() == AgentMode.PLAN
+                && permissionService.permissionMode() != PermissionMode.FULL_YOLO
                 && tool.category() == ToolCategory.EDIT
                 && served != null
                 && served.contains(name)) {
@@ -346,6 +353,7 @@ public class ToolCallExecution {
                 settings,
                 () -> sessionClosed.getAsBoolean() || callCancelled.getAsBoolean(),
                 sessionWorkdir.get(),
+                sandbox,
                 ordinal,
                 delegationTools(),
                 subagentBudget.get(),
@@ -358,7 +366,9 @@ public class ToolCallExecution {
             return Set.of();
         }
         final var ceiling = effectiveAllowedTools.get();
-        final var plan = permissionService != null && permissionService.mode() == AgentMode.PLAN;
+        final var plan = permissionService != null
+                && permissionService.mode() == AgentMode.PLAN
+                && permissionService.permissionMode() != PermissionMode.FULL_YOLO;
         return toolRegistry
                 .toWireTools(
                         sessionWorkdir.get(),
@@ -383,7 +393,7 @@ public class ToolCallExecution {
         final var root = sessionWorkdir.get();
         final var cwd = workdir == null
                 ? root
-                : ToolContext.empty(root).resolvePath(workdir).toAbsolutePath().normalize();
+                : root.resolve(workdir).normalize().toAbsolutePath().normalize();
         final var context = new EventContextBuilder()
                 .build(
                         permissionService,

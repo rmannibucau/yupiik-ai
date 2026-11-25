@@ -84,13 +84,14 @@ public class ReadFileTool implements EmbeddedTool {
             return ToolResult.error("path is required");
         }
         final var path = context.resolvePath(raw);
+        SandboxFiles.requireRead(context, path);
         if (!Files.exists(path)) {
-            final var suggestion = suggestPath(path);
+            final var suggestion = context.sandbox().enabled() ? null : suggestPath(path);
             return ToolResult.error("File or directory not found: " + path
                     + (suggestion == null ? "" : ". Did you mean: " + suggestion + "?"));
         }
         if (Files.isDirectory(path)) {
-            return listDirectory(path, (int) Math.max(1, optInt(args, "offset", 1)), (int)
+            return listDirectory(path, context, (int) Math.max(1, optInt(args, "offset", 1)), (int)
                     Math.min(10_000, optInt(args, "limit", 2000)));
         }
         final var offset = (int) Math.max(1, optInt(args, "offset", 1));
@@ -99,10 +100,11 @@ public class ReadFileTool implements EmbeddedTool {
     }
 
     /** Flat directory listing (opencode read parity): entries one per line, dirs end with '/', dirs first. */
-    static ToolResult listDirectory(final Path dir, final int offset, final int limit) {
+    private static ToolResult listDirectory(
+            final Path dir, final ToolContext context, final int offset, final int limit) {
         final var entries = new ArrayList<Path>();
         try (final var stream = Files.list(dir)) {
-            entries.addAll(stream.toList());
+            entries.addAll(stream.filter(p -> SandboxFiles.readable(context, p)).toList());
         } catch (final IOException | UncheckedIOException e) {
             return ToolResult.error("Cannot list " + dir + ": " + e.getMessage());
         }

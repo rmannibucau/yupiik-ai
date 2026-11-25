@@ -5,11 +5,11 @@ import { MemoryRouter } from 'react-router';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { WebEvent } from '../api/useSessionStream';
 
-const state = vi.hoisted(() => ({ events: [] as WebEvent[], busy: false, bootstrapped: true, queued: [] as string[], todos: [] as { content: string; status: string }[] }));
+const state = vi.hoisted(() => ({ events: [] as WebEvent[], busy: false, bootstrapped: true, queued: [] as string[], todos: [] as { content: string; status: string }[], metadata: {} as { permissionMode?: string; sandboxEnabled?: boolean } }));
 const rpc = vi.hoisted(() => vi.fn(async (method: string, params: Record<string, unknown> = {}): Promise<unknown> => {
   if (method === 'session.input') { return { disposition: 'accepted' }; }
   if (method === 'session.todos') { return state.todos; }
-  if (method === 'session.metadata') { return { mode: 'plan', mcpServers: [{ name: 'Remote MCP', state: 'ENABLED', transport: 'http', url: 'https://mcp.example.test/api' }] }; }
+  if (method === 'session.metadata') { return { mode: 'plan', ...state.metadata, mcpServers: [{ name: 'Remote MCP', state: 'ENABLED', transport: 'http', url: 'https://mcp.example.test/api' }] }; }
   if (method === 'session.queuedList') { return { prompts: state.queued }; }
   if (method === 'session.queuedCount') { return { count: state.queued.length }; }
   if (method === 'slash.complete') { return [{ label: 'Commands', replaceStart: 0, replaceEnd: String(params.text).length, items: ['/help', '/model'] }]; }
@@ -48,11 +48,31 @@ beforeEach(() => {
   vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} });
   Element.prototype.scrollIntoView = vi.fn();
   rpc.mockClear(); state.events = []; state.busy = false; state.bootstrapped = true; state.queued = []; state.todos = [];
+  state.metadata = {};
   host = document.createElement('div'); document.body.append(host); root = createRoot(host);
 });
 afterEach(() => { act(() => root.unmount()); host.remove(); vi.unstubAllGlobals(); });
 
 describe('mounted external-store chat integration', () => {
+  it('carries sandbox metadata to the permission warning and reloads it after selecting full_yolo', async () => {
+    state.metadata = { permissionMode: 'YOLO', sandboxEnabled: true };
+    render(); await settle();
+    const select = host.querySelector<HTMLSelectElement>('select[title="Tool permission level for this session"]')!;
+    expect(select.value).toBe('yolo');
+    expect(select.nextElementSibling?.getAttribute('style')).toContain('color: var(--yca-warning)');
+    state.metadata = { permissionMode: 'FULL_YOLO', sandboxEnabled: false };
+    await act(async () => {
+      select.value = 'full_yolo';
+      select.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    await settle();
+    expect(rpc).toHaveBeenCalledWith('session.slash', { id: 'test', text: '/permissions full_yolo' });
+    expect(select.value).toBe('full_yolo');
+    expect(select.nextElementSibling?.getAttribute('style')).toContain('color: var(--yca-yolo)');
+    expect(select.nextElementSibling?.textContent).toBe('!');
+    expect(select.selectedOptions[0].textContent).toContain('not recommended');
+  });
+
   it('renders captured server speaker labels once per feedback and keeps them through completion and replay', async () => {
     const user = event('user', 'question');
     state.events = [user,

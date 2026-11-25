@@ -18,13 +18,17 @@ package io.yupiik.ia.agent.slack.service;
 import static io.yupiik.ia.agent.slack.support.SlackDomainFixture.task;
 import static org.junit.jupiter.api.Assertions.*;
 
+import io.yupiik.fusion.testing.Fusion;
+import io.yupiik.fusion.testing.FusionSupport;
 import io.yupiik.ia.agent.bot.runtime.admission.HostAdmission;
 import io.yupiik.ia.agent.bot.runtime.admission.HostAdmissionConfiguration;
 import io.yupiik.ia.agent.bot.runtime.configuration.ExecutorConfiguration;
+import io.yupiik.ia.agent.slack.configuration.SlackPrompts;
 import io.yupiik.ia.agent.slack.context.SlackContextStorage;
 import io.yupiik.ia.agent.slack.model.SlackTask;
 import io.yupiik.ia.agent.slack.model.TaskStatus;
 import io.yupiik.ia.agent.slack.store.SlackStore;
+import io.yupiik.ia.agent.slack.support.SlackConfigurationTestModule;
 import io.yupiik.ia.agent.slack.support.SlackDomainFixture;
 import java.io.IOException;
 import java.nio.file.Files;
@@ -35,7 +39,11 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+@FusionSupport(modules = SlackConfigurationTestModule.class)
 class SlackWorkerTest {
+    @Fusion
+    private SlackPrompts baselinePrompts;
+
     @TempDir
     Path root;
 
@@ -207,9 +215,10 @@ class SlackWorkerTest {
                 fixture.executor(root),
                 fixture.json,
                 fixture.store,
-                new SlackPromptRenderer(SlackDomainFixture.prompts(), fixture.json),
+                new SlackPromptRenderer(SlackDomainFixture.prompts(baselinePrompts), fixture.json),
                 sandbox,
-                new SlackFeedback(fixture.configuration, SlackDomainFixture.prompts(), fixture.store, fixture.api),
+                new SlackFeedback(
+                        fixture.configuration, SlackDomainFixture.prompts(baselinePrompts), fixture.store, fixture.api),
                 fixture.api,
                 new HostAdmission(new HostAdmissionConfiguration("", 1, "")),
                 fixture.contextConfiguration,

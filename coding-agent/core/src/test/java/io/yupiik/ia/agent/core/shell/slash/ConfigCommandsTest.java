@@ -20,8 +20,12 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import io.yupiik.fusion.testing.Fusion;
+import io.yupiik.fusion.testing.FusionSupport;
 import io.yupiik.ia.agent.core.agent.AgentEvent;
 import io.yupiik.ia.agent.core.agent.AgentLoop;
+import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
+import io.yupiik.ia.agent.core.configuration.ConfigurationTestModule;
 import io.yupiik.ia.agent.core.configuration.MetricsConfiguration;
 import io.yupiik.ia.agent.core.configuration.MetricsDisplayMode;
 import io.yupiik.ia.agent.core.configuration.ModelVariantConfiguration;
@@ -30,7 +34,9 @@ import io.yupiik.ia.agent.core.llm.ChatClient;
 import io.yupiik.ia.agent.core.llm.ChatSettings;
 import io.yupiik.ia.agent.core.llm.Usage;
 import io.yupiik.ia.agent.core.permissions.ApprovalGate;
+import io.yupiik.ia.agent.core.permissions.PermissionService;
 import io.yupiik.ia.agent.core.question.FeedbackGate;
+import io.yupiik.ia.agent.core.sandbox.DisabledSandbox;
 import io.yupiik.ia.agent.core.shell.ConversationTranscript;
 import io.yupiik.ia.agent.core.shell.SessionRuntime;
 import io.yupiik.ia.agent.core.shell.ShellEnv;
@@ -45,7 +51,11 @@ import java.util.concurrent.CompletionStage;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+@FusionSupport(modules = ConfigurationTestModule.class)
 class ConfigCommandsTest {
+    @Fusion
+    private CodingAgentConfiguration configuration;
+
     @TempDir
     private static Path eventWorkdir;
 
@@ -69,16 +79,35 @@ class ConfigCommandsTest {
         return new ShellSession();
     }
 
-    private static ShellSession sessionWithUsage(final UsageTracker usage) {
+    private ShellSession sessionWithUsage(final UsageTracker usage) {
         return new ShellSession()
-                .runtime(new SessionRuntime(null, null, null, usage, null, null, null, null, testWorkdir));
+                .runtime(new SessionRuntime(
+                        null,
+                        new PermissionService(configuration, testWorkdir),
+                        null,
+                        usage,
+                        null,
+                        null,
+                        null,
+                        null,
+                        testWorkdir,
+                        new DisabledSandbox(testWorkdir)));
     }
 
     /** A session whose per-tab selection is backed by a minimal agent loop (geometry-free). */
-    private static ShellSession sessionWithLoop() {
+    private ShellSession sessionWithLoop() {
         return new ShellSession()
                 .runtime(new SessionRuntime(
-                        new AgentLoop(testWorkdir) {}, null, null, null, null, null, null, null, testWorkdir));
+                        new AgentLoop(testWorkdir, new DisabledSandbox(testWorkdir)) {},
+                        new PermissionService(configuration, testWorkdir),
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        testWorkdir,
+                        new DisabledSandbox(testWorkdir)));
     }
 
     /** A ChatClient stub exposing a fixed model and variant set for the /variant command. */
@@ -133,7 +162,7 @@ class ConfigCommandsTest {
 
                                     @Override
                                     public ApprovalGate approvalGate() {
-                                        return (title, detail, name, args) -> ApprovalGate.Result.DENY;
+                                        return request -> ApprovalGate.Result.DENY;
                                     }
 
                                     @Override

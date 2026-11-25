@@ -18,70 +18,109 @@ package io.yupiik.ia.agent.core.optimize;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import io.yupiik.ia.agent.core.configuration.TestConfigs;
+import io.yupiik.fusion.testing.Fusion;
+import io.yupiik.fusion.testing.FusionSupport;
+import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
+import io.yupiik.ia.agent.core.configuration.ConfigurationTestModule;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Stream;
+import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 
 class GenericOutputProcessorTest {
+    @Nested
+    @FusionSupport(modules = NormalSettings.class)
+    class Normal {
 
-    @Test
-    void compactsBlankRunsAndTrailingWhitespace() {
-        final var out = processor(400)
-                .process(
-                        "ls -la",
-                        Stream.of(
-                                "total 0",
-                                "",
-                                "   ",
-                                "drwxr-xr-x  user  staff   ",
-                                "drwxr-xr-x  user  staff  ",
-                                "",
-                                "",
-                                "done  ",
-                                "  "))
-                .toList();
+        @Test
+        void compactsBlankRunsAndTrailingWhitespace(@Fusion final CodingAgentConfiguration configuration) {
+            final var out = new GenericOutputProcessor(configuration)
+                    .process(
+                            "ls -la",
+                            Stream.of(
+                                    "total 0",
+                                    "",
+                                    "   ",
+                                    "drwxr-xr-x  user  staff   ",
+                                    "drwxr-xr-x  user  staff  ",
+                                    "",
+                                    "",
+                                    "done  ",
+                                    "  "))
+                    .toList();
 
-        assertEquals(List.of("total 0", "", "drwxr-xr-x  user  staff", "drwxr-xr-x  user  staff", "", "done"), out);
+            assertEquals(List.of("total 0", "", "drwxr-xr-x  user  staff", "drwxr-xr-x  user  staff", "", "done"), out);
+        }
+
+        @Test
+        void dropsLeadingAndTrailingBlankLines(@Fusion final CodingAgentConfiguration configuration) {
+            final var out = new GenericOutputProcessor(configuration)
+                    .process("echo hello", Stream.of("", "", "hello", "", ""))
+                    .toList();
+            assertEquals(List.of("hello"), out);
+        }
+
+        @Test
+        void stripsAnsi(@Fusion final CodingAgentConfiguration configuration) {
+            final var out = new GenericOutputProcessor(configuration)
+                    .process("ls", Stream.of("\u001B[31mred\u001B[0m text"))
+                    .toList();
+            assertEquals(List.of("red text"), out);
+        }
     }
 
-    @Test
-    void dropsLeadingAndTrailingBlankLines() {
-        final var out = processor(400)
-                .process("echo hello", Stream.of("", "", "hello", "", ""))
-                .toList();
-        assertEquals(List.of("hello"), out);
+    @Nested
+    @FusionSupport(modules = TruncatedSettings.class)
+    class Truncated {
+        @Test
+        void truncatesLargeOutputs(@Fusion final CodingAgentConfiguration configuration) {
+            final var lines = Stream.iterate(0, i -> i + 1).limit(50).map(i -> "line-" + i);
+            final var out = new GenericOutputProcessor(configuration)
+                    .process("cat big.txt", lines)
+                    .toList();
+
+            assertEquals(11, out.size());
+            assertEquals("line-0", out.get(0));
+            assertTrue(out.get(6).startsWith("[... "));
+            assertTrue(out.get(6).endsWith(" lines truncated ...]"));
+            assertEquals("line-49", out.get(10));
+        }
     }
 
-    @Test
-    void stripsAnsi() {
-        final var out = processor(400)
-                .process("ls", Stream.of("\u001B[31mred\u001B[0m text"))
-                .toList();
-        assertEquals(List.of("red text"), out);
+    public static class NormalSettings extends ConfigurationTestModule {
+        public NormalSettings() {
+            super(Map.of(
+                    "yca.storageHome",
+                    "x",
+                    "yca.workingDir",
+                    ".",
+                    "yca.optimize.enabled",
+                    "true",
+                    "yca.optimize.genericMaxLines",
+                    "400",
+                    "yca.optimize.maxEntries",
+                    "20",
+                    "yca.optimize.disabled",
+                    ""));
+        }
     }
 
-    @Test
-    void truncatesLargeOutputs() {
-        final var lines = Stream.iterate(0, i -> i + 1).limit(50).map(i -> "line-" + i);
-        final var out = processor(10).process("cat big.txt", lines).toList();
-
-        assertEquals(11, out.size());
-        assertEquals("line-0", out.get(0));
-        assertTrue(out.get(6).startsWith("[... "));
-        assertTrue(out.get(6).endsWith(" lines truncated ...]"));
-        assertEquals("line-49", out.get(10));
-    }
-
-    private GenericOutputProcessor processor(final int maxLines) {
-        final var configuration = TestConfigs.codingAgent(Map.of(
-                "yca.storageHome", "x",
-                "yca.workingDir", ".",
-                "yca.optimize.enabled", "true",
-                "yca.optimize.genericMaxLines", String.valueOf(maxLines),
-                "yca.optimize.maxEntries", "20",
-                "yca.optimize.disabled", ""));
-        return new GenericOutputProcessor(configuration);
+    public static class TruncatedSettings extends ConfigurationTestModule {
+        public TruncatedSettings() {
+            super(Map.of(
+                    "yca.storageHome",
+                    "x",
+                    "yca.workingDir",
+                    ".",
+                    "yca.optimize.enabled",
+                    "true",
+                    "yca.optimize.genericMaxLines",
+                    "10",
+                    "yca.optimize.maxEntries",
+                    "20",
+                    "yca.optimize.disabled",
+                    ""));
+        }
     }
 }

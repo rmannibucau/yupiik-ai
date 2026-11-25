@@ -19,19 +19,24 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertSame;
 
 import io.yupiik.fusion.framework.api.configuration.Configuration;
+import io.yupiik.fusion.testing.Fusion;
+import io.yupiik.fusion.testing.FusionSupport;
 import io.yupiik.ia.agent.bot.runtime.DockerControlConfiguration;
 import io.yupiik.ia.agent.bot.runtime.admission.HostAdmissionConfiguration;
-import io.yupiik.ia.agent.core.configuration.ConfigurationLoader;
 import io.yupiik.ia.agent.core.configuration.ProviderBudgetConfiguration;
 import io.yupiik.ia.agent.github.configuration.WorkerOptions;
 import io.yupiik.ia.agent.github.service.Worker;
+import io.yupiik.ia.agent.github.support.GithubConfigurationTestModule;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 import org.junit.jupiter.api.Test;
 
+@FusionSupport(modules = GithubConfigurationTestModule.class)
 class WorkerCommandTest {
+    @Fusion
+    private WorkerCommand.Options defaults;
+
     @Test
     void forwardsEachCommandsTaskAndOptionsToSharedWorker() {
         final var tasks = new ArrayList<String>();
@@ -65,12 +70,19 @@ class WorkerCommandTest {
                         invocations.add(options);
                     }
                 };
-        final var first = ConfigurationLoader.load(WorkerCommand.Options.class, key -> Optional.empty())
-                .worker();
-        final var values = Map.of("worker.forkOwner", "other", "worker.maxRetries", "0");
-        final var second = ConfigurationLoader.load(
-                        WorkerCommand.Options.class, key -> Optional.ofNullable(values.get(key)))
-                .worker();
+        final var first = defaults.worker();
+        final var second = new WorkerOptions(
+                0,
+                first.parallelism(),
+                first.agentConfiguration(),
+                "other",
+                first.agentCommenting(),
+                first.provisionFork(),
+                first.cacheRoot(),
+                first.cacheGit(),
+                first.privateSource(),
+                first.source(),
+                first.dependencyCache());
 
         new WorkerCommand(new WorkerCommand.Options("first", first), null, worker, null).run();
         new WorkerCommand(new WorkerCommand.Options("second", second), null, worker, null).run();

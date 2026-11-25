@@ -20,9 +20,12 @@ import static org.junit.jupiter.api.Assertions.*;
 import io.yupiik.ai.acp.protocol.*;
 import io.yupiik.fusion.framework.api.event.Emitter;
 import io.yupiik.fusion.json.JsonMapper;
+import io.yupiik.fusion.testing.Fusion;
+import io.yupiik.fusion.testing.FusionSupport;
 import io.yupiik.ia.agent.core.agent.AgentLoop;
 import io.yupiik.ia.agent.core.agent.AgentProvider;
 import io.yupiik.ia.agent.core.agent.SystemPromptBuilder;
+import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.PermissionMode;
 import io.yupiik.ia.agent.core.events.EventContext;
 import io.yupiik.ia.agent.core.events.ModelSwitchedEvent;
@@ -33,6 +36,7 @@ import io.yupiik.ia.agent.core.llm.ModelsResponse;
 import io.yupiik.ia.agent.core.mcp.McpManager;
 import io.yupiik.ia.agent.core.permissions.PermissionService;
 import io.yupiik.ia.agent.core.question.UserFeedbackService;
+import io.yupiik.ia.agent.core.sandbox.DisabledSandbox;
 import io.yupiik.ia.agent.core.security.SecretNames;
 import io.yupiik.ia.agent.core.session.AgentSessionService;
 import io.yupiik.ia.agent.core.session.FileSessionStore;
@@ -61,261 +65,16 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Predicate;
+import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.io.TempDir;
 
 @Timeout(15)
 class SessionSetupPersistenceTest {
-    @TempDir
-    Path home;
-
-    @Test
-    void exactCapabilitiesAndTwoRootPromptPresetsRoundTripWithoutGrantsOrMetadataReplay() throws Exception {
-        final var a = Files.createDirectory(home.resolve("A"));
-        final var b = Files.createDirectory(home.resolve("B"));
-        final String first;
-        final String second;
-        try (final var f = new Fixture(home)) {
-            final var init = f.decode(Initialized.class, f.initialized.result());
-            final var caps = init.agentCapabilities().sessionCapabilities();
-            assertEquals(Map.of(), caps.get("additionalDirectories"));
-            assertEquals(Map.of("mode", Map.of("override", Map.of())), caps.get("systemPrompt"));
-            assertFalse(caps.containsKey("fork"));
-            assertFalse(init.agentCapabilities().promptCapabilities().image());
-            first = f.create(
-                    1, a, List.of(b.toString(), b.resolve(".").toString(), a.toString()), "append", "PRIVATE_A");
-            second = f.create(2, b, List.of(), "override", "PRIVATE_B");
-            f.config(3, first, "provider", "default");
-            f.config(4, first, "variant", "low");
-            f.config(5, first, "mode", "plan");
-            f.config(6, second, "variant", "high");
-            f.config(7, second, "mode", "build");
-            final var selected = new ChatSettings("default", "b-main", "low", sampling());
-            f.runtimes.get(first).updateChatSettings(selected);
-            f.shells.active(first).session().activeAgent("reviewer");
-            f.runtimes.get(first).permissions().grantSession("read");
-            // A normal settled model-switch event must persist sampling, not only selector requests.
-            f.server.onModelSwitched(new ModelSwitchedEvent(
-                    new EventContext(first, null, null, a.toString(), null, null, null, null), null, "b-main", "low"));
-            f.config(8, first, "variant", "low"); // queue barrier, preserving sampling on no-op
-            assertEquals(selected, f.options.restore(f.store.metadata(first)));
-            f.send(9, "session/prompt", new Prompt(first, List.of(Content.text("visible user"))));
-            assertNull(f.response(9).error());
-            assertTrue(f.contexts.get(first).contains("PRIVATE_A"));
-            assertTrue(f.contexts.get(first).contains(b.toString()));
-            assertFalse(f.contexts.get(first).contains("PRIVATE_B"));
-            assertFalse(f.providerHistory.get(first).contains("TEMPERATURE"));
-            assertFalse(f.providerHistory.get(first).contains("PRIVATE_A"));
-            assertTrue(f.runtimes.get(second).systemPromptBuilder().build().contains("PRIVATE_B"));
-            assertFalse(f.runtimes.get(second).systemPromptBuilder().build().contains("You are yca"));
-            f.store.replace(
-                    first,
-                    List.of(
-                            Message.user("<compacted-context>public summary</compacted-context>"),
-                            Message.assistant("visible tail", null)));
-            f.closeSession(10, first);
-            f.closeSession(11, second); // legitimate empty session remains loadable
-            assertEquals(2, f.store.list().size());
-            assertEquals("reviewer", f.store.metadata(first).agent());
-            assertEquals("plan", f.store.metadata(first).mode());
-            assertEquals("build", f.store.metadata(second).mode());
-            assertTrue(f.store.isEmpty(second));
-        }
-        try (final var f = new Fixture(home)) {
-            f.send(1, "session/load", Map.of("sessionId", first, "cwd", a.toString(), "mcpServers", List.of()));
-            final var loaded = f.decode(Loaded.class, f.response(1).result());
-            assertEquals("plan", loaded.modes().currentModeId());
-            assertEquals(
-                    List.of("provider", "model", "variant", "mode"),
-                    loaded.configOptions().stream().map(ConfigOption::id).toList());
-            assertEquals(
-                    new ChatSettings("default", "b-main", "low", sampling()),
-                    f.runtimes.get(first).chatSettings());
-            assertEquals("reviewer", f.shells.active(first).session().activeAgent());
-            assertEquals(PermissionMode.ASK, f.runtimes.get(first).permissions().permissionMode());
-            assertTrue(f.runtimes.get(first).permissions().sessionGrants().isEmpty());
-            final var prompt = f.runtimes.get(first).systemPromptBuilder().build();
-            assertTrue(prompt.contains("PRIVATE_A"));
-            assertFalse(prompt.contains("Additional workspace directories"), "Omitted roots must not be restored");
-            assertTrue(f.notifications.stream()
-                    .anyMatch(it -> f.mapper.toString(it).contains("visible tail")));
-            assertFalse(f.mapper.toString(f.notifications).contains("PRIVATE_A"));
-            assertFalse(f.mapper.toString(f.notifications).contains("TEMPERATURE"));
-            f.notifications.clear();
-            f.send(
-                    2,
-                    "session/resume",
-                    Map.of(
-                            "sessionId",
-                            second,
-                            "cwd",
-                            b.toString(),
-                            "mcpServers",
-                            List.of(),
-                            "additionalDirectories",
-                            List.of(a.toString()),
-                            "systemPrompt",
-                            prompt("append", "EXPLICIT_B")));
-            final var resumed = f.decode(Loaded.class, f.response(2).result());
-            assertEquals("build", resumed.modes().currentModeId());
-            final var replacement = f.runtimes.get(second).systemPromptBuilder().build();
-            assertTrue(replacement.contains("EXPLICIT_B"));
-            assertTrue(replacement.contains("You are yca"));
-            assertFalse(replacement.contains("PRIVATE_B"));
-            assertTrue(replacement.contains("Additional workspace directories"));
-            assertFalse(f.notifications.stream()
-                    .anyMatch(it -> f.mapper.toString(it).contains("message_chunk")));
-        }
-    }
-
-    @Test
-    void invalidShapesOversizedInstructionsAndRootsHaveNoCreationOrLoadSideEffects() throws Exception {
-        final var a = Files.createDirectory(home.resolve("A"));
-        try (final var f = new Fixture(home)) {
-            final var invalid = List.of(
-                    Map.of("additionalDirectories", List.of("relative")),
-                    Map.of(
-                            "additionalDirectories",
-                            List.of(home.resolve("missing").toString())),
-                    Map.of("additionalDirectories", List.of(42)),
-                    Map.of("additionalDirectories", Map.of()),
-                    Map.of("systemPrompt", prompt("_unknown", "instruction")),
-                    Map.of("systemPrompt", prompt("append", "x".repeat(8001))),
-                    Map.of("systemPrompt", Map.of("mode", "append", "content", List.of())),
-                    Map.of("systemPrompt", Map.of("content", List.of(Map.of("type", "text", "text", "x")))),
-                    Map.of(
-                            "systemPrompt",
-                            Map.of("mode", "append", "content", List.of(Map.of("type", "image", "data", "secret")))),
-                    Map.of(
-                            "systemPrompt",
-                            Map.of(
-                                    "mode",
-                                    "append",
-                                    "content",
-                                    List.of(Map.of("type", "text", "content", Map.of("text", "x"))))),
-                    Map.of(
-                            "systemPrompt",
-                            Map.of("mode", "append", "content", List.of(Map.of("type", "text", "text", 42)))));
-            var request = 1;
-            for (final var extra : invalid) {
-                final var params = new HashMap<String, Object>(Map.of("cwd", a.toString(), "mcpServers", List.of()));
-                params.putAll(extra);
-                f.send(request, "session/new", params);
-                assertEquals(-32602, f.response(request++).error().code());
-                assertTrue(f.store.list().isEmpty());
-                assertTrue(f.runtimes.isEmpty());
-            }
-            final var id = f.create(request++, a, List.of(), "override", "keep");
-            final var before = f.store.metadata(id);
-            f.closeSession(request++, id);
-            for (final var extra : invalid) {
-                final var params = new HashMap<String, Object>(
-                        Map.of("sessionId", id, "cwd", a.toString(), "mcpServers", List.of()));
-                params.putAll(extra);
-                f.send(request, "session/load", params);
-                assertEquals(-32602, f.response(request++).error().code());
-                assertEquals(before, f.store.metadata(id));
-                assertEquals(1, f.store.list().size());
-                assertNull(f.shells.active(id));
-            }
-        }
-    }
-
-    @Test
-    void settledVetoAndConcurrentDeleteDoNotPersistTheRequestedSelectionOrResurrectSession() throws Exception {
-        final var root = Files.createDirectory(home.resolve("A"));
-        final var entered = new CountDownLatch(1);
-        final var release = new CountDownLatch(1);
-        try (final var f = new Fixture(home)) {
-            final var id = f.create(1, root, List.of(), "append", "retained");
-            f.accept = settings -> {
-                if ("default".equals(settings.providerId())) {
-                    entered.countDown();
-                    try {
-                        assertTrue(release.await(5, TimeUnit.SECONDS));
-                    } catch (final InterruptedException interrupted) {
-                        Thread.currentThread().interrupt();
-                        throw new IllegalStateException(interrupted);
-                    }
-                    return false;
-                }
-                return true;
-            };
-            f.send(2, "session/set_config_option", new SetConfig(id, "provider", "default"));
-            assertTrue(entered.await(5, TimeUnit.SECONDS));
-            f.send(3, "session/delete", new Session(id));
-            // Reader still handles cancellation/barriers while the selection hook is blocked.
-            f.send(null, "session/cancel", new Session(id));
-            f.send(4, "initialize", new Initialize(1, null, null));
-            assertNotNull(f.response(4).error());
-            release.countDown();
-            assertNull(f.response(2).error());
-            assertNull(f.response(3).error());
-            assertTrue(f.store.list().isEmpty());
-            assertNull(f.store.metadata(id));
-            assertFalse(
-                    f.store.metadata(id, new SessionMetadata(1, "a", "a-main", null, List.of(), null, "plan", null)));
-            assertNull(f.shells.active(id));
-        } finally {
-            release.countDown();
-        }
-    }
 
     private Map<String, Object> prompt(final String mode, final String text) {
         return Map.of("mode", mode, "content", List.of(Map.of("type", "text", "text", text)));
-    }
-
-    @Test
-    void deleteWaitsForTheActualTurnBeforeRemovingPreset() throws Exception {
-        final var root = Files.createDirectory(home.resolve("A"));
-        try (final var f = new Fixture(home)) {
-            final var id = f.create(1, root, List.of(), "append", "retained");
-            f.turnCompletion = new CompletableFuture<>();
-            f.send(2, "session/prompt", new Prompt(id, List.of(Content.text("work"))));
-            assertTrue(f.turnEntered.await(5, TimeUnit.SECONDS));
-            f.send(3, "session/delete", new Session(id));
-            f.send(4, "initialize", new Initialize(1, null, null));
-            assertNotNull(f.response(4).error());
-            assertNotNull(f.store.metadata(id), "A still-owned turn must retain its session preset");
-            f.turnCompletion.complete(true);
-            assertNull(f.response(2).error());
-            assertNull(f.response(3).error());
-            assertTrue(f.store.list().isEmpty());
-            assertNull(f.store.metadata(id));
-        }
-    }
-
-    @Test
-    void unavailablePresetReferencesFailBeforePublicationAndKeepStoredHistory() throws Exception {
-        final var root = Files.createDirectory(home.resolve("A"));
-        try (final var f = new Fixture(home)) {
-            final var id = f.create(1, root, List.of(), "append", "retained");
-            f.closeSession(2, id);
-            final var history = f.store.load(id);
-            final var invalid = List.of(
-                    new SessionMetadata(
-                            1, "removed-private-reference", "a-main", "high", List.of(), null, "plan", null),
-                    new SessionMetadata(1, "a", "a-main", "removed-private-reference", List.of(), null, "plan", null),
-                    new SessionMetadata(
-                            1, "a", "a-main", "high", List.of(), "removed-private-reference", "plan", null));
-            var request = 3;
-            for (final var preset : invalid) {
-                assertTrue(f.store.metadata(id, preset));
-                f.send(
-                        request,
-                        "session/resume",
-                        Map.of("sessionId", id, "cwd", root.toString(), "mcpServers", List.of()));
-                final var error = f.response(request++).error();
-                assertEquals(-32602, error.code());
-                assertTrue(error.message().contains("unavailable"));
-                assertFalse(error.message().contains("removed-private-reference"));
-                assertEquals(preset, f.store.metadata(id));
-                assertEquals(history, f.store.load(id));
-                assertNull(f.shells.active(id));
-                assertEquals(1, f.runtimes.size());
-            }
-        }
     }
 
     private ChatClient.SamplingOverride sampling() {
@@ -358,23 +117,14 @@ class SessionSetupPersistenceTest {
             }
         };
 
-        private Fixture(final Path storage) throws Exception {
+        private Fixture(final CodingAgentConfiguration configuration, final AcpCommand.Conf commandOptions)
+                throws Exception {
             support = new OptionTestSupport(
+                    configuration,
+                    commandOptions,
                     mapper,
-                    ignored -> CompletableFuture.completedFuture(new ModelsResponse(List.of())),
-                    Map.of(
-                            "yca.storageHome",
-                            storage.toString(),
-                            "yca.home",
-                            storage.toString(),
-                            "yca.memory.enabled",
-                            "false",
-                            "yca.agents.length",
-                            "1",
-                            "yca.agents.0.name",
-                            "reviewer",
-                            "yca.agents.0.prompt",
-                            "review carefully"));
+                    settings -> CompletableFuture.completedFuture(new ModelsResponse(List.of())));
+
             store = new FileSessionStore(support.configuration, mapper, Clock.systemUTC());
             final var agents = new AgentProvider(support.configuration);
             options = new AcpSessionOptions(
@@ -408,7 +158,7 @@ class SessionSetupPersistenceTest {
                 public SessionRuntime create(
                         final String key, final String id, final ToolRegistry registry, final Path root) {
                     final var permissions = new PermissionService(support.configuration, root);
-                    final var loop = new AgentLoop(root) {
+                    final var loop = new AgentLoop(root, new DisabledSandbox(root)) {
                         private volatile ChatSettings selection = ChatSettings.EMPTY;
 
                         @Override
@@ -445,7 +195,8 @@ class SessionSetupPersistenceTest {
                             null,
                             null,
                             builder(root, permissions),
-                            root);
+                            root,
+                            new DisabledSandbox(root));
                     runtimes.put(id, runtime);
                     return runtime;
                 }
@@ -579,6 +330,354 @@ class SessionSetupPersistenceTest {
             input.close();
             support.close();
             mapper.close();
+        }
+    }
+
+    @Nested
+    @FusionSupport(modules = ExactCapabilitiesAndTwo.Module.class)
+    class ExactCapabilitiesAndTwo {
+        @TempDir
+        static Path home;
+
+        @Test
+        void exactCapabilitiesAndTwoRootPromptPresetsRoundTripWithoutGrantsOrMetadataReplay(
+                @Fusion final CodingAgentConfiguration configuration, @Fusion final AcpCommand.Conf commandOptions)
+                throws Exception {
+            final var a = Files.createDirectory(home.resolve("A"));
+            final var b = Files.createDirectory(home.resolve("B"));
+            final String first;
+            final String second;
+            try (final var f = new Fixture(configuration, commandOptions)) {
+                final var init = f.decode(Initialized.class, f.initialized.result());
+                final var caps = init.agentCapabilities().sessionCapabilities();
+                assertEquals(Map.of(), caps.get("additionalDirectories"));
+                assertEquals(Map.of("mode", Map.of("override", Map.of())), caps.get("systemPrompt"));
+                assertFalse(caps.containsKey("fork"));
+                assertFalse(init.agentCapabilities().promptCapabilities().image());
+                first = f.create(
+                        1, a, List.of(b.toString(), b.resolve(".").toString(), a.toString()), "append", "PRIVATE_A");
+                second = f.create(2, b, List.of(), "override", "PRIVATE_B");
+                f.config(3, first, "provider", "default");
+                f.config(4, first, "variant", "low");
+                f.config(5, first, "mode", "plan");
+                f.config(6, second, "variant", "high");
+                f.config(7, second, "mode", "build");
+                final var selected = new ChatSettings("default", "b-main", "low", sampling());
+                f.runtimes.get(first).updateChatSettings(selected);
+                f.shells.active(first).session().activeAgent("reviewer");
+                f.runtimes.get(first).permissions().grantSession("read");
+                // A normal settled model-switch event must persist sampling, not only selector requests.
+                f.server.onModelSwitched(new ModelSwitchedEvent(
+                        new EventContext(first, null, null, a.toString(), null, null, null, null),
+                        null,
+                        "b-main",
+                        "low"));
+                f.config(8, first, "variant", "low"); // queue barrier, preserving sampling on no-op
+                assertEquals(selected, f.options.restore(f.store.metadata(first)));
+                f.send(9, "session/prompt", new Prompt(first, List.of(Content.text("visible user"))));
+                assertNull(f.response(9).error());
+                assertTrue(f.contexts.get(first).contains("PRIVATE_A"));
+                assertTrue(f.contexts.get(first).contains(b.toString()));
+                assertFalse(f.contexts.get(first).contains("PRIVATE_B"));
+                assertFalse(f.providerHistory.get(first).contains("TEMPERATURE"));
+                assertFalse(f.providerHistory.get(first).contains("PRIVATE_A"));
+                assertTrue(f.runtimes.get(second).systemPromptBuilder().build().contains("PRIVATE_B"));
+                assertFalse(f.runtimes.get(second).systemPromptBuilder().build().contains("You are yca"));
+                f.store.replace(
+                        first,
+                        List.of(
+                                Message.user("<compacted-context>public summary</compacted-context>"),
+                                Message.assistant("visible tail", null)));
+                f.closeSession(10, first);
+                f.closeSession(11, second); // legitimate empty session remains loadable
+                assertEquals(2, f.store.list().size());
+                assertEquals("reviewer", f.store.metadata(first).agent());
+                assertEquals("plan", f.store.metadata(first).mode());
+                assertEquals("build", f.store.metadata(second).mode());
+                assertTrue(f.store.isEmpty(second));
+            }
+            try (final var f = new Fixture(configuration, commandOptions)) {
+                f.send(1, "session/load", Map.of("sessionId", first, "cwd", a.toString(), "mcpServers", List.of()));
+                final var loaded = f.decode(Loaded.class, f.response(1).result());
+                assertEquals("plan", loaded.modes().currentModeId());
+                assertEquals(
+                        List.of("provider", "model", "variant", "mode"),
+                        loaded.configOptions().stream().map(ConfigOption::id).toList());
+                assertEquals(
+                        new ChatSettings("default", "b-main", "low", sampling()),
+                        f.runtimes.get(first).chatSettings());
+                assertEquals("reviewer", f.shells.active(first).session().activeAgent());
+                assertEquals(
+                        PermissionMode.ASK, f.runtimes.get(first).permissions().permissionMode());
+                assertTrue(f.runtimes.get(first).permissions().sessionGrants().isEmpty());
+                final var prompt = f.runtimes.get(first).systemPromptBuilder().build();
+                assertTrue(prompt.contains("PRIVATE_A"));
+                assertFalse(prompt.contains("Additional workspace directories"), "Omitted roots must not be restored");
+                assertTrue(f.notifications.stream()
+                        .anyMatch(it -> f.mapper.toString(it).contains("visible tail")));
+                assertFalse(f.mapper.toString(f.notifications).contains("PRIVATE_A"));
+                assertFalse(f.mapper.toString(f.notifications).contains("TEMPERATURE"));
+                f.notifications.clear();
+                f.send(
+                        2,
+                        "session/resume",
+                        Map.of(
+                                "sessionId",
+                                second,
+                                "cwd",
+                                b.toString(),
+                                "mcpServers",
+                                List.of(),
+                                "additionalDirectories",
+                                List.of(a.toString()),
+                                "systemPrompt",
+                                prompt("append", "EXPLICIT_B")));
+                final var resumed = f.decode(Loaded.class, f.response(2).result());
+                assertEquals("build", resumed.modes().currentModeId());
+                final var replacement =
+                        f.runtimes.get(second).systemPromptBuilder().build();
+                assertTrue(replacement.contains("EXPLICIT_B"));
+                assertTrue(replacement.contains("You are yca"));
+                assertFalse(replacement.contains("PRIVATE_B"));
+                assertTrue(replacement.contains("Additional workspace directories"));
+                assertFalse(f.notifications.stream()
+                        .anyMatch(it -> f.mapper.toString(it).contains("message_chunk")));
+            }
+        }
+
+        public static class Module extends ConfigurationModule {
+            public Module() {
+                super(home);
+            }
+        }
+    }
+
+    @Nested
+    @FusionSupport(modules = InvalidShapesOversizedInstructions.Module.class)
+    class InvalidShapesOversizedInstructions {
+        @TempDir
+        static Path home;
+
+        @Test
+        void invalidShapesOversizedInstructionsAndRootsHaveNoCreationOrLoadSideEffects(
+                @Fusion final CodingAgentConfiguration configuration, @Fusion final AcpCommand.Conf commandOptions)
+                throws Exception {
+            final var a = Files.createDirectory(home.resolve("A"));
+            try (final var f = new Fixture(configuration, commandOptions)) {
+                final var invalid = List.of(
+                        Map.of("additionalDirectories", List.of("relative")),
+                        Map.of(
+                                "additionalDirectories",
+                                List.of(home.resolve("missing").toString())),
+                        Map.of("additionalDirectories", List.of(42)),
+                        Map.of("additionalDirectories", Map.of()),
+                        Map.of("systemPrompt", prompt("_unknown", "instruction")),
+                        Map.of("systemPrompt", prompt("append", "x".repeat(8001))),
+                        Map.of("systemPrompt", Map.of("mode", "append", "content", List.of())),
+                        Map.of("systemPrompt", Map.of("content", List.of(Map.of("type", "text", "text", "x")))),
+                        Map.of(
+                                "systemPrompt",
+                                Map.of(
+                                        "mode",
+                                        "append",
+                                        "content",
+                                        List.of(Map.of("type", "image", "data", "secret")))),
+                        Map.of(
+                                "systemPrompt",
+                                Map.of(
+                                        "mode",
+                                        "append",
+                                        "content",
+                                        List.of(Map.of("type", "text", "content", Map.of("text", "x"))))),
+                        Map.of(
+                                "systemPrompt",
+                                Map.of("mode", "append", "content", List.of(Map.of("type", "text", "text", 42)))));
+                var request = 1;
+                for (final var extra : invalid) {
+                    final var params =
+                            new HashMap<String, Object>(Map.of("cwd", a.toString(), "mcpServers", List.of()));
+                    params.putAll(extra);
+                    f.send(request, "session/new", params);
+                    assertEquals(-32602, f.response(request++).error().code());
+                    assertTrue(f.store.list().isEmpty());
+                    assertTrue(f.runtimes.isEmpty());
+                }
+                final var id = f.create(request++, a, List.of(), "override", "keep");
+                final var before = f.store.metadata(id);
+                f.closeSession(request++, id);
+                for (final var extra : invalid) {
+                    final var params = new HashMap<String, Object>(
+                            Map.of("sessionId", id, "cwd", a.toString(), "mcpServers", List.of()));
+                    params.putAll(extra);
+                    f.send(request, "session/load", params);
+                    assertEquals(-32602, f.response(request++).error().code());
+                    assertEquals(before, f.store.metadata(id));
+                    assertEquals(1, f.store.list().size());
+                    assertNull(f.shells.active(id));
+                }
+            }
+        }
+
+        public static class Module extends ConfigurationModule {
+            public Module() {
+                super(home);
+            }
+        }
+    }
+
+    @Nested
+    @FusionSupport(modules = SettledVetoAndConcurrent.Module.class)
+    class SettledVetoAndConcurrent {
+        @TempDir
+        static Path home;
+
+        @Test
+        void settledVetoAndConcurrentDeleteDoNotPersistTheRequestedSelectionOrResurrectSession(
+                @Fusion final CodingAgentConfiguration configuration, @Fusion final AcpCommand.Conf commandOptions)
+                throws Exception {
+            final var root = Files.createDirectory(home.resolve("A"));
+            final var entered = new CountDownLatch(1);
+            final var release = new CountDownLatch(1);
+            try (final var f = new Fixture(configuration, commandOptions)) {
+                final var id = f.create(1, root, List.of(), "append", "retained");
+                f.accept = settings -> {
+                    if ("default".equals(settings.providerId())) {
+                        entered.countDown();
+                        try {
+                            assertTrue(release.await(5, TimeUnit.SECONDS));
+                        } catch (final InterruptedException interrupted) {
+                            Thread.currentThread().interrupt();
+                            throw new IllegalStateException(interrupted);
+                        }
+                        return false;
+                    }
+                    return true;
+                };
+                f.send(2, "session/set_config_option", new SetConfig(id, "provider", "default"));
+                assertTrue(entered.await(5, TimeUnit.SECONDS));
+                f.send(3, "session/delete", new Session(id));
+                // Reader still handles cancellation/barriers while the selection hook is blocked.
+                f.send(null, "session/cancel", new Session(id));
+                f.send(4, "initialize", new Initialize(1, null, null));
+                assertNotNull(f.response(4).error());
+                release.countDown();
+                assertNull(f.response(2).error());
+                assertNull(f.response(3).error());
+                assertTrue(f.store.list().isEmpty());
+                assertNull(f.store.metadata(id));
+                assertFalse(f.store.metadata(
+                        id, new SessionMetadata(1, "a", "a-main", null, List.of(), null, "plan", null)));
+                assertNull(f.shells.active(id));
+            } finally {
+                release.countDown();
+            }
+        }
+
+        public static class Module extends ConfigurationModule {
+            public Module() {
+                super(home);
+            }
+        }
+    }
+
+    @Nested
+    @FusionSupport(modules = DeleteWaitsForThe.Module.class)
+    class DeleteWaitsForThe {
+        @TempDir
+        static Path home;
+
+        @Test
+        void deleteWaitsForTheActualTurnBeforeRemovingPreset(
+                @Fusion final CodingAgentConfiguration configuration, @Fusion final AcpCommand.Conf commandOptions)
+                throws Exception {
+            final var root = Files.createDirectory(home.resolve("A"));
+            try (final var f = new Fixture(configuration, commandOptions)) {
+                final var id = f.create(1, root, List.of(), "append", "retained");
+                f.turnCompletion = new CompletableFuture<>();
+                f.send(2, "session/prompt", new Prompt(id, List.of(Content.text("work"))));
+                assertTrue(f.turnEntered.await(5, TimeUnit.SECONDS));
+                f.send(3, "session/delete", new Session(id));
+                f.send(4, "initialize", new Initialize(1, null, null));
+                assertNotNull(f.response(4).error());
+                assertNotNull(f.store.metadata(id), "A still-owned turn must retain its session preset");
+                f.turnCompletion.complete(true);
+                assertNull(f.response(2).error());
+                assertNull(f.response(3).error());
+                assertTrue(f.store.list().isEmpty());
+                assertNull(f.store.metadata(id));
+            }
+        }
+
+        public static class Module extends ConfigurationModule {
+            public Module() {
+                super(home);
+            }
+        }
+    }
+
+    @Nested
+    @FusionSupport(modules = UnavailablePresetReferencesFail.Module.class)
+    class UnavailablePresetReferencesFail {
+        @TempDir
+        static Path home;
+
+        @Test
+        void unavailablePresetReferencesFailBeforePublicationAndKeepStoredHistory(
+                @Fusion final CodingAgentConfiguration configuration, @Fusion final AcpCommand.Conf commandOptions)
+                throws Exception {
+            final var root = Files.createDirectory(home.resolve("A"));
+            try (final var f = new Fixture(configuration, commandOptions)) {
+                final var id = f.create(1, root, List.of(), "append", "retained");
+                f.closeSession(2, id);
+                final var history = f.store.load(id);
+                final var invalid = List.of(
+                        new SessionMetadata(
+                                1, "removed-private-reference", "a-main", "high", List.of(), null, "plan", null),
+                        new SessionMetadata(
+                                1, "a", "a-main", "removed-private-reference", List.of(), null, "plan", null),
+                        new SessionMetadata(
+                                1, "a", "a-main", "high", List.of(), "removed-private-reference", "plan", null));
+                var request = 3;
+                for (final var preset : invalid) {
+                    assertTrue(f.store.metadata(id, preset));
+                    f.send(
+                            request,
+                            "session/resume",
+                            Map.of("sessionId", id, "cwd", root.toString(), "mcpServers", List.of()));
+                    final var error = f.response(request++).error();
+                    assertEquals(-32602, error.code());
+                    assertTrue(error.message().contains("unavailable"));
+                    assertFalse(error.message().contains("removed-private-reference"));
+                    assertEquals(preset, f.store.metadata(id));
+                    assertEquals(history, f.store.load(id));
+                    assertNull(f.shells.active(id));
+                    assertEquals(1, f.runtimes.size());
+                }
+            }
+        }
+
+        public static class Module extends ConfigurationModule {
+            public Module() {
+                super(home);
+            }
+        }
+    }
+
+    public abstract static class ConfigurationModule extends OptionConfigurationTestModule {
+        protected ConfigurationModule(final Path root) {
+            super(Map.of(
+                    "yca.storageHome",
+                    root.toString(),
+                    "yca.home",
+                    root.toString(),
+                    "yca.memory.enabled",
+                    "false",
+                    "yca.agents.length",
+                    "1",
+                    "yca.agents.0.name",
+                    "reviewer",
+                    "yca.agents.0.prompt",
+                    "review carefully"));
         }
     }
 }

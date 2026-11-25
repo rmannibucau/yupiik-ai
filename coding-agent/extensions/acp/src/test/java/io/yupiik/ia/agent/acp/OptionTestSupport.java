@@ -18,20 +18,17 @@ package io.yupiik.ia.agent.acp;
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.agent.AgentLoop;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
-import io.yupiik.ia.agent.core.configuration.ConfigurationLoader;
 import io.yupiik.ia.agent.core.llm.ChatClient;
 import io.yupiik.ia.agent.core.llm.ChatSettings;
 import io.yupiik.ia.agent.core.llm.ModelsResponse;
 import io.yupiik.ia.agent.core.permissions.PermissionService;
 import io.yupiik.ia.agent.core.question.UserFeedbackService;
+import io.yupiik.ia.agent.core.sandbox.DisabledSandbox;
 import io.yupiik.ia.agent.core.session.AgentSessionService;
 import io.yupiik.ia.agent.core.shell.SessionRuntime;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import java.nio.file.Path;
 import java.time.Clock;
-import java.util.HashMap;
-import java.util.Map;
-import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.function.Function;
 import java.util.function.Predicate;
@@ -44,37 +41,13 @@ final class OptionTestSupport implements AutoCloseable {
     final AcpSessionOptions options;
     final AcpCommand.Conf commandOptions;
 
-    OptionTestSupport(final JsonMapper mapper, final Function<ChatSettings, CompletableFuture<ModelsResponse>> fetch) {
-        this(mapper, fetch, Map.of());
-    }
-
     OptionTestSupport(
+            final CodingAgentConfiguration configuration,
+            final AcpCommand.Conf commandOptions,
             final JsonMapper mapper,
-            final Function<ChatSettings, CompletableFuture<ModelsResponse>> fetch,
-            final Map<String, String> overrides) {
-        final var props = new HashMap<String, String>();
-        props.put("yca.provider.providers.length", "2");
-        props.put("yca.provider.defaultProvider", "a");
-        for (int i = 0; i < 2; i++) {
-            final var prefix = "yca.provider.providers." + i;
-            props.put(prefix + ".id", i == 0 ? "a" : "default");
-            props.put(prefix + ".model", i == 0 ? "a-main" : "b-main");
-            props.put(prefix + ".tuning.variants.length", "2");
-            props.put(prefix + ".tuning.variants.0.name", "low");
-            props.put(prefix + ".tuning.variants.0.reasoningEffort", "low");
-            props.put(prefix + ".tuning.variants.1.name", "high");
-            props.put(prefix + ".tuning.variants.1.reasoningEffort", "high");
-            props.put(prefix + ".tuning.defaultVariant", "high");
-            props.put(prefix + ".models.length", "1");
-            props.put(prefix + ".models.0.model", "matching-prefix");
-        }
-        props.put("yca.model.compact.name", "$a/compact-only");
-        props.put("yca.model.memory.name", "$a/memory-only");
-        props.putAll(overrides);
-        commandOptions = ConfigurationLoader.load(AcpCommand.Conf.class, key -> Optional.ofNullable(props.get(key)));
-        configuration = ConfigurationLoader.load(
-                io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration.class,
-                key -> Optional.ofNullable(props.get(key)));
+            final Function<ChatSettings, CompletableFuture<ModelsResponse>> fetch) {
+        this.configuration = configuration;
+        this.commandOptions = commandOptions;
         providers = new ProviderManager(configuration, mapper);
         chat = new ChatClient(configuration, mapper, providers, Clock.systemUTC(), null) {
             @Override
@@ -93,7 +66,7 @@ final class OptionTestSupport implements AutoCloseable {
     }
 
     SessionRuntime runtime(final ChatSettings initial, final Predicate<ChatSettings> accept, final Path workdir) {
-        final var loop = new AgentLoop(workdir) {
+        final var loop = new AgentLoop(workdir, new DisabledSandbox(workdir)) {
             private volatile ChatSettings settings = initial;
 
             @Override
@@ -125,7 +98,8 @@ final class OptionTestSupport implements AutoCloseable {
                 null,
                 null,
                 null,
-                workdir);
+                workdir,
+                new DisabledSandbox(workdir));
     }
 
     @Override

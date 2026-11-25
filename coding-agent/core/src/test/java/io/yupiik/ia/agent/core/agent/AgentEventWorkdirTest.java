@@ -35,6 +35,7 @@ import io.yupiik.ia.agent.core.events.hooks.AgentEventHookRouter;
 import io.yupiik.ia.agent.core.events.hooks.CallbackRunner;
 import io.yupiik.ia.agent.core.events.hooks.EventContextBuilder;
 import io.yupiik.ia.agent.core.llm.Usage;
+import io.yupiik.ia.agent.core.sandbox.DisabledSandbox;
 import io.yupiik.ia.agent.core.wiring.PrecisionDurationMarkerProvider;
 import java.lang.reflect.Type;
 import java.nio.file.Path;
@@ -281,7 +282,8 @@ class AgentEventWorkdirTest {
                 null,
                 null,
                 null,
-                root);
+                root,
+                new DisabledSandbox(root));
         loop.currentSessionId = session;
         return loop;
     }

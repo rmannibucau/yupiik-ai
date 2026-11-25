@@ -83,7 +83,10 @@ import java.util.regex.Pattern;
  * real terminal widget layer.
  */
 @DefaultScoped
-@Command(name = "cli", description = "Interactive plain-terminal yca session (REPL) with optional ANSI colors.")
+@Command(
+        name = "cli",
+        description =
+                "Interactive plain-terminal yca session (REPL) with optional ANSI colors. All modes accept --sandbox true|false (yca.sandbox.enabled); sandbox policy is independent of tool permissions.")
 public class CliCommand implements Runnable {
     private static final Pattern WHITESPACE = Pattern.compile("\\s+");
     private final CliConf conf;
@@ -526,6 +529,7 @@ public class CliCommand implements Runnable {
         }
         return switch (mode) {
             case YOLO -> "yolo";
+            case FULL_YOLO -> "full_yolo";
             case AUTO_EDIT -> "auto";
             default -> "ask";
         };

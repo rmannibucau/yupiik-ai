@@ -63,6 +63,11 @@ describe('SessionRequests mounted interactions', () => {
     expect(onAnswer).toHaveBeenCalledExactlyOnceWith(1, token);
   });
 
+  it.each([['SANDBOX', 'Sandbox approval'], ['PERMISSION', 'Tool approval']])('labels %s approval origin', (origin, label) => {
+    render(request({ origin, title: 'Access resource', tool: 'sandbox' }, 'session.approval'));
+    expect(host.querySelector('h2')?.textContent).toBe(label);
+  });
+
   it('submits a single ask choice as an ID-keyed map and permits changing it', async () => {
     render(ask());
     expect(host.querySelector('[data-slot="option-list"]')).not.toBeNull();

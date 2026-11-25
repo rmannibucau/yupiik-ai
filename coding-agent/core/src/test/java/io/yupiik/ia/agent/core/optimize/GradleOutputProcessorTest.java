@@ -18,11 +18,21 @@ package io.yupiik.ia.agent.core.optimize;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import io.yupiik.fusion.testing.Fusion;
+import io.yupiik.fusion.testing.FusionSupport;
+import io.yupiik.ia.agent.core.configuration.ConfigurationTestModule;
 import java.util.List;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+@FusionSupport(modules = ConfigurationTestModule.class)
 class GradleOutputProcessorTest {
-    private final GradleOutputProcessor processor = new GradleOutputProcessor();
+    private GradleOutputProcessor processor;
+
+    @BeforeEach
+    void init(@Fusion final GradleOutputProcessor processor) {
+        this.processor = processor;
+    }
 
     @Test
     void supportsGradleOnly() {

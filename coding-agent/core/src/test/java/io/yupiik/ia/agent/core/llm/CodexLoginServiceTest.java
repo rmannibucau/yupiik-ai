@@ -26,8 +26,10 @@ import com.sun.net.httpserver.HttpServer;
 import io.yupiik.fusion.httpclient.core.ExtendedHttpClient;
 import io.yupiik.fusion.httpclient.core.ExtendedHttpClientConfiguration;
 import io.yupiik.fusion.json.JsonMapper;
+import io.yupiik.fusion.testing.Fusion;
+import io.yupiik.fusion.testing.FusionSupport;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
-import io.yupiik.ia.agent.core.configuration.ConfigurationLoader;
+import io.yupiik.ia.agent.core.configuration.ConfigurationTestModule;
 import io.yupiik.ia.agent.core.configuration.SecretRedactionMode;
 import io.yupiik.ia.agent.core.security.SecretRedactor;
 import io.yupiik.ia.agent.core.security.SecretRegistry;
@@ -48,9 +50,9 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Base64;
-import java.util.HashMap;
 import java.util.List;
-import java.util.Optional;
+import java.util.Map;
+import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -67,6 +69,7 @@ import org.junit.jupiter.api.io.TempDir;
  * browser flow, and the session persisted to {@code codex.auth.json}. No real external system is hit.
  */
 @ExtendWith(TestJsonMapper.class)
+@FusionSupport(modules = CodexLoginServiceTest.LoginModule.class)
 class CodexLoginServiceTest {
     private static final Pattern REDIRECT_PORT = Pattern.compile("redirect_uri=[^&]*127\\.0\\.0\\.1%3A(\\d+)[^&]*");
     private static final Pattern STATE = Pattern.compile("state=([^&]+)");
@@ -75,7 +78,10 @@ class CodexLoginServiceTest {
     private String issuerUrl;
 
     @TempDir
-    Path storage;
+    static Path root;
+
+    private Path storage;
+    private CodingAgentConfiguration configuration;
 
     private ExtendedHttpClient client;
     private HttpClient delegate;
@@ -90,7 +96,9 @@ class CodexLoginServiceTest {
             + ".sig";
 
     @BeforeEach
-    void start() throws IOException {
+    void start(@Fusion final CodingAgentConfiguration configuration) throws IOException {
+        this.configuration = configuration;
+        storage = Path.of(configuration.resolveStorageHome());
         issuer = HttpServer.create(new InetSocketAddress("localhost", 0), 0);
         issuerUrl = "http://localhost:" + issuer.getAddress().getPort();
         // the device-code endpoints
@@ -141,10 +149,15 @@ class CodexLoginServiceTest {
     }
 
     private CodexLoginService service(final JsonMapper mapper) {
-        final var map = new HashMap<String, String>();
-        map.put("yca.storageHome", storage.toString());
-        final var cfg = ConfigurationLoader.load(CodingAgentConfiguration.class, k -> Optional.ofNullable(map.get(k)));
-        return new CodexLoginService(mapper, client, cfg);
+        return new CodexLoginService(mapper, client, configuration);
+    }
+
+    public static class LoginModule extends ConfigurationTestModule {
+        public LoginModule() {
+            super(Map.of(
+                    "yca.storageHome",
+                    root.resolve(UUID.randomUUID().toString()).toString()));
+        }
     }
 
     private CodexOAuthConfig issuerConfig() {
@@ -163,10 +176,8 @@ class CodexLoginServiceTest {
         modes.set("test", SecretRedactionMode.REDACT);
         final var redactor = new SecretRedactor(registry, modes);
         // Use a temporary storage home, never the real user's credentials.
-        final var cfg = ConfigurationLoader.load(
-                CodingAgentConfiguration.class,
-                k -> Optional.ofNullable("yca.storageHome".equals(k) ? storage.toString() : null));
-        final var temporaryService = new CodexLoginService(mapper, client, cfg, new CodexSecretRegistration(registry));
+        final var temporaryService =
+                new CodexLoginService(mapper, client, configuration, new CodexSecretRegistration(registry));
         temporaryService.save(
                 "test",
                 new CodexTokenStore("login-access", "login-refresh", "account-metadata", 1L, "login-id-token")
@@ -197,10 +208,7 @@ class CodexLoginServiceTest {
         modes.set("test", SecretRedactionMode.REDACT);
         final var redactor = new SecretRedactor(registry, modes);
         registry.scan();
-        final var cfg = ConfigurationLoader.load(
-                CodingAgentConfiguration.class,
-                k -> Optional.ofNullable("yca.storageHome".equals(k) ? storage.toString() : null));
-        final var service = new CodexLoginService(mapper, client, cfg, new CodexSecretRegistration(registry));
+        final var service = new CodexLoginService(mapper, client, configuration, new CodexSecretRegistration(registry));
         service.signIn("device", true, url -> {}, b -> false, issuerConfig());
         for (final var value : List.of("acc-token", "refresh-1", ID_TOKEN)) {
             assertFalse(redactor.redact("value=" + value, "test").contains(value));

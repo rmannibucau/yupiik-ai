@@ -17,12 +17,14 @@ package io.yupiik.ia.agent.acp;
 
 import static org.junit.jupiter.api.Assertions.*;
 
+import io.yupiik.fusion.testing.Fusion;
+import io.yupiik.fusion.testing.FusionSupport;
 import io.yupiik.ia.agent.core.configuration.AgentMode;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
-import io.yupiik.ia.agent.core.configuration.ConfigurationLoader;
 import io.yupiik.ia.agent.core.configuration.PermissionMode;
 import io.yupiik.ia.agent.core.permissions.ApprovalGate;
 import io.yupiik.ia.agent.core.permissions.PermissionService;
+import io.yupiik.ia.agent.core.sandbox.DisabledSandbox;
 import io.yupiik.ia.agent.core.tools.ToolContext;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -30,29 +32,27 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+@FusionSupport(modules = AdditionalDirectoryClientToolsTest.ConfigurationModule.class)
 class AdditionalDirectoryClientToolsTest {
+    @TempDir
+    static Path home;
+
+    @Fusion
+    private CodingAgentConfiguration config;
+
     @Test
-    void additionalRootsAreLexicalContextNotGrantsAndDoNotBypassPlanOrToolCeilings(@TempDir final Path home)
-            throws Exception {
+    void additionalRootsAreLexicalContextNotGrantsAndDoNotBypassPlanOrToolCeilings() throws Exception {
         final var root = Files.createDirectory(home.resolve("A"));
         final var extra = Files.createDirectory(home.resolve("B"));
-        final var props = Map.of(
-                "yca.home",
-                home.toString(),
-                "yca.storageHome",
-                home.resolve("store").toString());
-        final var config =
-                ConfigurationLoader.load(CodingAgentConfiguration.class, key -> Optional.ofNullable(props.get(key)));
         final var permissions = new PermissionService(config, root);
         permissions.setMode(AgentMode.BUILD);
         permissions.setPermissionMode(PermissionMode.ASK);
-        permissions.setGate((title, detail, tool, args) -> ApprovalGate.Result.DENY);
+        permissions.setGate(request -> ApprovalGate.Result.DENY);
         final var calls = new ArrayList<Map<String, Object>>();
         final var policy = new ArrayList<Map<String, Object>>();
         try (final var adapter = new AcpClientTools(
@@ -74,7 +74,8 @@ class AdditionalDirectoryClientToolsTest {
                     Map.<String, Object>of("path", extra.resolve("file.txt").toString(), "content", "editor text");
             assertFalse(tool.execute(args, context).success());
             assertTrue(calls.isEmpty(), "Directory context must not approve an edit");
-            permissions.setGate((title, detail, name, checked) -> {
+            permissions.setGate(request -> {
+                final var checked = request.args();
                 policy.add(checked);
                 return ApprovalGate.Result.ALLOW_ONCE;
             });
@@ -116,9 +117,20 @@ class AdditionalDirectoryClientToolsTest {
                 null,
                 () -> false,
                 root,
+                new DisabledSandbox(root),
                 1,
                 ceiling,
                 null,
                 null);
+    }
+
+    public static class ConfigurationModule extends AcpConfigurationTestModule {
+        public ConfigurationModule() {
+            super(Map.of(
+                    "yca.home",
+                    home.toString(),
+                    "yca.storageHome",
+                    home.resolve("store").toString()));
+        }
     }
 }

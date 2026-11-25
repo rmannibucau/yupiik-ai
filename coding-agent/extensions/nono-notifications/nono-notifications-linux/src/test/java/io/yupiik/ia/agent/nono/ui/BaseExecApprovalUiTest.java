@@ -26,11 +26,13 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.time.Duration;
+import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.function.Function;
+import java.util.function.LongSupplier;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeEach;
@@ -113,15 +115,19 @@ class BaseExecApprovalUiTest {
     void deadlineKillsAndReapsProcess(final Adapter adapter) throws Exception {
         // exec keeps the published PID without a busy loop or a child left behind.
         final var executable = script("exec sleep 30");
-        try (final ApprovalUi ui = adapter.create(executable);
+        final var clock = new DeadlineClock();
+        try (final ApprovalUi ui = adapter.create(executable, clock);
                 final var handle = ui.present("test", Duration.ofMillis(500))) {
             final var pid = awaitPids(executable, 1).getFirst();
             // PID publication is the startup handshake: exercise a live process, not
             // merely an expired presentation that never successfully launched.
             assertTrue(ProcessHandle.of(pid).map(ProcessHandle::isAlive).orElse(false));
             assertFalse(handle.decision().toCompletableFuture().isDone());
+            clock.expire();
             assertFalse(handle.decision().toCompletableFuture().get(7, TimeUnit.SECONDS));
             assertReaped(pid);
+        } finally {
+            clock.expire();
         }
     }
 
@@ -192,8 +198,8 @@ class BaseExecApprovalUiTest {
                 final ApprovalUi secondUi = adapter.create(secondExecutable);
                 final var first = firstUi.present("first", Duration.ofSeconds(10));
                 final var second = secondUi.present("second", Duration.ofSeconds(10))) {
-            final var firstPid = awaitPids(firstExecutable, 1).getFirst();
-            final var secondPid = awaitPids(secondExecutable, 1).getFirst();
+            final var firstPid = awaitPids(firstExecutable, 1, first, second).getFirst();
+            final var secondPid = awaitPids(secondExecutable, 1, first, second).getFirst();
             final var secondCallback = second.decision().thenApply(allowed -> {
                 secondCallbackEntered.countDown();
                 try {
@@ -274,10 +280,30 @@ class BaseExecApprovalUiTest {
         }
     }
 
-    private Path script(final String body) throws IOException {
+    private Path script(final String body) throws IOException, InterruptedException {
         final var path = directory.resolve("approval-test");
         // Put the PID in the filename so concurrent launches cannot overwrite each other's identity.
-        Files.writeString(path, "#!/bin/sh\n: > \"$0.$$.pid\"\n" + body + "\n");
+        final var content = "#!/bin/sh\n: > \"$0.$$.pid\"\n" + body + "\n";
+        // Files.writeString opens without O_CLOEXEC on Linux. Concurrent process launches can
+        // inherit its writable descriptor and make exec fail with ETXTBSY even after Java closes it.
+        // Only the writer child opens this file; reaping it establishes that the writer is gone.
+        final var writer = new ProcessBuilder(
+                        "/bin/sh",
+                        "-c",
+                        "umask 077; printf '%s' \"$2\" > \"$1\"",
+                        "approval-fixture",
+                        path.toString(),
+                        content)
+                .redirectInput(ProcessBuilder.Redirect.from(Path.of("/dev/null").toFile()))
+                .redirectOutput(ProcessBuilder.Redirect.DISCARD)
+                .redirectError(ProcessBuilder.Redirect.DISCARD)
+                .start();
+        try {
+            assertEquals(0, writer.waitFor(), "Could not write approval fixture: " + path);
+        } finally {
+            writer.destroyForcibly();
+            writer.onExit().join();
+        }
         Files.setPosixFilePermissions(path, PosixFilePermissions.fromString("rwx------"));
         return path;
     }
@@ -292,7 +318,8 @@ class BaseExecApprovalUiTest {
         }
     }
 
-    private List<Long> awaitPids(final Path executable, final int count) throws Exception {
+    private List<Long> awaitPids(final Path executable, final int count, final ApprovalHandle... handles)
+            throws Exception {
         final var deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
         while (System.nanoTime() < deadline) {
             final var pids = pids(executable);
@@ -301,11 +328,58 @@ class BaseExecApprovalUiTest {
             }
             Thread.sleep(10);
         }
-        throw new AssertionError("Subprocesses did not publish " + count + " PIDs");
+        final List<String> files;
+        try (final var paths = Files.list(directory)) {
+            files = paths.map(path -> path.getFileName().toString()).sorted().toList();
+        }
+        final var decisions = Arrays.stream(handles)
+                .map(handle -> handle.decision().toCompletableFuture())
+                .map(future -> future
+                        + (future.isDone() && !future.isCompletedExceptionally()
+                                ? " value=" + future.getNow(null)
+                                : ""))
+                .toList();
+        final var processes = pids(executable).stream()
+                .map(pid -> pid + " alive="
+                        + ProcessHandle.of(pid).map(ProcessHandle::isAlive).orElse(false))
+                .toList();
+        final var children = ProcessHandle.current()
+                .children()
+                .map(process -> process.pid() + " alive=" + process.isAlive() + " command="
+                        + process.info().command().orElse("unknown"))
+                .toList();
+        throw new AssertionError("Subprocesses did not publish " + count + " PIDs for " + executable + "; decisions="
+                + decisions + "; files=" + files + "; processes=" + processes + "; children=" + children);
     }
 
     private void assertReaped(final long pid) {
         assertFalse(ProcessHandle.of(pid).map(ProcessHandle::isAlive).orElse(false), "Process still alive: " + pid);
+    }
+
+    private static final class DeadlineClock implements LongSupplier {
+        private final Thread owner = Thread.currentThread();
+        private final CountDownLatch expired = new CountDownLatch(1);
+
+        @Override
+        public long getAsLong() {
+            if (Thread.currentThread() == owner) {
+                return 0;
+            }
+            // Do not let scheduler load consume the budget before the PID handshake.
+            try {
+                if (!expired.await(5, TimeUnit.SECONDS)) {
+                    throw new AssertionError("Test did not advance the approval deadline");
+                }
+            } catch (final InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException(interrupted);
+            }
+            return TimeUnit.SECONDS.toNanos(1);
+        }
+
+        private void expire() {
+            expired.countDown();
+        }
     }
 
     private enum Adapter {
@@ -320,6 +394,19 @@ class BaseExecApprovalUiTest {
 
         private ApprovalUi create(final Path executable) {
             return factory.apply(executable);
+        }
+
+        private ApprovalUi create(final Path executable, final LongSupplier nanoTime) {
+            final var policy = this == ZENITY
+                    ? BaseExecApprovalUi.ResultPolicy.EXIT_ZERO
+                    : BaseExecApprovalUi.ResultPolicy.ALLOW_ACTION;
+            return new BaseExecApprovalUi(executable, policy, nanoTime) {
+                @Override
+                protected List<String> commandLine(
+                        final Path command, final String sanitizedText, final long budgetNanos) {
+                    return List.of(command.toString());
+                }
+            };
         }
     }
 }

@@ -17,6 +17,7 @@ package io.yupiik.ia.agent.core.wiring;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import io.yupiik.fusion.framework.api.main.ArgsConfigSource;
 import java.util.List;
@@ -70,6 +71,19 @@ class YcaPrefixShortcutConfigurationSourceTest {
         final var source = new YcaPrefixShortcutConfigurationSource(new ArgsConfigSource(
                 List.of("--todos-continueOnUnfinished", "stripped", "--yca.todos.continueOnUnfinished", "prefixed")));
         assertEquals("stripped", source.get("yca.todos.continueOnUnfinished"));
+    }
+
+    @Test
+    void sandboxAliasSupportsEqualsAndHasShortcutPrecedence() {
+        final var source = new YcaPrefixShortcutConfigurationSource(
+                new ArgsConfigSource(List.of("--sandbox=false", "--yca.sandbox.enabled", "true")));
+        assertEquals("false", source.get("yca.sandbox.enabled"));
+    }
+
+    @Test
+    void sandboxAliasRequiresAnExplicitBoolean() {
+        final var source = new YcaPrefixShortcutConfigurationSource(new ArgsConfigSource(List.of("--sandbox", "no")));
+        assertThrows(IllegalArgumentException.class, () -> source.get("yca.sandbox.enabled"));
     }
 
     @Test

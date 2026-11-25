@@ -436,10 +436,11 @@ public class WebJsonRpc {
 
     @JsonRpc(
             value = "permissions.set",
-            documentation = "Sets the tool permission level of a session (ask|auto_edit|yolo).")
+            documentation = "Sets the tool permission level of a session (ask|auto_edit|yolo|full_yolo).")
     public Map<String, String> setPermissions(
             @JsonRpcParam(required = true, documentation = "Session id.") final String id,
-            @JsonRpcParam(required = true, documentation = "ask, auto_edit or yolo.") final String mode) {
+            @JsonRpcParam(required = true, documentation = "ask, auto_edit, yolo or full_yolo (not recommended).")
+                    final String mode) {
         final var resolved = agentSessionService.setPermissions(mode, sessions.runtime(id));
         return Map.of("permissionMode", lowerEnum(resolved));
     }
@@ -514,6 +515,7 @@ public class WebJsonRpc {
                 gitBranchOf(dir),
                 lowerEnum(info.agentMode()),
                 lowerEnum(info.permissionMode()),
+                runtime.sandbox().enabled(),
                 mcpStatus(),
                 modelsOf(chatClient, chatSettings),
                 providersOf(providerManager));
@@ -990,6 +992,7 @@ public class WebJsonRpc {
             String gitBranch,
             String mode,
             String permissionMode,
+            boolean sandboxEnabled,
             List<McpDto> mcpServers,
             List<String> modelCandidates,
             List<String> providerCandidates) {}

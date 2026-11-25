@@ -23,6 +23,7 @@ import io.yupiik.ia.agent.core.configuration.AgentMode;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.ContextLimit;
 import io.yupiik.ia.agent.core.configuration.ModelVariantConfiguration;
+import io.yupiik.ia.agent.core.configuration.PermissionMode;
 import io.yupiik.ia.agent.core.configuration.PlateauFeedbackMode;
 import io.yupiik.ia.agent.core.context.BackoffSleeper;
 import io.yupiik.ia.agent.core.context.CompactionResult;
@@ -49,6 +50,7 @@ import io.yupiik.ia.agent.core.notifications.NotificationService;
 import io.yupiik.ia.agent.core.permissions.PermissionService;
 import io.yupiik.ia.agent.core.question.UserFeedbackService;
 import io.yupiik.ia.agent.core.runtime.StatusReporter;
+import io.yupiik.ia.agent.core.sandbox.Sandbox;
 import io.yupiik.ia.agent.core.session.SessionStore;
 import io.yupiik.ia.agent.core.shell.ThinkTagSplitter;
 import io.yupiik.ia.agent.core.snapshot.SnapshotStore;
@@ -472,6 +474,13 @@ public class AgentLoop {
      */
     volatile Set<String> servedToolNames;
 
+    private final Sandbox sandbox;
+
+    /** Borrowed session sandbox. Descendants share approvals and revocations conservatively. */
+    public Sandbox sandbox() {
+        return sandbox;
+    }
+
     public AgentLoop(
             final ChatClient chatClient,
             final ToolRegistry toolRegistry,
@@ -496,7 +505,8 @@ public class AgentLoop {
             final TodoStore todoStore,
             final ExecutorService executor,
             final NotificationService notificationService,
-            final Path workdir) {
+            final Path workdir,
+            final Sandbox sandbox) {
         this(
                 chatClient,
                 toolRegistry,
@@ -530,7 +540,8 @@ public class AgentLoop {
                 null,
                 null,
                 null,
-                workdir);
+                workdir,
+                sandbox);
     }
 
     AgentLoop(
@@ -559,7 +570,8 @@ public class AgentLoop {
             final String subagentId,
             final String subagentName,
             final NotificationService notificationService,
-            final Path workdir) {
+            final Path workdir,
+            final Sandbox sandbox) {
         this(
                 chatClient,
                 toolRegistry,
@@ -593,13 +605,15 @@ public class AgentLoop {
                 null,
                 null,
                 null,
-                workdir);
+                workdir,
+                sandbox);
     }
 
-    protected AgentLoop(final Path workdir) {
+    protected AgentLoop(final Path workdir, final Sandbox sandbox) {
         this(
                 null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null,
-                null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, workdir);
+                null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, workdir,
+                sandbox);
     }
 
     /**
@@ -642,8 +656,10 @@ public class AgentLoop {
             final TodoContinuation todoContinuation,
             final TurnNotificationReporter turnNotificationReporter,
             final AgentTurnExecutor turnExecutor,
-            final Path workdir) {
+            final Path workdir,
+            final Sandbox sandbox) {
         this.sessionWorkdir = Objects.requireNonNull(workdir, "workdir");
+        this.sandbox = Objects.requireNonNull(sandbox, "sandbox");
         this.chatClient = chatClient;
         this.toolRegistry = toolRegistry;
         this.toolExecutionService = toolExecutionService;
@@ -714,7 +730,8 @@ public class AgentLoop {
                 this::effectiveAllowedTools,
                 () -> this.servedToolNames,
                 this::chatSettings,
-                () -> this.closed);
+                () -> this.closed,
+                sandbox);
         this.todoContinuation = todoContinuation == null
                 ? new TodoContinuation(
                         configuration,
@@ -1000,7 +1017,9 @@ public class AgentLoop {
         final var tools = toolCeiling == null
                 ? toolRegistry.toWireTools(sessionWorkdir)
                 : toolRegistry.toWireTools(sessionWorkdir, tool -> toolCeiling.contains(tool.name()));
-        if (permissionService == null || permissionService.mode() != AgentMode.PLAN) {
+        if (permissionService == null
+                || permissionService.mode() != AgentMode.PLAN
+                || permissionService.permissionMode() == PermissionMode.FULL_YOLO) {
             return tools;
         }
         return tools.stream()

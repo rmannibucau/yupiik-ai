@@ -31,20 +31,23 @@ import io.yupiik.fusion.framework.api.container.configuration.ConfigurationRegis
 import io.yupiik.fusion.framework.api.main.ArgsConfigSource;
 import io.yupiik.fusion.framework.api.scope.DefaultScoped;
 import io.yupiik.fusion.json.JsonMapper;
+import io.yupiik.fusion.testing.Fusion;
+import io.yupiik.fusion.testing.FusionSupport;
 import io.yupiik.ia.agent.bot.runtime.execution.AttemptRelay;
 import io.yupiik.ia.agent.core.cli.RunCommand;
 import io.yupiik.ia.agent.core.configuration.AgentMode;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
-import io.yupiik.ia.agent.core.configuration.ConfigurationLoader;
 import io.yupiik.ia.agent.core.configuration.PermissionMode;
 import io.yupiik.ia.agent.core.configuration.ProviderBudgetConfiguration;
 import io.yupiik.ia.agent.github.client.GitHubClient;
 import io.yupiik.ia.agent.github.configuration.GithubExecutorConfiguration;
 import io.yupiik.ia.agent.github.configuration.PromptConfiguration;
+import io.yupiik.ia.agent.github.configuration.ReviewPresentationConfiguration;
 import io.yupiik.ia.agent.github.store.MutableTask;
 import io.yupiik.ia.agent.github.store.TaskStore;
 import io.yupiik.ia.agent.github.support.BotJsonMapper;
 import io.yupiik.ia.agent.github.support.BotTestConfiguration;
+import io.yupiik.ia.agent.github.support.GithubConfigurationTestModule;
 import io.yupiik.ia.agent.github.support.TaskFixtures;
 import java.io.IOException;
 import java.lang.reflect.Type;
@@ -71,7 +74,17 @@ import org.junit.jupiter.params.provider.ValueSource;
  * configuration overrides, not by modifying the prepared configuration or the process directory.
  */
 @Isolated // The real CLI graph owns process-wide terminal/logging lifecycle components.
+@FusionSupport(modules = GithubConfigurationTestModule.class)
 class GithubAgentLoopTest {
+    @Fusion
+    private ReviewPresentationConfiguration injectedPresentation;
+
+    @Fusion
+    private PromptConfiguration injectedPrompts;
+
+    @Fusion
+    private GithubExecutorConfiguration injectedExecutor;
+
     @TempDir
     Path home;
 
@@ -81,11 +94,7 @@ class GithubAgentLoopTest {
     void trustedAttemptRunsRealWriteToolAndReturnsStructuredReview(final boolean invalidFinding) throws Exception {
         try (final var json = BotJsonMapper.create(ignored -> Optional.empty())) {
             final var trustedFile = home.resolve("trusted.json");
-            final var preparation = new AttemptPreparation(
-                    json,
-                    ConfigurationLoader.load(PromptConfiguration.class, key -> Optional.empty()),
-                    ConfigurationLoader.load(GithubExecutorConfiguration.class, key -> Optional.empty())
-                            .shared());
+            final var preparation = new AttemptPreparation(json, injectedPrompts, injectedExecutor.shared());
             final var expected = Map.<String, Object>of(
                     "schemaVersion",
                     1,
@@ -278,7 +287,7 @@ class GithubAgentLoopTest {
             if (invalidFinding) {
                 assertThrows(
                         IllegalArgumentException.class,
-                        () -> BotTestConfiguration.reviewPublisher(github, store, "bot")
+                        () -> BotTestConfiguration.reviewPublisher(injectedPresentation, github, store, "bot")
                                 .publish(TaskFixtures.task(task), TaskFixtures.result(produced)));
                 assertTrue(
                         posts.isEmpty(), "a real model/tool result with invented diff locations must not be published");
@@ -287,7 +296,7 @@ class GithubAgentLoopTest {
             }
             assertEquals(
                     reviewUrl,
-                    BotTestConfiguration.reviewPublisher(github, store, "bot")
+                    BotTestConfiguration.reviewPublisher(injectedPresentation, github, store, "bot")
                             .publish(TaskFixtures.task(task), TaskFixtures.result(produced)));
             assertEquals(1, posts.size());
             assertEquals("COMMENT", posts.getFirst().get("event"));
@@ -310,6 +319,8 @@ class GithubAgentLoopTest {
                         attempt.resolve("configuration.json").toString()),
                 Map.entry("yca.configuration.project.enabled", "false"),
                 Map.entry("yca.home", attempt.resolve("storage").toString()),
+                // The host-publication workflow has its own attempt boundary; this is not an OS-sandbox test.
+                Map.entry("yca.sandbox.enabled", "false"),
                 Map.entry("yca.storageHome", attempt.resolve("storage").toString()),
                 Map.entry("yca.workingDir", attempt.resolve("workspace").toString()),
                 Map.entry("yca.projectDir", attempt.resolve("workspace").toString()),

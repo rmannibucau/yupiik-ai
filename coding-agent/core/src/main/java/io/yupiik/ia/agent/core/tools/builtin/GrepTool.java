@@ -131,7 +131,9 @@ public class GrepTool implements EmbeddedTool {
         final var capped = new boolean[] {false};
         final var errors = new ArrayList<String>();
         for (final var base : roots) {
-            final var ignore = FileIgnore.of(FileIgnore.gitRoot(base), null);
+            SandboxFiles.requireRead(context, base);
+            // Ancestor discovery and .gitignore reads are not sandbox-aware.
+            final var ignore = context.sandbox().enabled() ? null : FileIgnore.of(FileIgnore.gitRoot(base), null);
             try {
                 if (Files.isRegularFile(base)) {
                     searchFile(base, regex, includeMatcher, matches, max, filesScanned);
@@ -141,6 +143,9 @@ public class GrepTool implements EmbeddedTool {
                     Files.walkFileTree(base, new SimpleFileVisitor<>() {
                         @Override
                         public FileVisitResult preVisitDirectory(final Path dir, final BasicFileAttributes attrs) {
+                            if (!SandboxFiles.readable(context, dir)) {
+                                return FileVisitResult.SKIP_SUBTREE;
+                            }
                             if (!dir.equals(base) && skip(dir, ignore)) {
                                 return FileVisitResult.SKIP_SUBTREE;
                             }
@@ -153,7 +158,8 @@ public class GrepTool implements EmbeddedTool {
                                 capped[0] = true;
                                 return FileVisitResult.TERMINATE;
                             }
-                            if (!skip(file, ignore)
+                            if (SandboxFiles.readable(context, file)
+                                    && !skip(file, ignore)
                                     && (includeMatcher == null || includeMatcher.matches(file.getFileName()))) {
                                 searchFile(file, regex, includeMatcher, matches, max, filesScanned);
                             }
@@ -216,7 +222,7 @@ public class GrepTool implements EmbeddedTool {
             final var rawPath = raw == null ? "." : raw.toString().strip();
             if (!rawPath.isEmpty() && !rawPath.equals(".")) {
                 final var whole = context.resolvePath(rawPath);
-                if (Files.exists(whole)) {
+                if (SandboxFiles.readable(context, whole) && Files.exists(whole)) {
                     // an existing path (file or directory) may legitimately contain spaces: verbatim
                     tokens.add(rawPath);
                 } else {
@@ -244,7 +250,7 @@ public class GrepTool implements EmbeddedTool {
                 return true;
             }
         }
-        return ignore.isIgnored(p.toAbsolutePath().normalize());
+        return ignore != null && ignore.isIgnored(p.toAbsolutePath().normalize());
     }
 
     private static void searchFile(

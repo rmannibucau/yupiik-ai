@@ -21,6 +21,7 @@ import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.codegraph.StructuralCodeGraph;
 import io.yupiik.ia.agent.core.configuration.AgentMode;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
+import io.yupiik.ia.agent.core.configuration.PermissionMode;
 import io.yupiik.ia.agent.core.context.BackoffSleeper;
 import io.yupiik.ia.agent.core.context.CompactionCoordinator;
 import io.yupiik.ia.agent.core.context.ContextManager;
@@ -307,6 +308,7 @@ public class SubagentRunner {
                                 parentWorkdir,
                                 tool -> parentContext.permissions() == null
                                         || parentContext.permissions().mode() != AgentMode.PLAN
+                                        || parentContext.permissions().permissionMode() == PermissionMode.FULL_YOLO
                                         || tool.category() != ToolCategory.EDIT)
                         .stream()
                         .map(tool -> tool.function().name())
@@ -356,6 +358,8 @@ public class SubagentRunner {
         final var subagentContextManager =
                 new ContextManager(configuration, subagentUsageTracker, subagentCompactionCoordinator);
 
+        // Borrow the parent boundary: nested agents cannot widen it, and approvals/revocations are shared.
+        // Only the root SessionRuntime closes this sandbox.
         final var agentLoop = new AgentLoop(
                 chatClient,
                 effectiveToolRegistry,
@@ -391,7 +395,8 @@ public class SubagentRunner {
                 null,
                 null,
                 null,
-                parentWorkdir);
+                parentWorkdir,
+                parentContext.sandbox().approvalView(subagentPermissions));
         agentLoop.subagentBudget(parentContext.subagentBudget());
         SubagentDeliveryBus.get().open(subagentSessionId);
         try {

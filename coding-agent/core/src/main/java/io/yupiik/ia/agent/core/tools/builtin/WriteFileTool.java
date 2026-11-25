@@ -69,6 +69,7 @@ public class WriteFileTool implements EmbeddedTool {
             return ToolResult.error("path is required");
         }
         final var path = context.resolvePath(raw);
+        SandboxFiles.requireWrite(context, path);
         final var content = arg(args, "content");
         if (content == null) {
             return ToolResult.error("content is required");
@@ -78,9 +79,7 @@ public class WriteFileTool implements EmbeddedTool {
             return ToolResult.error(guard);
         }
         try {
-            if (path.getParent() != null) {
-                Files.createDirectories(path.getParent());
-            }
+            SandboxFiles.createParents(context, path);
             var created = false;
             try {
                 Files.writeString(path, content, StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE);

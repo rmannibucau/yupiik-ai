@@ -21,8 +21,10 @@ import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.fusion.json.JsonMapper;
+import io.yupiik.fusion.testing.Fusion;
+import io.yupiik.fusion.testing.FusionSupport;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
-import io.yupiik.ia.agent.core.configuration.TestConfigs;
+import io.yupiik.ia.agent.core.configuration.ConfigurationTestModule;
 import io.yupiik.ia.agent.core.llm.ChatClient;
 import io.yupiik.ia.agent.core.llm.ChatCompletionRequest;
 import io.yupiik.ia.agent.core.llm.ChatResult;
@@ -41,6 +43,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 
@@ -61,7 +64,7 @@ class IgnoreLlmCompactionTest {
         this.mapper = mapper;
     }
 
-    private static CodingAgentConfiguration config(final int window, final Map<String, String> extra) {
+    private static Map<String, String> configSettings(final int window, final Map<String, String> extra) {
         final var entries = new HashMap<String, String>();
         entries.put("yca.storageHome", "x");
         entries.put("yca.workingDir", ".");
@@ -79,7 +82,7 @@ class IgnoreLlmCompactionTest {
         entries.put("yca.compaction.tail.budgetTokens", "1");
         entries.put("yca.pruning.keepRecent", "1");
         entries.putAll(extra);
-        return TestConfigs.codingAgent(entries);
+        return entries;
     }
 
     private ProviderManager providerManager(final CodingAgentConfiguration cfg) {
@@ -136,97 +139,143 @@ class IgnoreLlmCompactionTest {
         return messages;
     }
 
-    @Test
-    void globalIgnoreLlmNeverCallsTheLlmAndReclaimsUnderTheTrigger() {
-        final var cfg = config(
-                128_000,
-                Map.of(
-                        "yca.compaction.mode", "no_llm",
-                        "yca.pruning.enabled", "true",
-                        "yca.pruning.shrinkOutputChars", "200"));
-        final var calls = new AtomicInteger();
-        final var coordinator = coordinator(cfg, explodingChat(calls), calls);
-        final var messages = oldHeavyHistory();
-        final var result = coordinator.compact(
-                messages, false, null, 0, () -> false, new ChatSettings("default", "m", null, null));
-        assertTrue(result.changed(), "local cascade must change the history");
-        assertNotEquals(CompactionResult.Mode.SUMMARY, result.mode(), "never a summary under ignoreLlm");
-        assertEquals(0, calls.get(), "no chat() call under ignoreLlm");
+    @Nested
+    @FusionSupport(modules = GlobalLlmFreeModule.class)
+    class GlobalLlmFree {
+        @Test
+        void globalIgnoreLlmNeverCallsTheLlmAndReclaimsUnderTheTrigger(
+                @Fusion final CodingAgentConfiguration configuration) {
+            final var cfg = configuration;
+            final var calls = new AtomicInteger();
+            final var coordinator = coordinator(cfg, explodingChat(calls), calls);
+            final var messages = oldHeavyHistory();
+            final var result = coordinator.compact(
+                    messages, false, null, 0, () -> false, new ChatSettings("default", "m", null, null));
+            assertTrue(result.changed(), "local cascade must change the history");
+            assertNotEquals(CompactionResult.Mode.SUMMARY, result.mode(), "never a summary under ignoreLlm");
+            assertEquals(0, calls.get(), "no chat() call under ignoreLlm");
+        }
+
+        @Test
+        void urgentForceCompactionIsAlsoLlmFree(@Fusion final CodingAgentConfiguration configuration) {
+            final var cfg = configuration;
+            final var calls = new AtomicInteger();
+            final var coordinator = coordinator(cfg, explodingChat(calls), calls);
+            final var messages = oldHeavyHistory();
+            final var result = coordinator.compact(
+                    messages, true, null, 0, true, () -> false, new ChatSettings("default", "m", null, null));
+            assertTrue(result.changed(), "urgent local cascade must reclaim");
+            assertEquals(0, calls.get(), "urgent compaction must also never call the LLM");
+        }
     }
 
-    @Test
-    void perProviderTrueOptsInOverGlobalFalse() {
-        // global mode=llm, but provider "other" explicitly opts into the LLM-free path
-        final var cfg = config(
-                128_000,
-                Map.of(
-                        "yca.provider.providers.1.compaction.mode", "no_llm",
-                        "yca.provider.providers.1.compaction.retriesMaxAttempts", "2"));
-        final var manager = providerManager(cfg);
-        final var coordinator = coordinator(cfg, explodingChat(new AtomicInteger()), new AtomicInteger());
-        // the global default (llm) applies to the default provider
-        assertFalse(manager.resolvedIgnoreLlm(new ChatSettings("default", "m", null, null)));
-        assertFalse(coordinator.ignoreLlm(new ChatSettings("default", "m", null, null)));
-        // per-provider no_llm opts "other" in
-        assertTrue(manager.resolvedIgnoreLlm(new ChatSettings("other", "m2", null, null)));
-        assertTrue(coordinator.ignoreLlm(new ChatSettings("other", "m2", null, null)));
+    public static class GlobalLlmFreeModule extends ConfigurationTestModule {
+        public GlobalLlmFreeModule() {
+            super(configSettings(
+                    128_000,
+                    Map.of(
+                            "yca.compaction.mode", "no_llm",
+                            "yca.pruning.enabled", "true",
+                            "yca.pruning.shrinkOutputChars", "200")));
+        }
     }
 
-    @Test
-    void absentPerProviderBlockInheritsGlobal() {
-        final var cfg = config(
-                128_000,
-                Map.of(
-                        "yca.compaction.mode", "no_llm",
-                        "yca.provider.providers.1.compaction.retriesMaxAttempts", "5"));
-        final var manager = providerManager(cfg);
-        // the per-provider block exists (retries set) but mode is absent -> inherits global no_llm
-        assertTrue(manager.resolvedIgnoreLlm(new ChatSettings("other", "m2", null, null)));
+    @Nested
+    @FusionSupport(modules = PerProviderTrueOptsInOverGlobalFalseModule.class)
+    class PerProviderTrueOptsInOverGlobalFalse {
+        @Test
+        void perProviderTrueOptsInOverGlobalFalse(@Fusion final CodingAgentConfiguration configuration) {
+            // global mode=llm, but provider "other" explicitly opts into the LLM-free path
+            final var cfg = configuration;
+            final var manager = providerManager(cfg);
+            final var coordinator = coordinator(cfg, explodingChat(new AtomicInteger()), new AtomicInteger());
+            // the global default (llm) applies to the default provider
+            assertFalse(manager.resolvedIgnoreLlm(new ChatSettings("default", "m", null, null)));
+            assertFalse(coordinator.ignoreLlm(new ChatSettings("default", "m", null, null)));
+            // per-provider no_llm opts "other" in
+            assertTrue(manager.resolvedIgnoreLlm(new ChatSettings("other", "m2", null, null)));
+            assertTrue(coordinator.ignoreLlm(new ChatSettings("other", "m2", null, null)));
+        }
     }
 
-    @Test
-    void perProviderFalseOptsOutOfGlobalTrue() {
-        final var cfg = config(
-                128_000,
-                Map.of(
-                        "yca.compaction.mode", "no_llm",
-                        "yca.provider.providers.1.compaction.mode", "llm"));
-        final var manager = providerManager(cfg);
-        // the enum makes the explicit opt-out expressible: this provider goes back to the LLM path
-        assertFalse(manager.resolvedIgnoreLlm(new ChatSettings("other", "m2", null, null)));
+    public static class PerProviderTrueOptsInOverGlobalFalseModule extends ConfigurationTestModule {
+        public PerProviderTrueOptsInOverGlobalFalseModule() {
+            super(configSettings(
+                    128_000,
+                    Map.of(
+                            "yca.provider.providers.1.compaction.mode", "no_llm",
+                            "yca.provider.providers.1.compaction.retriesMaxAttempts", "2")));
+        }
     }
 
-    @Test
-    void urgentForceCompactionIsAlsoLlmFree() {
-        final var cfg = config(
-                128_000,
-                Map.of(
-                        "yca.compaction.mode", "no_llm",
-                        "yca.pruning.enabled", "true",
-                        "yca.pruning.shrinkOutputChars", "200"));
-        final var calls = new AtomicInteger();
-        final var coordinator = coordinator(cfg, explodingChat(calls), calls);
-        final var messages = oldHeavyHistory();
-        final var result = coordinator.compact(
-                messages, true, null, 0, true, () -> false, new ChatSettings("default", "m", null, null));
-        assertTrue(result.changed(), "urgent local cascade must reclaim");
-        assertEquals(0, calls.get(), "urgent compaction must also never call the LLM");
+    @Nested
+    @FusionSupport(modules = AbsentPerProviderBlockInheritsGlobalModule.class)
+    class AbsentPerProviderBlockInheritsGlobal {
+        @Test
+        void absentPerProviderBlockInheritsGlobal(@Fusion final CodingAgentConfiguration configuration) {
+            final var cfg = configuration;
+            final var manager = providerManager(cfg);
+            // the per-provider block exists (retries set) but mode is absent -> inherits global no_llm
+            assertTrue(manager.resolvedIgnoreLlm(new ChatSettings("other", "m2", null, null)));
+        }
     }
 
-    @Test
-    void disabledCompactionStillWinsOverIgnoreLlm() {
-        final var cfg = config(
-                128_000,
-                Map.of(
-                        "yca.compaction.mode", "no_llm",
-                        "yca.compaction.enabled", "false"));
-        final var manager = providerManager(cfg);
-        // resolvedIgnoreLlm still reports true, but compactNeeded is gated by enabled
-        assertTrue(manager.resolvedIgnoreLlm(new ChatSettings("default", "m", null, null)));
-        final var coordinator = coordinator(cfg, explodingChat(new AtomicInteger()), new AtomicInteger());
-        final var contextManager = new ContextManager(
-                cfg, new UsageTracker(providerManager(cfg), null, null, Clock.systemUTC()), coordinator);
-        final var messages = oldHeavyHistory();
-        assertFalse(contextManager.compactNeeded(messages), "enabled=false wins: no compaction at all");
+    public static class AbsentPerProviderBlockInheritsGlobalModule extends ConfigurationTestModule {
+        public AbsentPerProviderBlockInheritsGlobalModule() {
+            super(configSettings(
+                    128_000,
+                    Map.of(
+                            "yca.compaction.mode", "no_llm",
+                            "yca.provider.providers.1.compaction.retriesMaxAttempts", "5")));
+        }
+    }
+
+    @Nested
+    @FusionSupport(modules = PerProviderFalseOptsOutOfGlobalTrueModule.class)
+    class PerProviderFalseOptsOutOfGlobalTrue {
+        @Test
+        void perProviderFalseOptsOutOfGlobalTrue(@Fusion final CodingAgentConfiguration configuration) {
+            final var cfg = configuration;
+            final var manager = providerManager(cfg);
+            // the enum makes the explicit opt-out expressible: this provider goes back to the LLM path
+            assertFalse(manager.resolvedIgnoreLlm(new ChatSettings("other", "m2", null, null)));
+        }
+    }
+
+    public static class PerProviderFalseOptsOutOfGlobalTrueModule extends ConfigurationTestModule {
+        public PerProviderFalseOptsOutOfGlobalTrueModule() {
+            super(configSettings(
+                    128_000,
+                    Map.of(
+                            "yca.compaction.mode", "no_llm",
+                            "yca.provider.providers.1.compaction.mode", "llm")));
+        }
+    }
+
+    @Nested
+    @FusionSupport(modules = DisabledCompactionStillWinsOverIgnoreLlmModule.class)
+    class DisabledCompactionStillWinsOverIgnoreLlm {
+        @Test
+        void disabledCompactionStillWinsOverIgnoreLlm(@Fusion final CodingAgentConfiguration configuration) {
+            final var cfg = configuration;
+            final var manager = providerManager(cfg);
+            // resolvedIgnoreLlm still reports true, but compactNeeded is gated by enabled
+            assertTrue(manager.resolvedIgnoreLlm(new ChatSettings("default", "m", null, null)));
+            final var coordinator = coordinator(cfg, explodingChat(new AtomicInteger()), new AtomicInteger());
+            final var contextManager = new ContextManager(
+                    cfg, new UsageTracker(providerManager(cfg), null, null, Clock.systemUTC()), coordinator);
+            final var messages = oldHeavyHistory();
+            assertFalse(contextManager.compactNeeded(messages), "enabled=false wins: no compaction at all");
+        }
+    }
+
+    public static class DisabledCompactionStillWinsOverIgnoreLlmModule extends ConfigurationTestModule {
+        public DisabledCompactionStillWinsOverIgnoreLlmModule() {
+            super(configSettings(
+                    128_000,
+                    Map.of(
+                            "yca.compaction.mode", "no_llm",
+                            "yca.compaction.enabled", "false")));
+        }
     }
 }

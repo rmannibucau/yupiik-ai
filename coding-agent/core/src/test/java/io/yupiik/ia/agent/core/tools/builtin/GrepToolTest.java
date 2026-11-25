@@ -18,6 +18,7 @@ package io.yupiik.ia.agent.core.tools.builtin;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import io.yupiik.ia.agent.core.sandbox.DisabledSandbox;
 import io.yupiik.ia.agent.core.tools.ToolContext;
 import java.io.IOException;
 import java.nio.file.FileSystems;
@@ -44,7 +45,9 @@ class GrepToolTest {
         write(root.resolve(".yca/generated/graph/wiring.json"), "needle here\n");
         write(root.resolve("target/Class.class"), "needle here\n");
 
-        final var out = tool.execute(Map.of("pattern", "needle", "path", root.toString()), ToolContext.empty(root))
+        final var out = tool.execute(
+                        Map.of("pattern", "needle", "path", root.toString()),
+                        ToolContext.empty(root, new DisabledSandbox(root)))
                 .output();
 
         assertTrue(out.contains("App.java"));
@@ -59,7 +62,8 @@ class GrepToolTest {
             write(root.resolve("F" + i + ".txt"), "hit\n");
         }
         final var out = tool.execute(
-                        Map.of("pattern", "hit", "path", root.toString(), "maxResults", "3"), ToolContext.empty(root))
+                        Map.of("pattern", "hit", "path", root.toString(), "maxResults", "3"),
+                        ToolContext.empty(root, new DisabledSandbox(root)))
                 .output();
         assertTrue(out.contains("3 match(es)"), out);
         assertTrue(out.contains("results capped at 3"), out);
@@ -80,7 +84,9 @@ class GrepToolTest {
         Files.setPosixFilePermissions(locked, PosixFilePermissions.fromString("---------"));
         write(root.resolve("ok/App.java"), "needle here\n");
 
-        final var out = tool.execute(Map.of("pattern", "needle", "path", root.toString()), ToolContext.empty(root))
+        final var out = tool.execute(
+                        Map.of("pattern", "needle", "path", root.toString()),
+                        ToolContext.empty(root, new DisabledSandbox(root)))
                 .output();
 
         assertTrue(out.contains("App.java"), "the walk must continue past an unreadable dir:\n" + out);
@@ -92,7 +98,9 @@ class GrepToolTest {
         write(projectDir.resolve("src/App.java"), "needle here\n");
         write(projectDir.resolve("src/Other.java"), "nothing\n");
         // relative "src" must be rooted on the session projectDir, not the JVM working directory
-        final var out = tool.execute(Map.of("pattern", "needle", "path", "src"), ToolContext.empty(projectDir))
+        final var out = tool.execute(
+                        Map.of("pattern", "needle", "path", "src"),
+                        ToolContext.empty(projectDir, new DisabledSandbox(projectDir)))
                 .output();
         assertTrue(out.contains("App.java"), out);
         assertFalse(out.contains("Other.java"), out);
@@ -104,7 +112,8 @@ class GrepToolTest {
         write(root.resolve("Bar.java"), "void dispatch();\n");
 
         final var out = tool.execute(
-                        Map.of("pattern", "handleKey(|key(", "path", root.toString()), ToolContext.empty(root))
+                        Map.of("pattern", "handleKey(|key(", "path", root.toString()),
+                        ToolContext.empty(root, new DisabledSandbox(root)))
                 .output();
 
         assertTrue(out.contains("handleKey("), "the repaired pattern must actually match: " + out);
@@ -115,7 +124,9 @@ class GrepToolTest {
     void invalidPatternReturnsHelpfulErrorWithLiteralGuidance() throws IOException {
         write(root.resolve("a.txt"), "x\n");
 
-        final var out = tool.execute(Map.of("pattern", "(bad\\p{q}", "path", root.toString()), ToolContext.empty(root));
+        final var out = tool.execute(
+                Map.of("pattern", "(bad\\p{q}", "path", root.toString()),
+                ToolContext.empty(root, new DisabledSandbox(root)));
 
         assertFalse(out.success(), "an unrepairable pattern must error: " + out.output());
         assertTrue(out.output().contains("literal: true"), "the error must steer toward literal matching: " + out);
@@ -129,7 +140,7 @@ class GrepToolTest {
 
         final var out = tool.execute(
                         Map.of("pattern", "needle", "path", root.resolve("a") + " " + root.resolve("b")),
-                        ToolContext.empty(root))
+                        ToolContext.empty(root, new DisabledSandbox(root)))
                 .output();
 
         assertTrue(out.contains("One.java"), "first root must be searched:\n" + out);
@@ -148,7 +159,7 @@ class GrepToolTest {
                                 "needle",
                                 "path",
                                 root.resolve("README.adoc") + " " + root.resolve("src/main")),
-                        ToolContext.empty(root))
+                        ToolContext.empty(root, new DisabledSandbox(root)))
                 .output();
 
         assertTrue(out.contains("README.adoc"), "the file token must be searched:\n" + out);
@@ -166,7 +177,7 @@ class GrepToolTest {
                                 "needle",
                                 "path",
                                 root.resolve("my dir").toString()),
-                        ToolContext.empty(root))
+                        ToolContext.empty(root, new DisabledSandbox(root)))
                 .output();
         assertTrue(
                 dirOut.contains("App.java"),
@@ -178,7 +189,7 @@ class GrepToolTest {
                                 "needle",
                                 "path",
                                 root.resolve("my notes.txt").toString()),
-                        ToolContext.empty(root))
+                        ToolContext.empty(root, new DisabledSandbox(root)))
                 .output();
         assertTrue(
                 fileOut.contains("my notes.txt"),
@@ -189,7 +200,7 @@ class GrepToolTest {
     void missingRootsAreReportedPerRoot() {
         final var out = tool.execute(
                 Map.of("pattern", "needle", "path", root.resolve("nope1") + " " + root.resolve("nope2")),
-                ToolContext.empty(root));
+                ToolContext.empty(root, new DisabledSandbox(root)));
 
         assertFalse(out.success(), "missing roots must error rather than silently return no match: " + out.output());
         assertTrue(out.output().contains("nope1"), out.output());
@@ -209,7 +220,7 @@ class GrepToolTest {
                                 "pattern", "hit",
                                 "path", root.resolve("a") + " " + root.resolve("b"),
                                 "maxResults", "2"),
-                        ToolContext.empty(root))
+                        ToolContext.empty(root, new DisabledSandbox(root)))
                 .output();
 
         assertTrue(out.contains("2 match(es)"), out);
@@ -229,7 +240,7 @@ class GrepToolTest {
                                 List.of(
                                         root.resolve("a").toString(),
                                         root.resolve("b").toString())),
-                        ToolContext.empty(root))
+                        ToolContext.empty(root, new DisabledSandbox(root)))
                 .output();
 
         assertTrue(out.contains("One.java"), "first array element must be searched:\n" + out);

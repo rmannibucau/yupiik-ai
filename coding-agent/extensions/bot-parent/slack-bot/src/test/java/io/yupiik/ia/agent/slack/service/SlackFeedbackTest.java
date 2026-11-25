@@ -18,13 +18,17 @@ package io.yupiik.ia.agent.slack.service;
 import static io.yupiik.ia.agent.slack.support.SlackDomainFixture.task;
 import static org.junit.jupiter.api.Assertions.*;
 
+import io.yupiik.fusion.testing.Fusion;
+import io.yupiik.fusion.testing.FusionSupport;
 import io.yupiik.ia.agent.bot.feedback.FeedbackMailbox;
 import io.yupiik.ia.agent.core.question.Question;
+import io.yupiik.ia.agent.slack.configuration.SlackPrompts;
 import io.yupiik.ia.agent.slack.model.SlackJson;
 import io.yupiik.ia.agent.slack.model.SlackQuestion;
 import io.yupiik.ia.agent.slack.model.SlackQuestionItem;
 import io.yupiik.ia.agent.slack.model.SlackQuestionRequest;
 import io.yupiik.ia.agent.slack.model.TaskStatus;
+import io.yupiik.ia.agent.slack.support.SlackConfigurationTestModule;
 import io.yupiik.ia.agent.slack.support.SlackDomainFixture;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -36,7 +40,11 @@ import java.util.Optional;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+@FusionSupport(modules = SlackConfigurationTestModule.class)
 class SlackFeedbackTest {
+    @Fusion
+    private SlackPrompts baselinePrompts;
+
     private static final String NONCE = "12345678-1234-4234-8234-123456789abc";
 
     @TempDir
@@ -101,7 +109,10 @@ class SlackFeedbackTest {
                     .feedback(
                             new SlackQuestion(request, "waiting", "2.1", null, null), TaskStatus.waiting_for_user, 1));
             final var feedback = new SlackFeedback(
-                    fixture.channelMemberConfiguration(), SlackDomainFixture.prompts(), fixture.store, fixture.api);
+                    fixture.channelMemberConfiguration(),
+                    SlackDomainFixture.prompts(baselinePrompts),
+                    fixture.store,
+                    fixture.api);
             for (final var actor : List.of("U1", "U4", "UBOT", "B1", "U.*")) {
                 interact(fixture, feedback, action(actor, NONCE, "answer"));
                 interact(fixture, feedback, action(actor, NONCE, "cancel"));
@@ -238,7 +249,8 @@ class SlackFeedbackTest {
     }
 
     private SlackFeedback feedback(final SlackDomainFixture fixture) {
-        return new SlackFeedback(fixture.configuration, SlackDomainFixture.prompts(), fixture.store, fixture.api);
+        return new SlackFeedback(
+                fixture.configuration, SlackDomainFixture.prompts(baselinePrompts), fixture.store, fixture.api);
     }
 
     private void addQuestion(

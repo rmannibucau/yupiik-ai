@@ -82,6 +82,11 @@ public record CodingAgentConfiguration(
         @Property(documentation = "Tool permission settings.")
         PermissionsConfiguration permissions,
 
+        @Property(
+                documentation =
+                        "OS sandbox policy. Only trusted global configuration or CLI/environment/system settings may configure it. Use --sandbox true|false in any mode. See link:/yupiik-ai/coding-agent/sandboxing/overview.html[Sandboxing] and link:/yupiik-ai/coding-agent/sandboxing/helper.html[Sandbox helper] for installation, backend requirements and limitations.")
+        SandboxConfiguration sandbox,
+
         @Property(documentation = "MCP integration settings.")
         McpConfiguration mcp,
 

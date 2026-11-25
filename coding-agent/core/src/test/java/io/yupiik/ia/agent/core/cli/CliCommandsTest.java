@@ -20,9 +20,12 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import io.yupiik.fusion.testing.Fusion;
+import io.yupiik.fusion.testing.FusionSupport;
 import io.yupiik.ia.agent.core.agent.SubagentRegistry;
 import io.yupiik.ia.agent.core.agent.SubagentRegistry.SubagentResult;
-import io.yupiik.ia.agent.core.configuration.TestConfigs;
+import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
+import io.yupiik.ia.agent.core.configuration.ConfigurationTestModule;
 import io.yupiik.ia.agent.core.shell.ShellEnv;
 import io.yupiik.ia.agent.core.shell.ShellOutcome;
 import io.yupiik.ia.agent.core.shell.ShellSession;
@@ -34,9 +37,22 @@ import java.util.Map;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+@FusionSupport(modules = CliCommandsTest.SubagentsModule.class)
 class CliCommandsTest {
     @TempDir
-    Path storageHome;
+    static Path storageHome;
+
+    @Fusion
+    CodingAgentConfiguration configuration;
+
+    public static class SubagentsModule extends ConfigurationTestModule {
+        public SubagentsModule() {
+            super(Map.of(
+                    "yca.storageHome", storageHome.toString(),
+                    "yca.subagents.enabled", "true",
+                    "yca.llm.maxConcurrent", "-1"));
+        }
+    }
 
     @Test
     void listsNamesIdsAndStatusesOnlyForCurrentSession() {
@@ -139,12 +155,7 @@ class CliCommandsTest {
     }
 
     private SubagentRegistry registry() {
-        return new SubagentRegistry(
-                TestConfigs.codingAgent(Map.of(
-                        "yca.storageHome", storageHome.toString(),
-                        "yca.subagents.enabled", "true",
-                        "yca.llm.maxConcurrent", "-1")),
-                null);
+        return new SubagentRegistry(configuration, null);
     }
 
     private SlashCommand command(final SubagentRegistry registry) {

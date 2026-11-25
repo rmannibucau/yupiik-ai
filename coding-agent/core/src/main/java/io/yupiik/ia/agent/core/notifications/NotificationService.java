@@ -20,6 +20,7 @@ import static java.nio.charset.StandardCharsets.UTF_8;
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.NotificationsOnConfiguration;
+import io.yupiik.ia.agent.core.permissions.ApprovalGate;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.file.Files;
@@ -70,6 +71,7 @@ public class NotificationService {
     public static final String ENV_BODY = "YCA_NOTIFICATION_BODY";
     public static final String ENV_TYPE = "YCA_NOTIFICATION_TYPE";
     public static final String ENV_TOOL = "YCA_NOTIFICATION_TOOL";
+    public static final String ENV_ORIGIN = "YCA_NOTIFICATION_ORIGIN";
     public static final String ENV_SOURCE = "YCA_NOTIFICATION_SOURCE";
     public static final String ENV_TIMESTAMP = "YCA_NOTIFICATION_TIMESTAMP";
 
@@ -158,12 +160,17 @@ public class NotificationService {
                 "",
                 source,
                 "Input required: " + count + (count == 1 ? " question waiting." : " questions waiting.")
-                        + "\nReturn to YCA to answer.");
+                        + "\nReturn to YCA to answer.",
+                null);
     }
 
     /** Pending approval: only the tool label, never its arguments or permission details. */
     public void onApprovalRequired(
-            final String sessionId, final String sessionTitle, final String tool, final String source) {
+            final String sessionId,
+            final String sessionTitle,
+            final String tool,
+            final String source,
+            final ApprovalGate.Origin origin) {
         if (!enabled || !on.event().approval()) {
             return;
         }
@@ -174,7 +181,11 @@ public class NotificationService {
                 "approval_required",
                 label,
                 source,
-                "Approval required" + (label.isEmpty() ? "" : " for " + label) + ".\nReturn to YCA to review.");
+                (origin == ApprovalGate.Origin.SANDBOX
+                                ? "Sandbox approval required"
+                                : "Tool permission approval required")
+                        + (label.isEmpty() ? "" : " for " + label) + ".\nReturn to YCA to review.",
+                origin);
     }
 
     /** Clears existing session reminders in custom sinks, without creating a desktop popup. */
@@ -205,11 +216,12 @@ public class NotificationService {
             final String type,
             final String tool,
             final String source,
-            final String message) {
+            final String message,
+            final ApprovalGate.Origin origin) {
         final var title = label(sessionId, 64)
                 + (sessionTitle == null || sessionTitle.isBlank() ? "" : " - " + label(sessionTitle, 120));
         final var body = ("btw".equals(source) ? "/btw: " : "") + message;
-        final var env = Map.of(
+        final var env = new HashMap<>(Map.of(
                 ENV_SESSION,
                 nullToEmpty(sessionId),
                 ENV_TITLE,
@@ -227,7 +239,10 @@ public class NotificationService {
                 ENV_TOOL,
                 tool,
                 ENV_SOURCE,
-                "btw".equals(source) ? "btw" : "main");
+                "btw".equals(source) ? "btw" : "main"));
+        if (origin != null) {
+            env.put(ENV_ORIGIN, origin.name());
+        }
         deliver(sessionId, title, body, "dialog-warning", env);
     }
 

@@ -26,6 +26,7 @@ import io.yupiik.ia.agent.core.agent.AgentEvent.CompactionPass;
 import io.yupiik.ia.agent.core.context.CompactionResult.Mode;
 import io.yupiik.ia.agent.core.context.ContextMeasurement;
 import io.yupiik.ia.agent.core.llm.Usage;
+import io.yupiik.ia.agent.core.sandbox.DisabledSandbox;
 import io.yupiik.ia.agent.core.todo.TodoItem;
 import io.yupiik.ia.agent.core.tools.FileMutation;
 import io.yupiik.ia.agent.core.tools.ToolContext;
@@ -514,7 +515,9 @@ class AcpUpdatesTest {
         final var path = root.resolve("a.txt");
         Files.writeString(path, "\ufeffhead\r\nold\r\ntail\r\n");
         final var result = new EditFileTool()
-                .execute(Map.of("path", "a.txt", "oldString", "old", "newString", "new"), ToolContext.empty(root));
+                .execute(
+                        Map.of("path", "a.txt", "oldString", "old", "newString", "new"),
+                        ToolContext.empty(root, new DisabledSandbox(root)));
         assertTrue(result.success(), result.output());
         final var id = "externally-supplied:turn-5:child:9";
         try (final var f = new Fixture(Map.of())) {
@@ -604,14 +607,15 @@ class AcpUpdatesTest {
     @Test
     void failedMultiFilePatchKeepsOnlyCompletedMutations(@TempDir final Path root) throws IOException {
         Files.writeString(root.resolve("blocked"), "not a directory");
-        final var result = new ApplyPatchTool(null).execute(Map.of("patch", """
+        final var result = new ApplyPatchTool(null)
+                .execute(Map.of("patch", """
                 *** Begin Patch
                 *** Add File:done.txt
                 +done
                 *** Add File:blocked/fail.txt
                 +not written
                 *** End Patch
-                """), ToolContext.empty(root));
+                """), ToolContext.empty(root, new DisabledSandbox(root)));
         assertTrue(result.error());
         assertEquals(1, result.fileMutations().size());
         try (final var f = new Fixture(Map.of())) {

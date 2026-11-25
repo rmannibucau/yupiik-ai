@@ -35,6 +35,7 @@ For command-based tokens or credentials stored outside this file, see <<_custom_
 * <<_global_configuration,Generated global options>>
 * <<_json_schema,JSON Schema and download>>
 * xref:cli/index.adoc[CLI command directory]
+* xref:sandboxing/overview.adoc[Sandboxing] and xref:sandboxing/helper.adoc[Linux helper prerequisites]
 
 == Configuration precedence
 
@@ -47,6 +48,10 @@ The `yca` prefix may be omitted: `--provider-model` also works.
 . *System properties*: keys such as `yca.provider.model`.
 . *Environment variables*: keys such as `YCA_PROVIDER_MODEL`.
 Dots and hyphens become underscores, and letters become uppercase.
+
+IMPORTANT: Sandbox policy is a trusted-configuration exception to ordinary project precedence.
+Project-local `sandbox`/`yca.sandbox` overrides are rejected, and a project file cannot discard trusted global sandbox settings with `$inherit: false` or by omitting inheritance.
+Use trusted global settings or `--sandbox true|false`; see xref:sandboxing/overview.adoc[Sandboxes and tool permissions] for prerequisites, initialization, configuration examples and enforcement limits.
 
 [mermaid]
 ....
@@ -81,7 +86,7 @@ For example, `"providers": []` resets the inherited providers.
 Omitting the array inherits the whole global list.
 
 Inheritance is single-level: `$inherit` in the global file is ignored.
-Without `$inherit`, or with `"$inherit": false`, the project file stands alone and the global file is not read.
+Without `$inherit`, or with `"$inherit": false`, ordinary settings use the project file alone; trusted global sandbox policy is still loaded and retained.
 
 NOTE: Many repositories ignore `.yca`; this repository ignores the root `/.yca/` directory.
 To share a project configuration, force-add it with `git add -f .yca/configuration.json` or narrow the ignore rule with `!.yca/configuration.json`.
@@ -97,7 +102,7 @@ The global file location is resolved in this order:
 
 A leading `~/` in the storage home expands to the user home.
 Use an absolute path for `yca.configuration.json`.
-A project-local file still replaces the selected global file unless it enables inheritance.
+A project-local file still replaces ordinary settings from the selected global file unless it enables inheritance; sandbox policy remains trusted-global only.
 
 === Startup housekeeping in sandboxes
 

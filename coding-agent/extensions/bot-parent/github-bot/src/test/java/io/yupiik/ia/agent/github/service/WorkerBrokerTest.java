@@ -20,11 +20,12 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 import com.sun.net.httpserver.HttpServer;
 import io.yupiik.fusion.json.JsonMapper;
+import io.yupiik.fusion.testing.Fusion;
+import io.yupiik.fusion.testing.FusionSupport;
 import io.yupiik.ia.agent.bot.runtime.DockerControlConfiguration;
 import io.yupiik.ia.agent.bot.runtime.admission.HostAdmissionConfiguration;
 import io.yupiik.ia.agent.bot.runtime.configuration.ExecutorConfiguration;
 import io.yupiik.ia.agent.bot.runtime.execution.DockerExecutionBackend;
-import io.yupiik.ia.agent.core.configuration.ConfigurationLoader;
 import io.yupiik.ia.agent.core.configuration.ProviderBudgetConfiguration;
 import io.yupiik.ia.agent.github.client.DiscussionClient;
 import io.yupiik.ia.agent.github.client.GitHubClient;
@@ -32,7 +33,9 @@ import io.yupiik.ia.agent.github.command.WorkerCommand.Options;
 import io.yupiik.ia.agent.github.configuration.ContextConfiguration;
 import io.yupiik.ia.agent.github.configuration.FixConfiguration;
 import io.yupiik.ia.agent.github.configuration.GithubBotConfiguration;
+import io.yupiik.ia.agent.github.configuration.GithubExecutorConfiguration;
 import io.yupiik.ia.agent.github.configuration.PromptConfiguration;
+import io.yupiik.ia.agent.github.configuration.ReviewPresentationConfiguration;
 import io.yupiik.ia.agent.github.configuration.WorkerOptions;
 import io.yupiik.ia.agent.github.context.GithubContextSnapshot;
 import io.yupiik.ia.agent.github.context.GithubPrivateContext;
@@ -42,6 +45,7 @@ import io.yupiik.ia.agent.github.model.TaskState;
 import io.yupiik.ia.agent.github.store.TaskStore;
 import io.yupiik.ia.agent.github.support.BotJsonMapper;
 import io.yupiik.ia.agent.github.support.BotTestConfiguration;
+import io.yupiik.ia.agent.github.support.GithubConfigurationTestModule;
 import io.yupiik.ia.agent.github.support.TaskFixtures;
 import io.yupiik.ia.agent.github.support.TestScript;
 import java.net.InetSocketAddress;
@@ -51,22 +55,50 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.time.Duration;
-import java.util.LinkedHashMap;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.CopyOnWriteArrayList;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.api.parallel.Execution;
+import org.junit.jupiter.api.parallel.ExecutionMode;
 
+@Execution(ExecutionMode.SAME_THREAD) // The class owns one stable configuration and its fixture paths/transport.
+@FusionSupport(modules = WorkerBrokerTest.Source.class)
 class WorkerBrokerTest {
+    @Fusion
+    private Options injectedOptions;
+
+    @Fusion
+    private GithubExecutorConfiguration injectedExecutor;
+
+    @Fusion
+    private PromptConfiguration injectedPrompts;
+
+    @Fusion
+    private ReviewPresentationConfiguration injectedPresentation;
+
     private static final String HEAD = "a".repeat(40);
 
     @TempDir
-    Path home;
+    static Path home;
 
     @TempDir
-    Path attempts;
+    static Path attempts;
+
+    @BeforeEach
+    void resetState() throws Exception {
+        try (final var paths = Files.walk(home)) {
+            for (final var path : paths.sorted(Comparator.reverseOrder()).toList()) {
+                if (!path.equals(home)) {
+                    Files.delete(path);
+                }
+            }
+        }
+    }
 
     @Test
     void brokerRejectsAgentCommentingAndMixedStagingBeforeExecution() throws Exception {
@@ -119,10 +151,7 @@ class WorkerBrokerTest {
     @Test
     void brokerSolveAndFixStageMetadataWithoutTreeOrBlobRequests() throws Exception {
         try (final var fixture = new Fixture()) {
-            final var preparation = new AttemptPreparation(
-                    fixture.json,
-                    ConfigurationLoader.load(PromptConfiguration.class, key -> Optional.empty()),
-                    fixture.backend);
+            final var preparation = new AttemptPreparation(fixture.json, injectedPrompts, fixture.backend);
             final var source = new GithubPrivateContext(fixture.github, fixture.json);
             final var solve = preparation.prepare(home.resolve("agent-configuration.json"), home.resolve("attempts"));
             final var fix = preparation.prepare(home.resolve("agent-configuration.json"), home.resolve("attempts"));
@@ -163,10 +192,7 @@ class WorkerBrokerTest {
                 ((Number) Files.getAttribute(home, "unix:uid")).intValue() != 0,
                 "The production Docker dispatcher intentionally refuses root");
         try (final var fixture = new Fixture()) {
-            final var attempt = new AttemptPreparation(
-                            fixture.json,
-                            ConfigurationLoader.load(PromptConfiguration.class, key -> Optional.empty()),
-                            fixture.backend)
+            final var attempt = new AttemptPreparation(fixture.json, injectedPrompts, fixture.backend)
                     .prepare(home.resolve("agent-configuration.json"), home.resolve("attempts"));
             try {
                 final var executable = home.resolve("environment-docker");
@@ -223,12 +249,19 @@ class WorkerBrokerTest {
     }
 
     private WorkerOptions options(final Map<String, String> overrides) {
-        final var values = new LinkedHashMap<String, String>();
-        values.put("worker.source.mode", "broker");
-        values.put("worker.agentCommenting", "false");
-        values.putAll(overrides);
-        return ConfigurationLoader.load(Options.class, key -> Optional.ofNullable(values.get(key)))
-                .worker();
+        final var baseline = injectedOptions.worker();
+        return new WorkerOptions(
+                baseline.maxRetries(),
+                baseline.parallelism(),
+                baseline.agentConfiguration(),
+                baseline.forkOwner(),
+                Boolean.parseBoolean(overrides.getOrDefault("worker.agentCommenting", "false")),
+                baseline.provisionFork(),
+                overrides.getOrDefault("worker.cacheRoot", baseline.cacheRoot()),
+                baseline.cacheGit(),
+                Boolean.parseBoolean(overrides.getOrDefault("worker.privateSource", "false")),
+                baseline.source(),
+                baseline.dependencyCache());
     }
 
     private final class Fixture implements AutoCloseable {
@@ -248,19 +281,7 @@ class WorkerBrokerTest {
                     home.resolve("fake-docker"),
                     "#!/bin/sh\nprintf '%s\\n' \"$@\" >> '" + invocations + "'\nexit 97\n");
             Files.setPosixFilePermissions(executable, PosixFilePermissions.fromString("rwx------"));
-            final var settings = Map.of(
-                    "github.executor.docker.executable",
-                    executable.toString(),
-                    "github.executor.docker.image",
-                    "trusted-agent",
-                    "github.executor.timeoutSeconds",
-                    "5",
-                    "github.executor.attemptRoot",
-                    attempts.toString());
-            backend = ConfigurationLoader.load(
-                            io.yupiik.ia.agent.github.configuration.GithubExecutorConfiguration.class,
-                            key -> Optional.ofNullable(settings.get(key)))
-                    .shared();
+            backend = injectedExecutor.shared();
             server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
             server.createContext("/", exchange -> {
                 calls.add(exchange.getRequestMethod() + " " + exchange.getRequestURI());
@@ -322,22 +343,11 @@ class WorkerBrokerTest {
                     backend,
                     BotTestConfiguration.audit(conf, json),
                     new TeamAuthorization(github, conf, BotTestConfiguration.CLOCK),
-                    new AttemptPreparation(
-                            json,
-                            ConfigurationLoader.load(
-                                    io.yupiik.ia.agent.github.configuration.PromptConfiguration.class,
-                                    key -> Optional.empty()),
-                            backend),
+                    new AttemptPreparation(json, injectedPrompts, backend),
                     new GithubPrivateContext(github, json),
                     new GithubContextSnapshot(github, json),
                     new ForkProvisioner(github, store),
-                    new ReviewPublisher(
-                            github,
-                            store,
-                            conf,
-                            ConfigurationLoader.load(
-                                    io.yupiik.ia.agent.github.configuration.ReviewPresentationConfiguration.class,
-                                    key -> Optional.empty())),
+                    new ReviewPublisher(github, store, conf, injectedPresentation),
                     new StrictSolvePublisher(github, store, json),
                     new DiscussionPublisher(new DiscussionClient(github), store, conf),
                     new ContextConfiguration(
@@ -363,6 +373,24 @@ class WorkerBrokerTest {
             github.close();
             server.stop(0);
             json.close();
+        }
+    }
+
+    public static class Source extends GithubConfigurationTestModule {
+        public Source() {
+            super(Map.of(
+                    "worker.source.mode",
+                    "broker",
+                    "worker.agentCommenting",
+                    "false",
+                    "github.executor.docker.executable",
+                    home.resolve("fake-docker").toString(),
+                    "github.executor.docker.image",
+                    "trusted-agent",
+                    "github.executor.timeoutSeconds",
+                    "5",
+                    "github.executor.attemptRoot",
+                    attempts.toString()));
         }
     }
 }

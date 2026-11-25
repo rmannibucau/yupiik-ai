@@ -46,7 +46,6 @@ import io.yupiik.ia.agent.core.todo.PlanFileService;
 import io.yupiik.ia.agent.core.todo.PlanTodoSeeder;
 import io.yupiik.ia.agent.core.todo.TodoItem;
 import io.yupiik.ia.agent.core.tools.ToolCategory;
-import io.yupiik.ia.agent.core.tools.ToolContext;
 import io.yupiik.ia.agent.core.tools.ToolRegistry;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import java.io.IOException;
@@ -1603,7 +1602,8 @@ public class AcpServer {
                                 runtime.feedback(),
                                 runtime.workdir(),
                                 runtime.loop().effectiveToolRegistry(),
-                                runtime.loop().availableToolNames())
+                                runtime.loop().availableToolNames(),
+                                runtime.sandbox())
                         .thenApply(answer -> ShellOutcome.transcript("\n\n**btw**\n\n" + answer.text() + "\n"));
             }
 
@@ -1690,7 +1690,7 @@ public class AcpServer {
                                 .defaultPath(Path.of(configuration.resolveStorageHome()), "plan", id)
                                 .toAbsolutePath()
                                 .normalize()
-                        : ToolContext.empty(runtime.workdir()).resolvePath(arg);
+                        : runtime.workdir().resolve(arg).normalize();
                 final var original = planFiles.render(
                         plan,
                         runtime.todos() == null ? List.of() : runtime.todos().all());
@@ -2182,7 +2182,13 @@ public class AcpServer {
 
             @Override
             public ApprovalGate approvalGate() {
-                return (title, detail, name, args) -> {
+                return request -> {
+                    final var title = (request.origin() == ApprovalGate.Origin.SANDBOX
+                                    ? "Sandbox restriction: "
+                                    : "Tool permission: ")
+                            + request.title();
+                    final var name = request.toolName();
+                    final var args = request.args();
                     if (!active
                             || cancelled.get()
                             || closed.get()

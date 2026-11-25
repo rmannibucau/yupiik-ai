@@ -16,6 +16,7 @@
 package io.yupiik.ia.agent.core.events;
 
 import io.yupiik.fusion.framework.build.api.json.JsonModel;
+import io.yupiik.ia.agent.core.permissions.ApprovalGate;
 import java.util.Map;
 
 /**
@@ -23,12 +24,13 @@ import java.util.Map;
  * {@link PermissionRequestedEvent} hook). Observe-only; a callback may print a {@code HookResponse} ack
  * (cosmetic) but cannot change the denial. Config key {@code yca.hooks.PermissionDenied}.
  */
-public record PermissionDeniedEvent(EventContext eventContext, String toolName, Map<String, Object> args, String reason)
+public record PermissionDeniedEvent(
+        EventContext eventContext, String toolName, Map<String, Object> args, String reason, ApprovalGate.Origin origin)
         implements YcaEvent {
 
     @Override
     public Object payload() {
-        return new Payload(eventContext, toolName, args, reason);
+        return new Payload(eventContext, toolName, args, reason, origin);
     }
 
     @Override
@@ -46,5 +48,10 @@ public record PermissionDeniedEvent(EventContext eventContext, String toolName, 
     }
 
     @JsonModel
-    public record Payload(EventContext eventContext, String toolName, Map<String, Object> args, String reason) {}
+    public record Payload(
+            EventContext eventContext,
+            String toolName,
+            Map<String, Object> args,
+            String reason,
+            ApprovalGate.Origin origin) {}
 }

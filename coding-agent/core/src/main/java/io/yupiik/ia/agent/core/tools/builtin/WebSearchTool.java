@@ -19,8 +19,12 @@ import static io.yupiik.ia.agent.core.tools.ToolArgs.arg;
 import static io.yupiik.ia.agent.core.tools.ToolArgs.optInt;
 
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
+import io.yupiik.fusion.httpclient.core.ExtendedHttpClient;
+import io.yupiik.fusion.httpclient.core.ExtendedHttpClientConfiguration;
+import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.mcp.WebSearchManager;
+import io.yupiik.ia.agent.core.sandbox.SandboxHttpTransport;
 import io.yupiik.ia.agent.core.tools.EmbeddedTool;
 import io.yupiik.ia.agent.core.tools.Schemas;
 import io.yupiik.ia.agent.core.tools.ToolCategory;
@@ -39,14 +43,19 @@ public class WebSearchTool implements EmbeddedTool {
     private final WebSearchManager manager;
     private final CodingAgentConfiguration configuration;
 
-    public WebSearchTool(final WebSearchManager manager, final CodingAgentConfiguration configuration) {
+    private final JsonMapper mapper;
+
+    public WebSearchTool(
+            final WebSearchManager manager, final CodingAgentConfiguration configuration, final JsonMapper mapper) {
         this.manager = manager;
         this.configuration = configuration;
+        this.mapper = mapper;
     }
 
     protected WebSearchTool() {
         this.manager = null;
         this.configuration = null;
+        this.mapper = null;
     }
 
     @Override
@@ -98,10 +107,44 @@ public class WebSearchTool implements EmbeddedTool {
         final var numResults = (int) Math.max(
                 1, optInt(args, "num_results", configuration.tools().websearch().numResults()));
         try {
-            final var results = manager.search(query, numResults);
+            final List<WebSearchManager.WebSearchResult> results;
+            if (context.sandbox().enabled()) {
+                // Never reuse ambient provider clients or sessions across sandbox boundaries.
+                try (final var transport = new SandboxHttpTransport(
+                                context.sandbox(),
+                                () -> context.isCancelled() || context.isCallCancelled(),
+                                2_000_000);
+                        final var client =
+                                new ExtendedHttpClient(new ExtendedHttpClientConfiguration().setDelegate(transport));
+                        final var scoped = new SearchSession(new WebSearchManager(mapper, configuration, client))) {
+                    try {
+                        results = scoped.manager.search(query, numResults);
+                    } catch (final Exception error) {
+                        transport.throwIfDenied();
+                        throw error;
+                    }
+                }
+            } else {
+                results = manager.search(query, numResults);
+            }
             return ToolResult.ok(results.isEmpty() ? NO_RESULTS : format(results));
+        } catch (final InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return ToolResult.error("Web search interrupted");
         } catch (final Exception e) {
+            for (Throwable cause = e; cause != null; cause = cause.getCause()) {
+                if (cause instanceof SecurityException) {
+                    return ToolResult.error("Sandbox restriction: " + cause.getMessage());
+                }
+            }
             return ToolResult.error("Web search failed: " + e.getMessage());
+        }
+    }
+
+    private record SearchSession(WebSearchManager manager) implements AutoCloseable {
+        @Override
+        public void close() {
+            manager.close();
         }
     }
 

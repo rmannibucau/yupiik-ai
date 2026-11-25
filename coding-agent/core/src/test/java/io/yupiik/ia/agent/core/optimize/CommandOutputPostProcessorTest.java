@@ -19,6 +19,9 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import io.yupiik.fusion.testing.Fusion;
+import io.yupiik.fusion.testing.FusionSupport;
+import io.yupiik.ia.agent.core.configuration.ConfigurationTestModule;
 import io.yupiik.ia.agent.core.configuration.OptimizeConfiguration;
 import java.util.List;
 import java.util.Optional;
@@ -26,6 +29,7 @@ import java.util.Set;
 import org.junit.jupiter.api.Test;
 
 /** Tests for the injected {@link CommandOutputPostProcessor} command-matching/output service. */
+@FusionSupport(modules = ConfigurationTestModule.class)
 class CommandOutputPostProcessorTest {
     private final CommandOutputPostProcessor service = new CommandOutputPostProcessor();
 
@@ -184,9 +188,10 @@ class CommandOutputPostProcessorTest {
     }
 
     @Test
-    void processorsDeclareCommandSpellings() {
-        assertEquals(Set.of("mvn", "mvnd", "mvnw"), new MavenOutputProcessor().names());
-        assertEquals(Set.of("gradle", "gradlew"), new GradleOutputProcessor().names());
+    void processorsDeclareCommandSpellings(
+            @Fusion final MavenOutputProcessor maven, @Fusion final GradleOutputProcessor gradle) {
+        assertEquals(Set.of("mvn", "mvnd", "mvnw"), maven.names());
+        assertEquals(Set.of("gradle", "gradlew"), gradle.names());
         assertEquals(Set.of("git"), new GitOutputProcessor().names());
         assertEquals(Set.of("gh"), new GhOutputProcessor().names());
         assertEquals(Set.of("npm", "pnpm", "yarn", "bun"), new NpmOutputProcessor().names());

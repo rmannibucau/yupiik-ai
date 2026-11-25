@@ -46,6 +46,9 @@ class StdioTest {
             command.add(CliLauncher.class.getName());
             command.addAll(List.of(
                     "acp",
+                    // Exercise protocol stdout routing independently of OS sandbox policy.
+                    "--sandbox",
+                    "false",
                     "--yca-storageHome",
                     tmp.resolve("store").toString(),
                     "--yca-home",

@@ -28,7 +28,6 @@ import io.yupiik.ia.agent.core.llm.ChatClient;
 import io.yupiik.ia.agent.core.optimize.AfterToolExecutionEvent;
 import io.yupiik.ia.agent.core.runtime.StatusReporter;
 import io.yupiik.ia.agent.core.tools.FileIgnore;
-import io.yupiik.ia.agent.core.tools.ToolContext;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import java.io.IOException;
 import java.io.UncheckedIOException;
@@ -938,10 +937,10 @@ public class StructuralCodeGraph implements AutoCloseable {
             return;
         }
         final var paths = extractPaths(event.tool(), event.args());
-        final var context = ToolContext.empty(event.workdir());
+        final var root = event.workdir();
         for (final var path : paths) {
             if (path != null && !path.isBlank()) {
-                enqueueRefresh(context.resolvePath(path));
+                enqueueRefresh(root.resolve(path).normalize());
             }
         }
     }

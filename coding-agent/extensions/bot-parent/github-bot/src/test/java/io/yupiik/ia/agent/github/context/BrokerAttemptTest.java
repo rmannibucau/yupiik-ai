@@ -19,7 +19,8 @@ import static org.junit.jupiter.api.Assertions.*;
 
 import com.sun.net.httpserver.HttpServer;
 import io.yupiik.fusion.json.JsonMapper;
-import io.yupiik.ia.agent.core.configuration.ConfigurationLoader;
+import io.yupiik.fusion.testing.Fusion;
+import io.yupiik.fusion.testing.FusionSupport;
 import io.yupiik.ia.agent.github.client.GitHubClient;
 import io.yupiik.ia.agent.github.configuration.ContextConfiguration;
 import io.yupiik.ia.agent.github.configuration.GithubExecutorConfiguration;
@@ -29,6 +30,7 @@ import io.yupiik.ia.agent.github.execution.AttemptPreparation;
 import io.yupiik.ia.agent.github.model.TaskDocument;
 import io.yupiik.ia.agent.github.support.BotJsonMapper;
 import io.yupiik.ia.agent.github.support.BotTestConfiguration;
+import io.yupiik.ia.agent.github.support.GithubConfigurationTestModule;
 import io.yupiik.ia.agent.github.support.TaskFixtures;
 import java.io.IOException;
 import java.net.InetSocketAddress;
@@ -52,7 +54,14 @@ import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+@FusionSupport(modules = GithubConfigurationTestModule.class)
 class BrokerAttemptTest {
+    @Fusion
+    private PromptConfiguration prompts;
+
+    @Fusion
+    private GithubExecutorConfiguration executorRoot;
+
     private static final WorkerOptions.Source SOURCE =
             new WorkerOptions.Source(WorkerOptions.SourceMode.broker, "", 1000, 536870912L, 120);
     private static final String HEAD = "a".repeat(40);
@@ -92,11 +101,7 @@ class BrokerAttemptTest {
                 assertNotEquals(
                         broker.credentials().get("YCA_CONTEXT_TOKEN"),
                         broker.credentials().get("YCA_CONTEXT_GIT_TOKEN"));
-                new AttemptPreparation(
-                                fixture.json,
-                                ConfigurationLoader.load(PromptConfiguration.class, key -> Optional.empty()),
-                                ConfigurationLoader.load(GithubExecutorConfiguration.class, key -> Optional.empty())
-                                        .shared())
+                new AttemptPreparation(fixture.json, prompts, executorRoot.shared())
                         .stageBroker(
                                 fixture.attempt,
                                 broker.endpoint(),
@@ -351,15 +356,7 @@ class BrokerAttemptTest {
         private Fixture() throws Exception {
             Files.writeString(git, "#!/bin/sh\nprintf 'unexpected git call\\n' >> '" + gitCalls + "'\nexit 97\n");
             Files.setPosixFilePermissions(git, PosixFilePermissions.fromString("rwx------"));
-            attempt = new AttemptPreparation(
-                            json,
-                            ConfigurationLoader.load(
-                                    io.yupiik.ia.agent.github.configuration.PromptConfiguration.class,
-                                    key -> Optional.empty()),
-                            ConfigurationLoader.load(
-                                            io.yupiik.ia.agent.github.configuration.GithubExecutorConfiguration.class,
-                                            key -> Optional.empty())
-                                    .shared())
+            attempt = new AttemptPreparation(json, prompts, executorRoot.shared())
                     .prepare(Files.writeString(home.resolve("trusted.json"), "{}"), home.resolve("attempts"));
             server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
             server.createContext("/", exchange -> {

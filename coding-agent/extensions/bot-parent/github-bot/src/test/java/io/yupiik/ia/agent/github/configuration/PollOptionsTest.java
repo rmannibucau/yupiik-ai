@@ -17,36 +17,57 @@ package io.yupiik.ia.agent.github.configuration;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-import io.yupiik.ia.agent.core.configuration.ConfigurationLoader;
+import io.yupiik.fusion.testing.Fusion;
+import io.yupiik.fusion.testing.FusionSupport;
 import io.yupiik.ia.agent.github.command.PollCommand.Options;
+import io.yupiik.ia.agent.github.support.GithubConfigurationTestModule;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
+import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 
 class PollOptionsTest {
-    @Test
-    void searchIsEnabledWithHourlyReconciliationByDefault() {
-        final var options = ConfigurationLoader.load(Options.class, ignored -> Optional.empty())
-                .poll();
-        assertTrue(options.search().enabled());
-        assertEquals(3600, options.search().reconciliationIntervalSeconds());
-        assertEquals(4, options.parallelism());
-        assertFalse(options.reviews().enabled());
-        assertFalse(options.discussions().enabled());
+    @Nested
+    @FusionSupport(modules = DefaultsModule.class)
+    class Defaults {
+        @Test
+        void bindsConfiguration(@Fusion final Options root) {
+            final var options = root.poll();
+            assertTrue(options.search().enabled());
+            assertEquals(3600, options.search().reconciliationIntervalSeconds());
+            assertEquals(4, options.parallelism());
+            assertFalse(options.reviews().enabled());
+            assertFalse(options.discussions().enabled());
+        }
     }
 
-    @Test
-    void bindsSearchOverridesAndValidatesTheReconciliationBounds() {
-        final var values = Map.of("poll.search.enabled", "false", "poll.search.reconciliationIntervalSeconds", "17");
-        final var options = ConfigurationLoader.load(Options.class, key -> Optional.ofNullable(values.get(key)))
-                .poll();
-        assertFalse(options.search().enabled());
-        assertEquals(17, options.search().reconciliationIntervalSeconds());
-        for (final var seconds : List.of(Integer.MIN_VALUE, -1, 0, 604801, Integer.MAX_VALUE)) {
-            assertThrows(IllegalArgumentException.class, () -> new PollOptions.Search(true, seconds));
+    public static class DefaultsModule extends GithubConfigurationTestModule {
+        public DefaultsModule() {
+            super(Map.of());
         }
-        assertEquals(1, new PollOptions.Search(true, 1).reconciliationIntervalSeconds());
-        assertEquals(604800, new PollOptions.Search(false, 604800).reconciliationIntervalSeconds());
+    }
+
+    @Nested
+    @FusionSupport(modules = SearchOverridesModule.class)
+    class SearchOverrides {
+        @Test
+        void bindsConfiguration(@Fusion final Options root) {
+            final var options = root.poll();
+            assertFalse(options.search().enabled());
+            assertEquals(17, options.search().reconciliationIntervalSeconds());
+            for (final var seconds : List.of(Integer.MIN_VALUE, -1, 0, 604801, Integer.MAX_VALUE)) {
+                assertThrows(IllegalArgumentException.class, () -> new PollOptions.Search(true, seconds));
+            }
+            assertEquals(1, new PollOptions.Search(true, 1).reconciliationIntervalSeconds());
+            assertEquals(604800, new PollOptions.Search(false, 604800).reconciliationIntervalSeconds());
+        }
+    }
+
+    public static class SearchOverridesModule extends GithubConfigurationTestModule {
+        public SearchOverridesModule() {
+            super(Map.ofEntries(
+                    Map.entry("poll.search.enabled", "false"),
+                    Map.entry("poll.search.reconciliationIntervalSeconds", "17")));
+        }
     }
 }

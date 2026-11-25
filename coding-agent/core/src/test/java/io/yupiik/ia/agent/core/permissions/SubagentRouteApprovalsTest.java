@@ -34,7 +34,7 @@ class SubagentRouteApprovalsTest {
         final var entered = new CountDownLatch(1);
         final var release = new CountDownLatch(1);
         final var prompts = new AtomicInteger();
-        final ApprovalGate gate = (title, detail, tool, args) -> {
+        final ApprovalGate gate = request -> {
             prompts.incrementAndGet();
             entered.countDown();
             try {
@@ -72,7 +72,7 @@ class SubagentRouteApprovalsTest {
                 final var pending = executor.submit(() -> approvals.approve(
                         "$private/main",
                         "$external/model",
-                        (title, detail, tool, args) -> {
+                        request -> {
                             entered.countDown();
                             try {
                                 assertTrue(release.await(5, TimeUnit.SECONDS));

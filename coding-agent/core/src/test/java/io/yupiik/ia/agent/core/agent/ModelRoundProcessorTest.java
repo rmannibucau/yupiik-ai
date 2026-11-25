@@ -20,9 +20,10 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import io.yupiik.fusion.testing.Fusion;
+import io.yupiik.fusion.testing.FusionSupport;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
-import io.yupiik.ia.agent.core.configuration.CodingAgentConfigurations;
-import io.yupiik.ia.agent.core.configuration.TestConfigs;
+import io.yupiik.ia.agent.core.configuration.ConfigurationTestModule;
 import io.yupiik.ia.agent.core.llm.ChatClient;
 import io.yupiik.ia.agent.core.llm.ChatCompletionRequest;
 import io.yupiik.ia.agent.core.llm.Message;
@@ -42,6 +43,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
+import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -51,58 +53,59 @@ import org.junit.jupiter.api.Test;
  */
 class ModelRoundProcessorTest {
 
-    @Test
-    void flagCancellationDuringBackoffStopsWithoutAnotherAttempt() throws Exception {
-        final var cancelled = new AtomicBoolean();
-        final var sleeping = new CountDownLatch(1);
-        final var clientCalls = new AtomicInteger();
-        final var chatClient = new ChatClient() {
-            @Override
-            public Message stream(
-                    final ChatCompletionRequest request,
-                    final Consumer<PauseEvent> pauseListener,
-                    final Consumer<LlmStreamEvent> onDelta,
-                    final BooleanSupplier cancellation)
-                    throws IOException {
-                clientCalls.incrementAndGet();
-                throw new IOException("transport failure");
-            }
-        };
-        final var configuration = TestConfigs.codingAgent(Map.of(
-                "yca.llm.streamRetriesMaxAttempts", "2",
-                "yca.llm.retriesBaseDelayMs", "30000",
-                "yca.llm.retryAfterMaxWaitMs", "30000"));
-        // The second clock read is inside the sleep loop, after the initial flag check.
-        final var reads = new AtomicInteger();
-        final var clock = new PrecisionDurationMarkerProvider() {
-            @Override
-            public long now() {
-                if (reads.incrementAndGet() >= 2) {
-                    sleeping.countDown();
+    @Nested
+    @FusionSupport(modules = CancellationModule.class)
+    class Cancellation {
+        @Test
+        void flagCancellationDuringBackoffStopsWithoutAnotherAttempt(
+                @Fusion final CodingAgentConfiguration configuration) throws Exception {
+            final var cancelled = new AtomicBoolean();
+            final var sleeping = new CountDownLatch(1);
+            final var clientCalls = new AtomicInteger();
+            final var chatClient = new ChatClient() {
+                @Override
+                public Message stream(
+                        final ChatCompletionRequest request,
+                        final Consumer<PauseEvent> pauseListener,
+                        final Consumer<LlmStreamEvent> onDelta,
+                        final BooleanSupplier cancellation)
+                        throws IOException {
+                    clientCalls.incrementAndGet();
+                    throw new IOException("transport failure");
                 }
-                return System.nanoTime();
+            };
+            // The second clock read is inside the sleep loop, after the initial flag check.
+            final var reads = new AtomicInteger();
+            final var clock = new PrecisionDurationMarkerProvider() {
+                @Override
+                public long now() {
+                    if (reads.incrementAndGet() >= 2) {
+                        sleeping.countDown();
+                    }
+                    return System.nanoTime();
+                }
+            };
+            final var observer = new RecordingObserver();
+            final var processor = new ModelRoundProcessor(chatClient, configuration, clock);
+            final var result = CompletableFuture.supplyAsync(() -> assertThrows(
+                    IOException.class,
+                    () -> processor.stream(
+                            new ChatCompletionRequest("m", List.of(), null, null, null, null, "auto", null, null, null),
+                            new Usage[] {Usage.EMPTY},
+                            cancelled::get,
+                            pause -> {},
+                            delta -> {},
+                            observer)));
+            try {
+                assertTrue(sleeping.await(5, TimeUnit.SECONDS));
+                assertFalse(result.isDone());
+                cancelled.set(true);
+                assertEquals("Cancelled", result.get(2, TimeUnit.SECONDS).getMessage());
+                assertEquals(1, clientCalls.get());
+                assertEquals(30000, observer.pausedMs);
+            } finally {
+                cancelled.set(true);
             }
-        };
-        final var observer = new RecordingObserver();
-        final var processor = new ModelRoundProcessor(chatClient, configuration, clock);
-        final var result = CompletableFuture.supplyAsync(() -> assertThrows(
-                IOException.class,
-                () -> processor.stream(
-                        new ChatCompletionRequest("m", List.of(), null, null, null, null, "auto", null, null, null),
-                        new Usage[] {Usage.EMPTY},
-                        cancelled::get,
-                        pause -> {},
-                        delta -> {},
-                        observer)));
-        try {
-            assertTrue(sleeping.await(5, TimeUnit.SECONDS));
-            assertFalse(result.isDone());
-            cancelled.set(true);
-            assertEquals("Cancelled", result.get(2, TimeUnit.SECONDS).getMessage());
-            assertEquals(1, clientCalls.get());
-            assertEquals(30000, observer.pausedMs);
-        } finally {
-            cancelled.set(true);
         }
     }
 
@@ -152,132 +155,153 @@ class ModelRoundProcessorTest {
         }
     }
 
-    @Test
-    void pairing400ShortCircuitsOnFirstAttemptAndFiresRejectedCallback() throws Exception {
-        final var clientCalls = new AtomicInteger();
-        final var chatClient = new ChatClient() {
-            @Override
-            public Message stream(
-                    final ChatCompletionRequest r,
-                    final Consumer<PauseEvent> pauseListener,
-                    final Consumer<LlmStreamEvent> onDelta,
-                    final BooleanSupplier cancelled)
-                    throws IOException {
-                clientCalls.incrementAndGet();
-                throw new LlmHttpFailureException(400, PAIRING_BODY, null);
-            }
-        };
-        final var processor = new ModelRoundProcessor(chatClient, config(2), new PrecisionDurationMarkerProvider());
-        final var observer = new RecordingObserver();
+    @Nested
+    @FusionSupport(modules = RetryModule.class)
+    class Retries {
+        @Test
+        void pairing400ShortCircuitsOnFirstAttemptAndFiresRejectedCallback(
+                @Fusion final CodingAgentConfiguration configuration) throws Exception {
+            final var clientCalls = new AtomicInteger();
+            final var chatClient = new ChatClient() {
+                @Override
+                public Message stream(
+                        final ChatCompletionRequest r,
+                        final Consumer<PauseEvent> pauseListener,
+                        final Consumer<LlmStreamEvent> onDelta,
+                        final BooleanSupplier cancelled)
+                        throws IOException {
+                    clientCalls.incrementAndGet();
+                    throw new LlmHttpFailureException(400, PAIRING_BODY, null);
+                }
+            };
+            final var processor =
+                    new ModelRoundProcessor(chatClient, configuration, new PrecisionDurationMarkerProvider());
+            final var observer = new RecordingObserver();
 
-        assertThrows(
-                LlmHttpFailureException.class,
-                () -> processor.stream(
-                        new ChatCompletionRequest("m", List.of(), null, null, null, null, "auto", null, null, null),
-                        new Usage[] {Usage.EMPTY},
-                        () -> false,
-                        pause -> {},
-                        delta -> {},
-                        observer));
+            assertThrows(
+                    LlmHttpFailureException.class,
+                    () -> processor.stream(
+                            new ChatCompletionRequest("m", List.of(), null, null, null, null, "auto", null, null, null),
+                            new Usage[] {Usage.EMPTY},
+                            () -> false,
+                            pause -> {},
+                            delta -> {},
+                            observer));
 
-        // the pairing 400 must surface as-is so the caller (AgentLoop) can repair the history first.
-        assertEquals(1, clientCalls.get(), "the broken history must not be re-sent (no retry storm)");
-        assertTrue(observer.calls.contains("toolCallPairingRejected"), "observer must be told about the pairing 400");
-        assertTrue(
-                observer.calls.contains("begin") && observer.calls.contains("toolCallPairingRejected"),
-                "begin + rejection fired: " + observer.calls);
-        assertTrue(
-                !observer.calls.contains("retrying") && !observer.calls.contains("paused"),
-                "no generic retry/backoff may run for a deterministic pairing 400: " + observer.calls);
-        assertEquals(0, observer.pausedMs, "no backoff sleep may run");
+            // the pairing 400 must surface as-is so the caller (AgentLoop) can repair the history first.
+            assertEquals(1, clientCalls.get(), "the broken history must not be re-sent (no retry storm)");
+            assertTrue(
+                    observer.calls.contains("toolCallPairingRejected"), "observer must be told about the pairing 400");
+            assertTrue(
+                    observer.calls.contains("begin") && observer.calls.contains("toolCallPairingRejected"),
+                    "begin + rejection fired: " + observer.calls);
+            assertTrue(
+                    !observer.calls.contains("retrying") && !observer.calls.contains("paused"),
+                    "no generic retry/backoff may run for a deterministic pairing 400: " + observer.calls);
+            assertEquals(0, observer.pausedMs, "no backoff sleep may run");
+        }
+
+        @Test
+        void responsesMissingToolOutput400ShortCircuitsOnFirstAttempt(
+                @Fusion final CodingAgentConfiguration configuration) throws Exception {
+            // OpenAI Responses backends reject an unanswered function call with a distinct signature:
+            // "No tool output found for function call <id>". Like the Azure/litellm wording, it is a
+            // deterministic broken-history rejection, so it must short-circuit the generic retry budget and
+            // fire the pairing-rejected callback so the caller repairs the history before retrying once.
+            final var clientCalls = new AtomicInteger();
+            final var chatClient = new ChatClient() {
+                @Override
+                public Message stream(
+                        final ChatCompletionRequest r,
+                        final Consumer<PauseEvent> pauseListener,
+                        final Consumer<LlmStreamEvent> onDelta,
+                        final BooleanSupplier cancelled)
+                        throws IOException {
+                    clientCalls.incrementAndGet();
+                    throw new LlmHttpFailureException(
+                            400, "{\"error\":{\"message\":\"No tool output found for function call call_1.\"}}", null);
+                }
+            };
+            final var processor =
+                    new ModelRoundProcessor(chatClient, configuration, new PrecisionDurationMarkerProvider());
+            final var observer = new RecordingObserver();
+
+            assertThrows(
+                    LlmHttpFailureException.class,
+                    () -> processor.stream(
+                            new ChatCompletionRequest("m", List.of(), null, null, null, null, "auto", null, null, null),
+                            new Usage[] {Usage.EMPTY},
+                            () -> false,
+                            pause -> {},
+                            delta -> {},
+                            observer));
+
+            assertEquals(1, clientCalls.get(), "the broken history must not be re-sent (no retry storm)");
+            assertTrue(
+                    observer.calls.contains("toolCallPairingRejected"), "observer must be told about the pairing 400");
+            assertTrue(
+                    !observer.calls.contains("retrying") && !observer.calls.contains("paused"),
+                    "no generic retry/backoff may run for a deterministic pairing 400: " + observer.calls);
+            assertEquals(0, observer.pausedMs, "no backoff sleep may run");
+        }
+
+        @Test
+        void nonPairing400StillRetriesPerBudget(@Fusion final CodingAgentConfiguration configuration) {
+            final var clientCalls = new AtomicInteger();
+            final var chatClient = new ChatClient() {
+                @Override
+                public Message stream(
+                        final ChatCompletionRequest r,
+                        final Consumer<PauseEvent> pauseListener,
+                        final Consumer<LlmStreamEvent> onDelta,
+                        final BooleanSupplier cancelled)
+                        throws IOException {
+                    clientCalls.incrementAndGet();
+                    throw new LlmHttpFailureException(400, OTHER_400_BODY, null);
+                }
+            };
+            // streamRetriesMaxAttempts=2 -> maxAttempts=3: a non-pairing 400 is a generic failure and must be
+            // retried the full budget (nothing here can know it is deterministic, and status 400 is not retryable
+            // so the resilience layer is not involved; the round processor still applies its own budget).
+            final var processor =
+                    new ModelRoundProcessor(chatClient, configuration, new PrecisionDurationMarkerProvider());
+            final var observer = new RecordingObserver();
+
+            assertThrows(
+                    LlmHttpFailureException.class,
+                    () -> processor.stream(
+                            new ChatCompletionRequest("m", List.of(), null, null, null, null, "auto", null, null, null),
+                            new Usage[] {Usage.EMPTY},
+                            () -> false,
+                            pause -> {},
+                            delta -> {},
+                            observer));
+
+            assertEquals(3, clientCalls.get(), "a generic 400 keeps the normal retry budget");
+            assertFalse(
+                    observer.calls.contains("toolCallPairingRejected"),
+                    "a non-pairing 400 must NOT fire the pairing callback: " + observer.calls);
+            assertEquals(2, observer.calls.stream().filter("retrying"::equals).count(), "two retries for three calls");
+            assertEquals(
+                    2, observer.calls.stream().filter("paused"::equals).count(), "two backoffs for the two retries");
+        }
     }
 
-    @Test
-    void responsesMissingToolOutput400ShortCircuitsOnFirstAttempt() throws Exception {
-        // OpenAI Responses backends reject an unanswered function call with a distinct signature:
-        // "No tool output found for function call <id>". Like the Azure/litellm wording, it is a
-        // deterministic broken-history rejection, so it must short-circuit the generic retry budget and
-        // fire the pairing-rejected callback so the caller repairs the history before retrying once.
-        final var clientCalls = new AtomicInteger();
-        final var chatClient = new ChatClient() {
-            @Override
-            public Message stream(
-                    final ChatCompletionRequest r,
-                    final Consumer<PauseEvent> pauseListener,
-                    final Consumer<LlmStreamEvent> onDelta,
-                    final BooleanSupplier cancelled)
-                    throws IOException {
-                clientCalls.incrementAndGet();
-                throw new LlmHttpFailureException(
-                        400, "{\"error\":{\"message\":\"No tool output found for function call call_1.\"}}", null);
-            }
-        };
-        final var processor = new ModelRoundProcessor(chatClient, config(2), new PrecisionDurationMarkerProvider());
-        final var observer = new RecordingObserver();
-
-        assertThrows(
-                LlmHttpFailureException.class,
-                () -> processor.stream(
-                        new ChatCompletionRequest("m", List.of(), null, null, null, null, "auto", null, null, null),
-                        new Usage[] {Usage.EMPTY},
-                        () -> false,
-                        pause -> {},
-                        delta -> {},
-                        observer));
-
-        assertEquals(1, clientCalls.get(), "the broken history must not be re-sent (no retry storm)");
-        assertTrue(observer.calls.contains("toolCallPairingRejected"), "observer must be told about the pairing 400");
-        assertTrue(
-                !observer.calls.contains("retrying") && !observer.calls.contains("paused"),
-                "no generic retry/backoff may run for a deterministic pairing 400: " + observer.calls);
-        assertEquals(0, observer.pausedMs, "no backoff sleep may run");
+    public static class CancellationModule extends ConfigurationTestModule {
+        public CancellationModule() {
+            super(Map.of(
+                    "yca.llm.streamRetriesMaxAttempts", "2",
+                    "yca.llm.retriesBaseDelayMs", "30000",
+                    "yca.llm.retryAfterMaxWaitMs", "30000"));
+        }
     }
 
-    @Test
-    void nonPairing400StillRetriesPerBudget() {
-        final var clientCalls = new AtomicInteger();
-        final var chatClient = new ChatClient() {
-            @Override
-            public Message stream(
-                    final ChatCompletionRequest r,
-                    final Consumer<PauseEvent> pauseListener,
-                    final Consumer<LlmStreamEvent> onDelta,
-                    final BooleanSupplier cancelled)
-                    throws IOException {
-                clientCalls.incrementAndGet();
-                throw new LlmHttpFailureException(400, OTHER_400_BODY, null);
-            }
-        };
-        // streamRetriesMaxAttempts=2 -> maxAttempts=3: a non-pairing 400 is a generic failure and must be
-        // retried the full budget (nothing here can know it is deterministic, and status 400 is not retryable
-        // so the resilience layer is not involved; the round processor still applies its own budget).
-        final var processor = new ModelRoundProcessor(chatClient, config(2), new PrecisionDurationMarkerProvider());
-        final var observer = new RecordingObserver();
-
-        assertThrows(
-                LlmHttpFailureException.class,
-                () -> processor.stream(
-                        new ChatCompletionRequest("m", List.of(), null, null, null, null, "auto", null, null, null),
-                        new Usage[] {Usage.EMPTY},
-                        () -> false,
-                        pause -> {},
-                        delta -> {},
-                        observer));
-
-        assertEquals(3, clientCalls.get(), "a generic 400 keeps the normal retry budget");
-        assertFalse(
-                observer.calls.contains("toolCallPairingRejected"),
-                "a non-pairing 400 must NOT fire the pairing callback: " + observer.calls);
-        assertEquals(2, observer.calls.stream().filter("retrying"::equals).count(), "two retries for three calls");
-        assertEquals(2, observer.calls.stream().filter("paused"::equals).count(), "two backoffs for the two retries");
-    }
-
-    private static CodingAgentConfiguration config(final int streamRetries) {
-        return CodingAgentConfigurations.builder()
-                .custom(Map.of(
-                        "yca.llm.streamRetriesMaxAttempts", Integer.toString(streamRetries),
-                        "yca.llm.retriesBaseDelayMs", "1",
-                        "yca.llm.retryAfterMaxWaitMs", "10"))
-                .build();
+    public static class RetryModule extends ConfigurationTestModule {
+        public RetryModule() {
+            super(Map.of(
+                    "yca.llm.streamRetriesMaxAttempts", "2",
+                    "yca.llm.retriesBaseDelayMs", "1",
+                    "yca.llm.retryAfterMaxWaitMs", "10"));
+        }
     }
 }

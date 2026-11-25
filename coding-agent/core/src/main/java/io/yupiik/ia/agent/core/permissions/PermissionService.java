@@ -38,6 +38,7 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.regex.Pattern;
 
 public class PermissionService {
@@ -62,6 +63,12 @@ public class PermissionService {
     private final Set<String> sessionGrants = ConcurrentHashMap.newKeySet();
     private final SubagentRouteApprovals subagentRoutes = new SubagentRouteApprovals();
     private volatile AgentMode mode;
+    private volatile Runnable agentModeChangeListener = () -> {};
+    private volatile Runnable permissionModeChangeListener = () -> {};
+    private long approvalGeneration;
+    private PermissionService parent;
+    private long parentGeneration;
+    private final ReentrantLock modeChangeLock = new ReentrantLock();
     private volatile PermissionMode permissionMode;
     private volatile RulesCache rulesCache;
     /**
@@ -242,16 +249,43 @@ public class PermissionService {
         final var child =
                 new PermissionService(configuration, emitter, bashRulesRegistry, grantingMatchers, projectDir);
         child.mode = mode();
-        child.permissionMode = permissionMode();
+        child.parent = this;
+        child.parentGeneration = currentApprovalGeneration();
         child.gate = gate;
         dynamicRules.forEach(child::addDynamicRule);
         return child;
     }
 
+    /** Installs the session owner's agent-mode sandbox revocation hook. */
+    public void setAgentModeChangeListener(final Runnable listener) {
+        agentModeChangeListener = Objects.requireNonNull(listener, "listener");
+    }
+
+    /** Installs the session owner's permission-mode sandbox revocation hook. */
+    public void setPermissionModeChangeListener(final Runnable listener) {
+        permissionModeChangeListener = Objects.requireNonNull(listener, "listener");
+    }
+
+    private void expireApprovals() {
+        approvalGeneration++;
+        clearSessionGrants();
+        clearDynamicRules();
+    }
+
     public void setMode(final AgentMode mode) {
-        final var from = this.mode;
-        this.mode = mode;
-        emitPermissionsChanged("agent", from == null ? null : from.name(), mode == null ? null : mode.name());
+        modeChangeLock.lock();
+        try {
+            final var previous = mode();
+            final var from = this.mode;
+            this.mode = mode;
+            if (previous != mode()) {
+                expireApprovals();
+                agentModeChangeListener.run();
+            }
+            emitPermissionsChanged("agent", from == null ? null : from.name(), mode == null ? null : mode.name());
+        } finally {
+            modeChangeLock.unlock();
+        }
     }
 
     public AgentMode mode() {
@@ -259,30 +293,46 @@ public class PermissionService {
         if (m != null) {
             return m;
         }
-        final var configured = configuration.mode();
+        final var configured = configuration == null ? null : configuration.mode();
         return configured != null ? configured : AgentMode.PLAN;
     }
 
     /**
-     * Overrides the effective permission mode (ask/auto_edit/yolo) at runtime. Unlike the static
+     * Overrides the effective permission mode (ask/auto_edit/yolo/full_yolo) at runtime. Unlike the static
      * {@code yca.permissions.mode} config this lets entry points (TUI slash commands, /permissions)
      * switch the permission level that {@link #check} actually enforces, keeping the reported state in
      * sync with behaviour. A {@code null} resets to the configured default.
      */
     public void setPermissionMode(final PermissionMode permissionMode) {
-        final var from = this.permissionMode;
-        this.permissionMode = permissionMode;
-        emitPermissionsChanged(
-                "permission", from == null ? null : from.name(), permissionMode == null ? null : permissionMode.name());
+        modeChangeLock.lock();
+        try {
+            final var previous = permissionMode();
+            final var from = this.permissionMode;
+            this.permissionMode = permissionMode;
+            if (previous != permissionMode()) {
+                expireApprovals();
+                permissionModeChangeListener.run();
+            }
+            emitPermissionsChanged(
+                    "permission",
+                    from == null ? null : from.name(),
+                    permissionMode == null ? null : permissionMode.name());
+        } finally {
+            modeChangeLock.unlock();
+        }
     }
 
     /** The effective permission mode: the runtime override when set, otherwise the configured default (ASK). */
     public PermissionMode permissionMode() {
         final var override = permissionMode;
+        if (parent != null) {
+            final var ceiling = parent.permissionMode();
+            return override == null || override.ordinal() > ceiling.ordinal() ? ceiling : override;
+        }
         if (override != null) {
             return override;
         }
-        final var permissions = configuration.permissions();
+        final var permissions = configuration == null ? null : configuration.permissions();
         return permissions != null && permissions.mode() != null ? permissions.mode() : PermissionMode.ASK;
     }
 
@@ -312,12 +362,16 @@ public class PermissionService {
             final ToolCategory category,
             final Map<String, Object> args,
             final boolean readOnly) {
+        currentApprovalGeneration();
+        if (permissionMode() == PermissionMode.FULL_YOLO) {
+            return Decision.allow();
+        }
         final var permissions = configuration.permissions();
         final var command =
                 category == ToolCategory.BASH && args.get("command") instanceof final String c && !c.isBlank()
                         ? c
                         : null;
-        // the deny list is authoritative in every mode, including for bash commands
+        // the deny list is authoritative except in FULL_YOLO, including for bash commands
         // where the patterns are matched segment by segment
         if (permissions != null) {
             if (permissions.isDenied(toolName)) {
@@ -376,6 +430,8 @@ public class PermissionService {
     }
 
     private Decision approve(final String toolName, final Map<String, Object> args, final BashRules.Evaluation asked) {
+        final var requestedGeneration = currentApprovalGeneration();
+        final var requestedParentGeneration = parent == null ? 0 : parent.currentApprovalGeneration();
         final var g = gate;
         if (g == null) {
             final var base =
@@ -388,32 +444,99 @@ public class PermissionService {
         // blockable hook gate: a forbid denies before the interactive modal is shown
         if (emitter != null) {
             final var hook = new HookResult();
-            emitter.emit(new PermissionRequestedEvent(context(), toolName, args, detail, hook));
+            emitter.emit(new PermissionRequestedEvent(
+                    context(), toolName, args, detail, hook, ApprovalGate.Origin.PERMISSION));
             if (hook.forbidden()) {
                 final var reason = hook.reason() == null ? "forbidden by hook" : hook.reason();
                 emitDenied(toolName, args, reason);
                 return Decision.deny(reason);
             }
         }
-        final var result = g.approve(describe(toolName, args), detail, toolName, args);
-        return switch (result) {
-            case ALLOW_ONCE -> Decision.allow();
-            case ALLOW_SESSION -> {
-                grantSession(toolName, args);
-                yield Decision.allow();
+        final var result = g.approve(new ApprovalGate.Request(
+                ApprovalGate.Origin.PERMISSION, describe(toolName, args), detail, toolName, args));
+        modeChangeLock.lock();
+        try {
+            if (requestedGeneration != approvalGeneration
+                    || (parent != null && requestedParentGeneration != parent.currentApprovalGeneration())) {
+                return Decision.deny("permission approval expired during mode change");
             }
-            default -> {
-                final var reason = "refused by the user" + (bashCause(asked) == null ? "" : ": " + bashCause(asked));
-                emitDenied(toolName, args, reason);
-                yield Decision.deny(reason);
+            return switch (result) {
+                case ALLOW_ONCE -> Decision.allow();
+                case ALLOW_SESSION -> {
+                    grantSession(toolName, args);
+                    yield Decision.allow();
+                }
+                default -> {
+                    final var reason =
+                            "refused by the user" + (bashCause(asked) == null ? "" : ": " + bashCause(asked));
+                    emitDenied(toolName, args, reason);
+                    yield Decision.deny(reason);
+                }
+            };
+        } finally {
+            modeChangeLock.unlock();
+        }
+    }
+
+    private long currentApprovalGeneration() {
+        final var inherited = parent == null ? 0 : parent.currentApprovalGeneration();
+        modeChangeLock.lock();
+        try {
+            if (parent != null && inherited != parentGeneration) {
+                expireApprovals();
+                parentGeneration = inherited;
             }
-        };
+            return approvalGeneration;
+        } finally {
+            modeChangeLock.unlock();
+        }
+    }
+
+    /** Sandbox restrictions always require their own approval, independently of tool permission mode.
+     * Session grants are owned by the sandbox policy, never by the tool permission store.
+     */
+    public ApprovalGate.Result approveSandbox(final String title, final String detail, final Map<String, Object> args) {
+        final var requestedGeneration = currentApprovalGeneration();
+        final var origin = ApprovalGate.Origin.SANDBOX;
+        final var toolName = "sandbox";
+        if (emitter != null) {
+            final var hook = new HookResult();
+            emitter.emit(new PermissionRequestedEvent(context(), toolName, args, detail, hook, origin));
+            if (hook.forbidden()) {
+                emitter.emit(new PermissionDeniedEvent(
+                        context(),
+                        toolName,
+                        args,
+                        hook.reason() == null ? "forbidden by hook" : hook.reason(),
+                        origin));
+                return ApprovalGate.Result.DENY;
+            }
+        }
+        final var currentGate = gate;
+        final var result = currentGate == null
+                ? ApprovalGate.Result.DENY
+                : currentGate.approve(new ApprovalGate.Request(origin, title, detail, toolName, args));
+        if (requestedGeneration != currentApprovalGeneration()) {
+            return ApprovalGate.Result.DENY;
+        }
+        if (result == null || result == ApprovalGate.Result.DENY) {
+            if (emitter != null) {
+                emitter.emit(new PermissionDeniedEvent(
+                        context(),
+                        toolName,
+                        args,
+                        currentGate == null ? "no interactive sandbox approval wired" : "sandbox approval refused",
+                        origin));
+            }
+            return ApprovalGate.Result.DENY;
+        }
+        return result;
     }
 
     /** Observe-only notification of a denied permission request. */
     private void emitDenied(final String toolName, final Map<String, Object> args, final String reason) {
         if (emitter != null) {
-            emitter.emit(new PermissionDeniedEvent(context(), toolName, args, reason));
+            emitter.emit(new PermissionDeniedEvent(context(), toolName, args, reason, ApprovalGate.Origin.PERMISSION));
         }
     }
 

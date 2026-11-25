@@ -20,15 +20,21 @@ import static org.junit.jupiter.api.Assertions.*;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import io.yupiik.fusion.json.JsonMapper;
-import io.yupiik.ia.agent.core.configuration.ConfigurationLoader;
+import io.yupiik.fusion.testing.Fusion;
+import io.yupiik.fusion.testing.FusionSupport;
 import io.yupiik.ia.agent.github.client.GitHubClient;
+import io.yupiik.ia.agent.github.command.WorkerCommand.Options;
 import io.yupiik.ia.agent.github.configuration.GithubBotConfiguration;
+import io.yupiik.ia.agent.github.configuration.GithubExecutorConfiguration;
 import io.yupiik.ia.agent.github.configuration.PollOptions;
+import io.yupiik.ia.agent.github.configuration.PromptConfiguration;
+import io.yupiik.ia.agent.github.configuration.ReviewPresentationConfiguration;
 import io.yupiik.ia.agent.github.configuration.WorkerOptions;
 import io.yupiik.ia.agent.github.model.TaskState;
 import io.yupiik.ia.agent.github.store.TaskStore;
 import io.yupiik.ia.agent.github.support.BotJsonMapper;
 import io.yupiik.ia.agent.github.support.BotTestConfiguration;
+import io.yupiik.ia.agent.github.support.GithubConfigurationTestModule;
 import io.yupiik.ia.agent.github.support.TaskFixtures;
 import java.io.IOException;
 import java.net.InetSocketAddress;
@@ -49,7 +55,20 @@ import org.junit.jupiter.params.provider.EnumSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 /** Real HTTP and durable queue regression coverage; no live GitHub calls or executor processes. */
+@FusionSupport(modules = RepositoryWriterAuthorizationTest.Source.class)
 class RepositoryWriterAuthorizationTest {
+    @Fusion
+    private GithubExecutorConfiguration injectedExecutor;
+
+    @Fusion
+    private Options injectedOptions;
+
+    @Fusion
+    private PromptConfiguration injectedPrompts;
+
+    @Fusion
+    private ReviewPresentationConfiguration injectedPresentation;
+
     private static final Pattern ISSUE_COMMENTS = Pattern.compile("/repos/owner/(repo|other)/issues/12/comments");
     private static final Pattern FEED =
             Pattern.compile("/repos/owner/(repo|other)/(issues|issues/comments|pulls/comments)");
@@ -58,6 +77,9 @@ class RepositoryWriterAuthorizationTest {
 
     @TempDir
     Path home;
+
+    @TempDir
+    static Path executorHome;
 
     @Test
     void issueAndCommentFeedsAcceptWritersWithEmptyWhitelist() throws Exception {
@@ -328,20 +350,13 @@ class RepositoryWriterAuthorizationTest {
 
         private Worker worker(final GithubBotConfiguration conf) {
             // Any accidental execution fails rather than invoking a real container runtime.
-            final var settings = Map.of(
-                    "github.executor.docker.executable",
-                    home.resolve("must-not-run").toString());
-            final var execution = ConfigurationLoader.load(
-                            io.yupiik.ia.agent.github.configuration.GithubExecutorConfiguration.class,
-                            key -> Optional.ofNullable(settings.get(key)))
-                    .shared();
-            return BotTestConfiguration.worker(conf, store, github, json, execution);
+            final var execution = injectedExecutor.shared();
+            return BotTestConfiguration.worker(
+                    injectedPrompts, injectedPresentation, conf, store, github, json, execution);
         }
 
         private WorkerOptions workerOptions() {
-            return ConfigurationLoader.load(
-                            io.yupiik.ia.agent.github.command.WorkerCommand.Options.class, ignored -> Optional.empty())
-                    .worker();
+            return injectedOptions.worker();
         }
 
         private void handle(final HttpExchange exchange) throws IOException {
@@ -500,6 +515,14 @@ class RepositoryWriterAuthorizationTest {
             github.close();
             server.stop(0);
             json.close();
+        }
+    }
+
+    public static class Source extends GithubConfigurationTestModule {
+        public Source() {
+            super(Map.of(
+                    "github.executor.docker.executable",
+                    executorHome.resolve("must-not-run").toString()));
         }
     }
 }

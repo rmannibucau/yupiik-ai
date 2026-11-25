@@ -18,13 +18,17 @@ package io.yupiik.ia.agent.slack.context;
 import static io.yupiik.ia.agent.slack.support.SlackDomainFixture.task;
 import static org.junit.jupiter.api.Assertions.*;
 
+import io.yupiik.fusion.testing.Fusion;
+import io.yupiik.fusion.testing.FusionSupport;
 import io.yupiik.ia.agent.bot.runtime.admission.HostAdmission;
 import io.yupiik.ia.agent.bot.runtime.admission.HostAdmissionConfiguration;
 import io.yupiik.ia.agent.bot.runtime.configuration.ExecutorConfiguration;
 import io.yupiik.ia.agent.bot.runtime.model.AgentConfigurationDocument;
+import io.yupiik.ia.agent.core.sandbox.DisabledSandbox;
 import io.yupiik.ia.agent.core.tools.ToolContext;
 import io.yupiik.ia.agent.slack.configuration.AgentSlackContextConfiguration;
 import io.yupiik.ia.agent.slack.configuration.SlackContextConfiguration;
+import io.yupiik.ia.agent.slack.configuration.SlackPrompts;
 import io.yupiik.ia.agent.slack.configuration.SlackThreadConfiguration;
 import io.yupiik.ia.agent.slack.context.agent.SlackContextClient;
 import io.yupiik.ia.agent.slack.context.agent.SlackContextTool;
@@ -33,6 +37,7 @@ import io.yupiik.ia.agent.slack.service.Sandbox;
 import io.yupiik.ia.agent.slack.service.SlackFeedback;
 import io.yupiik.ia.agent.slack.service.SlackPromptRenderer;
 import io.yupiik.ia.agent.slack.service.SlackWorker;
+import io.yupiik.ia.agent.slack.support.SlackConfigurationTestModule;
 import io.yupiik.ia.agent.slack.support.SlackDomainFixture;
 import java.io.IOException;
 import java.nio.file.Files;
@@ -53,7 +58,11 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
+@FusionSupport(modules = SlackConfigurationTestModule.class)
 class SlackContextWorkerTest {
+    @Fusion
+    private SlackPrompts baselinePrompts;
+
     private static final String ACTION_TOKEN = "action-context-test-secret";
     private static final String EVIDENCE = "The release train leaves on Friday";
 
@@ -391,7 +400,7 @@ class SlackContextWorkerTest {
                                     fixture.json));
                             tool.execute(
                                     Map.of("operation", "search", "terms", List.of("release")),
-                                    ToolContext.empty(attempt));
+                                    ToolContext.empty(attempt, new DisabledSandbox(attempt)));
                         }
                         if (!"postcompletion".equals(loss)) {
                             try {
@@ -577,9 +586,10 @@ class SlackContextWorkerTest {
                 executor,
                 fixture.json,
                 fixture.store,
-                new SlackPromptRenderer(SlackDomainFixture.prompts(), fixture.json),
+                new SlackPromptRenderer(SlackDomainFixture.prompts(baselinePrompts), fixture.json),
                 sandbox,
-                new SlackFeedback(fixture.configuration, SlackDomainFixture.prompts(), fixture.store, fixture.api),
+                new SlackFeedback(
+                        fixture.configuration, SlackDomainFixture.prompts(baselinePrompts), fixture.store, fixture.api),
                 fixture.api,
                 new HostAdmission(new HostAdmissionConfiguration("", 1, "")),
                 config,
@@ -632,9 +642,9 @@ class SlackContextWorkerTest {
 
     private static String memberResponse() {
         return """
-                {"ok":true,"user":{"id":"U1","team_id":"T1","deleted":false,"is_bot":false,
-                "name":"ada","profile":{"display_name":"Ada","real_name":"Ada Lovelace"}}}
-                """;
+            {"ok":true,"user":{"id":"U1","team_id":"T1","deleted":false,"is_bot":false,
+            "name":"ada","profile":{"display_name":"Ada","real_name":"Ada Lovelace"}}}
+            """;
     }
 
     private static void assertNoSecrets(final String value) {
@@ -693,7 +703,8 @@ class SlackContextWorkerTest {
                             fixture.json));
                     assertTrue(tool.usable(attempt));
                     final var resolved = tool.execute(
-                            Map.of("operation", "resolve_user", "userId", "U1"), ToolContext.empty(attempt));
+                            Map.of("operation", "resolve_user", "userId", "U1"),
+                            ToolContext.empty(attempt, new DisabledSandbox(attempt)));
                     if (cancellation) {
                         assertTrue(resolved.error());
                         completed.complete(null);
@@ -707,7 +718,7 @@ class SlackContextWorkerTest {
                     assertEquals(true, name.get("untrusted"));
                     final var searched = tool.execute(
                             Map.of("operation", "search", "authorUserId", "U1", "terms", List.of("release train")),
-                            ToolContext.empty(attempt));
+                            ToolContext.empty(attempt, new DisabledSandbox(attempt)));
                     assertFalse(searched.error(), searched.output());
                     final var search = (Map<?, ?>) fixture.json.fromString(Object.class, searched.output());
                     assertEquals("ok", search.get("status"));

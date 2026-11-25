@@ -157,7 +157,7 @@ public class BashTool implements EmbeddedTool {
         // of supported read-only survey commands, run it through the Java* reimplementations instead of a
         // real shell - output stays byte-faithful (only capped) and does not spawn a subprocess. Anything
         // not confidently recognized falls back to the real shell below.
-        if (bashOverride != null && !command.isBlank()) {
+        if (!context.sandbox().enabled() && bashOverride != null && !command.isBlank()) {
             final var baseDir = dir;
             final var rewritten = bashOverride.tryRewrite(command, baseDir);
             if (rewritten.isPresent()) {
@@ -165,93 +165,96 @@ public class BashTool implements EmbeddedTool {
                 return ToolResult.ok(withNotice(joinNotices(pbNotice, workdirNotice), output));
             }
         }
-        final Process process;
+        final io.yupiik.ia.agent.core.sandbox.Sandbox.Command handle;
         try {
-            process = pb.start();
-        } catch (final IOException e) {
-            return ToolResult.error("Cannot start command: " + e.getMessage());
+            handle = context.sandbox().launch(pb);
+        } catch (final IOException | SecurityException e) {
+            return ToolResult.error("Cannot start sandboxed command: " + e.getMessage());
         }
-        if (processes != null) {
-            processes.track(process);
-        }
-        emitter.emit(new AgentEvent.ToolStream(
-                "bash",
-                maskSecretsForDisplay("$ " + command),
-                context.ordinal(),
-                context.sessionId(),
-                context.subagentId(),
-                context.subagentName(),
-                context.projectDir()));
-        final var out = new StringBuilder();
-        final var streamed = new AtomicInteger();
-        final var reader = new Thread(() -> {
-            try (BufferedReader r =
-                    new BufferedReader(new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8))) {
-                String line;
-                while ((line = r.readLine()) != null) {
-                    synchronized (out) {
-                        if (out.length() < maxOutputChars) {
-                            out.append(line).append('\n');
+        try (handle) {
+            final var process = handle.process();
+            if (processes != null) {
+                processes.track(process);
+            }
+            emitter.emit(new AgentEvent.ToolStream(
+                    "bash",
+                    maskSecretsForDisplay("$ " + command),
+                    context.ordinal(),
+                    context.sessionId(),
+                    context.subagentId(),
+                    context.subagentName(),
+                    context.projectDir()));
+            final var out = new StringBuilder();
+            final var streamed = new AtomicInteger();
+            final var reader = new Thread(() -> {
+                try (BufferedReader r =
+                        new BufferedReader(new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8))) {
+                    String line;
+                    while ((line = r.readLine()) != null) {
+                        synchronized (out) {
+                            if (out.length() < maxOutputChars) {
+                                out.append(line).append('\n');
+                            }
+                        }
+                        if (streamed.incrementAndGet() <= 500 && emitter != null) {
+                            emitter.emit(new AgentEvent.ToolStream(
+                                    "bash",
+                                    line,
+                                    context.ordinal(),
+                                    context.sessionId(),
+                                    context.subagentId(),
+                                    context.subagentName(),
+                                    context.projectDir()));
                         }
                     }
-                    if (streamed.incrementAndGet() <= 500 && emitter != null) {
-                        emitter.emit(new AgentEvent.ToolStream(
-                                "bash",
-                                line,
-                                context.ordinal(),
-                                context.sessionId(),
-                                context.subagentId(),
-                                context.subagentName(),
-                                context.projectDir()));
-                    }
+                } catch (final IOException e) {
+                    // stream closed
                 }
-            } catch (final IOException e) {
-                // stream closed
-            }
-        });
-        reader.setDaemon(true);
-        reader.start();
-        boolean finished;
-        // deadline loop: the command is killed as soon as the running turn is cancelled so an
-        // "interrupt" actually stops the subprocess instead of letting it run to completion.
-        // waitFor is polled in short slices so both the deadline and the cancellation flag are
-        // re-checked until the command actually finishes.
-        final var deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(timeout);
-        while (true) {
-            if (context.isCancelled() || context.isCallCancelled()) {
-                dispose(process);
-                return ToolResult.error("Interrupted");
-            }
-            final var remainingNanos = deadlineNanos - System.nanoTime();
-            if (remainingNanos <= 0) {
-                finished = false;
-                break;
-            }
-            try {
-                finished = process.waitFor(Math.clamp(remainingNanos / 1_000_000, 1, 100), TimeUnit.MILLISECONDS);
-                if (finished) {
+            });
+            reader.setDaemon(true);
+            reader.start();
+            boolean finished;
+            // deadline loop: the command is killed as soon as the running turn is cancelled so an
+            // "interrupt" actually stops the subprocess instead of letting it run to completion.
+            // waitFor is polled in short slices so both the deadline and the cancellation flag are
+            // re-checked until the command actually finishes.
+            final var deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(timeout);
+            while (true) {
+                if (context.isCancelled() || context.isCallCancelled()) {
+                    dispose(process);
+                    return ToolResult.error("Interrupted");
+                }
+                final var remainingNanos = deadlineNanos - System.nanoTime();
+                if (remainingNanos <= 0) {
+                    finished = false;
                     break;
                 }
-                // not finished yet: loop back to re-check cancellation/deadline before the next slice
-            } catch (final InterruptedException e) {
-                dispose(process);
-                Thread.currentThread().interrupt();
-                return ToolResult.error("Interrupted");
+                try {
+                    finished = process.waitFor(Math.clamp(remainingNanos / 1_000_000, 1, 100), TimeUnit.MILLISECONDS);
+                    if (finished) {
+                        break;
+                    }
+                    // not finished yet: loop back to re-check cancellation/deadline before the next slice
+                } catch (final InterruptedException e) {
+                    dispose(process);
+                    Thread.currentThread().interrupt();
+                    return ToolResult.error("Interrupted");
+                }
             }
+            if (!finished) {
+                dispose(process);
+                return ToolResult.error("Command timed out after " + timeout + "s\n"
+                        + withNotice(joinNotices(pbNotice, workdirNotice), snapshot(out, maxOutputChars)));
+            }
+            try {
+                reader.join(2_000);
+            } catch (final InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+            final var code = process.exitValue();
+            return ToolResult.ok(withNotice(joinNotices(pbNotice, workdirNotice), snapshot(out, maxOutputChars))
+                    + "\nExit code: " + code);
         }
-        if (!finished) {
-            dispose(process);
-            return ToolResult.error("Command timed out after " + timeout + "s\n"
-                    + withNotice(joinNotices(pbNotice, workdirNotice), snapshot(out, maxOutputChars)));
-        }
-        try {
-            reader.join(2_000);
-        } catch (final InterruptedException e) {
-            Thread.currentThread().interrupt();
-        }
-        final var code = process.exitValue();
-        return ToolResult.ok(withNotice(joinNotices(pbNotice, workdirNotice), snapshot(out, maxOutputChars))
-                + "\nExit code: " + code);
     }
 
     /**

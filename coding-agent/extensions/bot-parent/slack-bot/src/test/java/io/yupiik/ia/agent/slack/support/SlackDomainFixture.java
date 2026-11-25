@@ -15,12 +15,10 @@
  */
 package io.yupiik.ia.agent.slack.support;
 
-import io.yupiik.fusion.framework.api.configuration.Configuration;
 import io.yupiik.fusion.httpclient.core.ExtendedHttpClient;
 import io.yupiik.fusion.httpclient.core.ExtendedHttpClientConfiguration;
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.bot.runtime.configuration.ExecutorConfiguration;
-import io.yupiik.ia.agent.core.configuration.ConfigurationLoader;
 import io.yupiik.ia.agent.slack.configuration.SlackConfiguration;
 import io.yupiik.ia.agent.slack.configuration.SlackContextConfiguration;
 import io.yupiik.ia.agent.slack.configuration.SlackPrompts;
@@ -137,14 +135,15 @@ public final class SlackDomainFixture implements AutoCloseable {
                 configuration.retentionSeconds());
     }
 
-    public static SlackPrompts prompts() {
-        return ConfigurationLoader.load(
-                io.yupiik.ia.agent.slack.configuration.SlackPrompts.class,
-                Configuration.of(Map.of(
-                        "slack.prompts.policy", "trusted-policy",
-                        "slack.prompts.main", "{{policy}}\n{{output}}\n{{request}}\n{{context}}",
-                        "slack.prompts.output", "trusted-output",
-                        "slack.prompts.questionTitle", "Question")));
+    public static SlackPrompts prompts(final SlackPrompts baseline) {
+        return new SlackPrompts(
+                "trusted-policy",
+                "{{policy}}\n{{output}}\n{{request}}\n{{context}}",
+                "trusted-output",
+                baseline.answerLabel(),
+                baseline.cancelLabel(),
+                "Question",
+                baseline.contextGuidance());
     }
 
     public ExecutorConfiguration executor(final Path root) {

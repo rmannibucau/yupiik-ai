@@ -43,7 +43,7 @@ class NotificationEndpointTest {
                             instance.instance().listen(new ServiceConfiguration(0, TOKEN, true, null), unread);
                     final var socket = new Socket(InetAddress.getByName(host), listener.port())) {
                 socket.setSoTimeout(3000);
-                final var notice = new Notice(1, host, "Family " + host, "turn_end", "main", 1);
+                final var notice = new Notice(1, host, "Family " + host, "turn_end", "main", 1, null);
                 final var output = new DataOutputStream(socket.getOutputStream());
                 output.writeInt(0x59434101);
                 final var token = TOKEN.getBytes(StandardCharsets.UTF_8);
@@ -83,7 +83,7 @@ class NotificationEndpointTest {
                     return notice;
                 }
             });
-            final var notice = new Notice(1, host, "Single-family service", "turn_end", "main", 1);
+            final var notice = new Notice(1, host, "Single-family service", "turn_end", "main", 1, null);
             instance.instance().publish(new ServiceConfiguration(server.getLocalPort(), TOKEN, true, null), notice);
             assertEquals(notice, received.get(4, TimeUnit.SECONDS));
         }
@@ -104,7 +104,7 @@ class NotificationEndpointTest {
                 final var instance = container.lookup(NotificationEndpoint.class)) {
             final var endpoint = instance.instance();
             final var state = new UnreadNotifications();
-            final var notice = new Notice(1, "session", "Test title", "approval_required", "btw", 1);
+            final var notice = new Notice(1, "session", "Test title", "approval_required", "btw", 1, null);
             final int port;
             try (final var listener = endpoint.listen(new ServiceConfiguration(0, TOKEN, true, null), state)) {
                 port = listener.port();
@@ -132,15 +132,15 @@ class NotificationEndpointTest {
             final var state = new UnreadNotifications();
             try (final var listener = endpoint.listen(new ServiceConfiguration(0, TOKEN, true, null), state)) {
                 final var configuration = new ServiceConfiguration(listener.port(), TOKEN, true, null);
-                final var main = new Notice(1, "session", "Main", "approval_required", "main", 1);
-                final var btw = new Notice(1, "session", "Btw", "input_required", "btw", 2);
+                final var main = new Notice(1, "session", "Main", "approval_required", "main", 1, null);
+                final var btw = new Notice(1, "session", "Btw", "input_required", "btw", 2, null);
                 endpoint.publish(configuration, main);
                 endpoint.publish(configuration, btw);
-                endpoint.publish(configuration, new Notice(1, "session", "", "session_acknowledged", "main", 1));
+                endpoint.publish(configuration, new Notice(1, "session", "", "session_acknowledged", "main", 1, null));
                 assertEquals(List.of(btw), state.read());
                 endpoint.publish(configuration, main);
                 assertEquals(List.of(btw), state.read());
-                endpoint.publish(configuration, new Notice(1, "session", "", "session_acknowledged", "btw", 2));
+                endpoint.publish(configuration, new Notice(1, "session", "", "session_acknowledged", "btw", 2, null));
                 endpoint.publish(configuration, btw);
                 assertTrue(state.read().isEmpty());
             }
@@ -163,7 +163,7 @@ class NotificationEndpointTest {
                     assertEquals(-1, socket.getInputStream().read());
                 }
                 assertTrue(state.read().isEmpty());
-                final var notice = new Notice(1, "s", "After invalid frame", "turn_end", "main", 1);
+                final var notice = new Notice(1, "s", "After invalid frame", "turn_end", "main", 1, null);
                 endpoint.publish(new ServiceConfiguration(listener.port(), TOKEN, true, null), notice);
                 assertEquals(List.of(notice), state.read());
             }

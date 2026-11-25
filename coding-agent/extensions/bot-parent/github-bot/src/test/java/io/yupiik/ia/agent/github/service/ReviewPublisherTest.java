@@ -19,12 +19,14 @@ import static org.junit.jupiter.api.Assertions.*;
 
 import com.sun.net.httpserver.HttpServer;
 import io.yupiik.fusion.json.JsonMapper;
-import io.yupiik.ia.agent.core.configuration.ConfigurationLoader;
+import io.yupiik.fusion.testing.Fusion;
+import io.yupiik.fusion.testing.FusionSupport;
 import io.yupiik.ia.agent.github.client.GitHubClient;
 import io.yupiik.ia.agent.github.configuration.ReviewPresentationConfiguration;
 import io.yupiik.ia.agent.github.store.TaskStore;
 import io.yupiik.ia.agent.github.support.BotJsonMapper;
 import io.yupiik.ia.agent.github.support.BotTestConfiguration;
+import io.yupiik.ia.agent.github.support.GithubConfigurationTestModule;
 import io.yupiik.ia.agent.github.support.TaskFixtures;
 import java.net.InetSocketAddress;
 import java.net.URI;
@@ -39,10 +41,13 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 class ReviewPublisherTest {
+    private ReviewPresentationConfiguration presentation;
+
     private static final String PATCH =
             "@@ -10,3 +20,3 @@ method\n context\n-old\n+new\n tail\n\\ No newline at end of file\n"
                     + "@@ -50 +60 @@\n-before\n+after\n";
@@ -65,7 +70,8 @@ class ReviewPublisherTest {
     private volatile boolean intentAtPost;
 
     @BeforeEach
-    void setUp() throws Exception {
+    void setUp(@Fusion final ReviewPresentationConfiguration presentation) throws Exception {
+        this.presentation = presentation;
         json = BotJsonMapper.create(key -> Optional.empty());
         store = new TaskStore(BotTestConfiguration.home(home), json);
         final var id = store.transaction(state -> state.enqueue(
@@ -119,248 +125,275 @@ class ReviewPublisherTest {
         }
     }
 
-    @Test
-    void publishesNativeCommentReviewPinnedToValidatedHead() {
-        final var comments = List.of(finding("LEFT", 11), finding("RIGHT", 21), finding("RIGHT", 60));
-        assertEquals(URL, publisher().publish(TaskFixtures.task(task), TaskFixtures.result(result(comments))));
-        assertEquals(2, heads.get());
-        assertTrue(intentAtPost);
-        assertEquals(1, posts.size());
-        final var posted = posts.getFirst();
-        assertEquals("head", posted.get("commit_id"));
-        assertEquals("COMMENT", posted.get("event"));
-        final var body = String.valueOf(posted.get("body"));
-        assertTrue(body.startsWith(marker() + "\n## \uD83D\uDCCB Summary\n\nFindings\n"));
-        assertEquals(1, occurrences(body, marker()));
-        assertEquals(1, occurrences(body, "## \uD83D\uDD0E Findings"));
-        assertTrue(body.contains("3 finding(s) posted as inline review comments."));
-        assertTrue(body.contains("No test evidence was reported."));
-        assertFalse(body.contains("Explain the defect"));
-        final var actual = (List<?>) posted.get("comments");
-        assertEquals(3, actual.size());
-        for (int i = 0; i < comments.size(); i++) {
-            final var comment = TaskStore.map(actual.get(i));
-            assertEquals(comments.get(i).get("path"), comment.get("path"));
-            assertEquals(comments.get(i).get("side"), comment.get("side"));
-            assertEquals(((Number) comments.get(i).get("line")).intValue(), ((Number) comment.get("line")).intValue());
-            final var inline = String.valueOf(comment.get("body"));
+    @Nested
+    @FusionSupport(modules = GithubConfigurationTestModule.class)
+    class Defaults {
+        @Test
+        void publishesNativeCommentReviewPinnedToValidatedHead() {
+            final var comments = List.of(finding("LEFT", 11), finding("RIGHT", 21), finding("RIGHT", 60));
+            assertEquals(URL, publisher().publish(TaskFixtures.task(task), TaskFixtures.result(result(comments))));
+            assertEquals(2, heads.get());
+            assertTrue(intentAtPost);
+            assertEquals(1, posts.size());
+            final var posted = posts.getFirst();
+            assertEquals("head", posted.get("commit_id"));
+            assertEquals("COMMENT", posted.get("event"));
+            final var body = String.valueOf(posted.get("body"));
+            assertTrue(body.startsWith(marker() + "\n## \uD83D\uDCCB Summary\n\nFindings\n"));
+            assertEquals(1, occurrences(body, marker()));
+            assertEquals(1, occurrences(body, "## \uD83D\uDD0E Findings"));
+            assertTrue(body.contains("3 finding(s) posted as inline review comments."));
+            assertTrue(body.contains("No test evidence was reported."));
+            assertFalse(body.contains("Explain the defect"));
+            final var actual = (List<?>) posted.get("comments");
+            assertEquals(3, actual.size());
+            for (int i = 0; i < comments.size(); i++) {
+                final var comment = TaskStore.map(actual.get(i));
+                assertEquals(comments.get(i).get("path"), comment.get("path"));
+                assertEquals(comments.get(i).get("side"), comment.get("side"));
+                assertEquals(
+                        ((Number) comments.get(i).get("line")).intValue(), ((Number) comment.get("line")).intValue());
+                final var inline = String.valueOf(comment.get("body"));
+                assertEquals(
+                        marker() + "\n### " + (i + 1) + ". `src/App.java:"
+                                + comments.get(i).get("line") + "` ("
+                                + comments.get(i).get("side")
+                                + ")\n\nExplain the defect",
+                        inline);
+                assertEquals(1, occurrences(inline, marker()));
+                assertTrue(new MentionParser()
+                        .parse(String.valueOf(comment.get("body")), "bot")
+                        .isEmpty());
+            }
+        }
+
+        @Test
+        void defaultReportIncludesActualTestEvidenceWithoutClaimingSuccess() {
+            final var tests = List.of("mvn test: FAILED (2 failures)", "integration tests: NOT RUN");
+            final var result = Map.<String, Object>of(
+                    "summary",
+                    "Summary fallback with **Markdown** & <literal> {{notATemplate}}",
+                    "review",
+                    Map.of("headSha", "head", "comments", List.of()),
+                    "tests",
+                    tests);
+            publisher().publish(TaskFixtures.task(task), TaskFixtures.result(result));
+            final var body = String.valueOf(posts.getFirst().get("body"));
+            assertEquals(1, occurrences(body, marker()));
+            assertEquals(1, occurrences(body, "## \uD83D\uDCCB Summary"));
+            assertEquals(1, occurrences(body, "## \uD83E\uDDEA Tests"));
+            assertTrue(body.contains("Summary fallback with **Markdown** & <literal> {{notATemplate}}"));
+            assertTrue(body.contains("No inline findings were reported."));
+            assertTrue(body.contains("Agent-reported test evidence (not independently verified by the host):"));
+            for (final var test : tests) {
+                assertEquals(1, occurrences(body, test));
+            }
+            assertFalse(body.contains("passed"));
+            assertFalse(body.contains("&amp;"));
+            assertFalse(body.contains("&lt;"));
+        }
+
+        @Test
+        void defaultReportHonestlyHandlesMissingSummaryFindingsAndTests() {
+            publisher()
+                    .publish(TaskFixtures.task(task), TaskFixtures.result(Map.of("review", Map.of("headSha", "head"))));
+            final var body = String.valueOf(posts.getFirst().get("body"));
+            assertTrue(body.contains("No review summary was provided."));
+            assertTrue(body.contains("No inline findings were reported."));
+            assertTrue(body.contains("No test evidence was reported."));
+            assertFalse(body.contains("passed"));
+            assertFalse(body.contains("Review completed."));
+        }
+
+        @Test
+        void rejectsOversizedRenderedTemplatesBeforeWritingIntent() {
+            final var defaults = presentation;
+            assertThrows(
+                    IllegalArgumentException.class,
+                    () -> publisher(new ReviewPresentationConfiguration("x".repeat(30001), defaults.findingTemplate()))
+                            .publish(TaskFixtures.task(task), TaskFixtures.result(result(List.of()))));
+            assertThrows(
+                    IllegalArgumentException.class,
+                    () -> publisher(new ReviewPresentationConfiguration(defaults.reportTemplate(), "x".repeat(10001)))
+                            .publish(
+                                    TaskFixtures.task(task),
+                                    TaskFixtures.result(result(List.of(finding("RIGHT", 21))))));
+            assertTrue(posts.isEmpty());
+            assertFalse(store.<Boolean>transaction(state -> state.task(id()).reviewIntent() != null));
+        }
+
+        @Test
+        void mapsBothSidesContextAndMultipleHunks() {
             assertEquals(
-                    marker() + "\n### " + (i + 1) + ". `src/App.java:"
-                            + comments.get(i).get("line") + "` ("
-                            + comments.get(i).get("side")
-                            + ")\n\nExplain the defect",
-                    inline);
-            assertEquals(1, occurrences(inline, marker()));
-            assertTrue(new MentionParser()
-                    .parse(String.valueOf(comment.get("body")), "bot")
-                    .isEmpty());
+                    Set.of(
+                            "a:LEFT:10",
+                            "a:RIGHT:20",
+                            "a:LEFT:11",
+                            "a:RIGHT:21",
+                            "a:LEFT:12",
+                            "a:RIGHT:22",
+                            "a:LEFT:50",
+                            "a:RIGHT:60"),
+                    ReviewPublisher.locations("a", PATCH));
         }
-    }
 
-    @Test
-    void defaultReportIncludesActualTestEvidenceWithoutClaimingSuccess() {
-        final var tests = List.of("mvn test: FAILED (2 failures)", "integration tests: NOT RUN");
-        final var result = Map.<String, Object>of(
-                "summary",
-                "Summary fallback with **Markdown** & <literal> {{notATemplate}}",
-                "review",
-                Map.of("headSha", "head", "comments", List.of()),
-                "tests",
-                tests);
-        publisher().publish(TaskFixtures.task(task), TaskFixtures.result(result));
-        final var body = String.valueOf(posts.getFirst().get("body"));
-        assertEquals(1, occurrences(body, marker()));
-        assertEquals(1, occurrences(body, "## \uD83D\uDCCB Summary"));
-        assertEquals(1, occurrences(body, "## \uD83E\uDDEA Tests"));
-        assertTrue(body.contains("Summary fallback with **Markdown** & <literal> {{notATemplate}}"));
-        assertTrue(body.contains("No inline findings were reported."));
-        assertTrue(body.contains("Agent-reported test evidence (not independently verified by the host):"));
-        for (final var test : tests) {
-            assertEquals(1, occurrences(body, test));
+        @Test
+        void rejectsEntireReviewBeforePostWhenAnyFindingIsInvalid() {
+            final var invalid = List.of(
+                    finding("RIGHT", 999),
+                    finding("RIGHT", 21.5),
+                    finding("LEFT", 21),
+                    Map.<String, Object>of("path", "binary.png", "side", "RIGHT", "line", 1, "body", "No patch"),
+                    Map.<String, Object>of("path", "../App.java", "side", "RIGHT", "line", 21, "body", "Wrong path"),
+                    Map.<String, Object>of("path", "src/App.java", "side", "RIGHT", "line", 21, "body", " "));
+            for (final var finding : invalid) {
+                assertThrows(
+                        IllegalArgumentException.class,
+                        () -> publisher()
+                                .publish(
+                                        TaskFixtures.task(task),
+                                        TaskFixtures.result(result(List.of(finding("RIGHT", 21), finding)))));
+            }
+            assertTrue(posts.isEmpty());
+            assertFalse(store.<Boolean>transaction(state -> (state.task(id()).reviewIntent() != null)));
         }
-        assertFalse(body.contains("passed"));
-        assertFalse(body.contains("&amp;"));
-        assertFalse(body.contains("&lt;"));
-    }
 
-    @Test
-    void defaultReportHonestlyHandlesMissingSummaryFindingsAndTests() {
-        publisher().publish(TaskFixtures.task(task), TaskFixtures.result(Map.of("review", Map.of("headSha", "head"))));
-        final var body = String.valueOf(posts.getFirst().get("body"));
-        assertTrue(body.contains("No review summary was provided."));
-        assertTrue(body.contains("No inline findings were reported."));
-        assertTrue(body.contains("No test evidence was reported."));
-        assertFalse(body.contains("passed"));
-        assertFalse(body.contains("Review completed."));
-    }
-
-    @Test
-    void customTemplatesPreserveLiteralMarkdownAndHostMarkers() {
-        final var presentation = presentation(Map.of(
-                "github.review.presentation.reportTemplate",
-                        "Report: {{{summary}}}\n{{#each tests}}{{{this}}}{{/each}}",
-                "github.review.presentation.findingTemplate", "Finding {{number}}: {{{body}}}"));
-        final var literal = "**keep** & <T> {{summary}} {{{body}}} {{#if tests}}literal{{/if}}";
-        final var result = Map.<String, Object>of(
-                "review",
-                        Map.of(
-                                "headSha",
-                                "head",
-                                "body",
-                                literal,
-                                "comments",
-                                List.of(Map.of("path", "src/App.java", "side", "RIGHT", "line", 21, "body", literal))),
-                "tests", List.of("not run {{summary}}"));
-        publisher(presentation).publish(TaskFixtures.task(task), TaskFixtures.result(result));
-        final var posted = posts.getFirst();
-        assertEquals(marker() + "\nReport: " + literal + "\nnot run {{summary}}", posted.get("body"));
-        final var inline = TaskStore.map(((List<?>) posted.get("comments")).getFirst());
-        assertEquals(marker() + "\nFinding 1: " + literal, inline.get("body"));
-    }
-
-    @Test
-    void rejectsOversizedRenderedTemplatesBeforeWritingIntent() {
-        final var defaults = presentation(Map.of());
-        assertThrows(
-                IllegalArgumentException.class,
-                () -> publisher(new ReviewPresentationConfiguration("x".repeat(30001), defaults.findingTemplate()))
-                        .publish(TaskFixtures.task(task), TaskFixtures.result(result(List.of()))));
-        assertThrows(
-                IllegalArgumentException.class,
-                () -> publisher(new ReviewPresentationConfiguration(defaults.reportTemplate(), "x".repeat(10001)))
-                        .publish(TaskFixtures.task(task), TaskFixtures.result(result(List.of(finding("RIGHT", 21))))));
-        assertTrue(posts.isEmpty());
-        assertFalse(store.<Boolean>transaction(state -> state.task(id()).reviewIntent() != null));
-    }
-
-    @Test
-    void mapsBothSidesContextAndMultipleHunks() {
-        assertEquals(
-                Set.of(
-                        "a:LEFT:10",
-                        "a:RIGHT:20",
-                        "a:LEFT:11",
-                        "a:RIGHT:21",
-                        "a:LEFT:12",
-                        "a:RIGHT:22",
-                        "a:LEFT:50",
-                        "a:RIGHT:60"),
-                ReviewPublisher.locations("a", PATCH));
-    }
-
-    @Test
-    void rejectsEntireReviewBeforePostWhenAnyFindingIsInvalid() {
-        final var invalid = List.of(
-                finding("RIGHT", 999),
-                finding("RIGHT", 21.5),
-                finding("LEFT", 21),
-                Map.<String, Object>of("path", "binary.png", "side", "RIGHT", "line", 1, "body", "No patch"),
-                Map.<String, Object>of("path", "../App.java", "side", "RIGHT", "line", 21, "body", "Wrong path"),
-                Map.<String, Object>of("path", "src/App.java", "side", "RIGHT", "line", 21, "body", " "));
-        for (final var finding : invalid) {
+        @Test
+        void rejectsUnboundedReviewPayloadsWithoutWritingIntent() {
             assertThrows(
                     IllegalArgumentException.class,
                     () -> publisher()
                             .publish(
                                     TaskFixtures.task(task),
-                                    TaskFixtures.result(result(List.of(finding("RIGHT", 21), finding)))));
+                                    TaskFixtures.result(result(Collections.nCopies(31, finding("RIGHT", 21))))));
+            assertThrows(
+                    IllegalArgumentException.class,
+                    () -> publisher()
+                            .publish(
+                                    TaskFixtures.task(task),
+                                    TaskFixtures.result(
+                                            Map.of("review", Map.of("headSha", "head", "body", "x".repeat(30001))))));
+            final var oversizedFinding = Map.<String, Object>of(
+                    "path", "src/App.java", "side", "RIGHT", "line", 21, "body", "x".repeat(10001));
+            assertThrows(
+                    IllegalArgumentException.class,
+                    () -> publisher()
+                            .publish(TaskFixtures.task(task), TaskFixtures.result(result(List.of(oversizedFinding)))));
+            assertTrue(posts.isEmpty());
+            assertFalse(store.<Boolean>transaction(state -> (state.task(id()).reviewIntent() != null)));
         }
-        assertTrue(posts.isEmpty());
-        assertFalse(store.<Boolean>transaction(state -> (state.task(id()).reviewIntent() != null)));
+
+        @Test
+        void rejectsStaleHeadBeforePublication() {
+            initialSha = "new-head";
+            assertThrows(
+                    IllegalArgumentException.class,
+                    () -> publisher().publish(TaskFixtures.task(task), TaskFixtures.result(result(List.of()))));
+            assertEquals(1, heads.get());
+            assertTrue(posts.isEmpty());
+        }
+
+        @Test
+        void rechecksHeadAfterDiffValidationBeforeWritingIntent() {
+            finalSha = "changed-during-validation";
+            assertThrows(
+                    IllegalArgumentException.class,
+                    () -> publisher()
+                            .publish(
+                                    TaskFixtures.task(task),
+                                    TaskFixtures.result(result(List.of(finding("RIGHT", 21))))));
+            assertEquals(2, heads.get());
+            assertTrue(posts.isEmpty());
+            assertFalse(store.<Boolean>transaction(state -> (state.task(id()).reviewIntent() != null)));
+        }
+
+        @Test
+        void ambiguousWriteBlocksDuplicatesUntilMatchingNativeReviewIsVisible() {
+            postStatus = 503;
+            assertThrows(
+                    IllegalStateException.class,
+                    () -> publisher().publish(TaskFixtures.task(task), TaskFixtures.result(result(List.of()))));
+            assertTrue(intentAtPost);
+            assertEquals(1, posts.size());
+            // A marker alone is not enough: author, commit and native review state must all match.
+            reviews = List.of(
+                    review("intruder", "head", "COMMENTED"),
+                    review("bot", "old-head", "COMMENTED"),
+                    review("bot", "head", "PENDING"),
+                    review("bot", "head", "APPROVED"));
+            assertThrows(
+                    IllegalStateException.class,
+                    () -> publisher().publish(TaskFixtures.task(task), TaskFixtures.result(result(List.of()))));
+            assertEquals(1, posts.size());
+            reviews = List.of(review("BoT", "head", "COMMENTED"));
+            // Reopen storage as after a dispatcher restart; no structured review is needed for
+            // reconciliation.
+            assertEquals(
+                    URL,
+                    new ReviewPublisher(
+                                    github,
+                                    new TaskStore(BotTestConfiguration.home(home), json),
+                                    BotTestConfiguration.configuration("", "bot", ""),
+                                    presentation)
+                            .publish(TaskFixtures.task(task), TaskFixtures.result(Map.of())));
+            assertEquals(1, posts.size());
+        }
+
+        @Test
+        void reconcilesPersistedReviewCommitAfterHeadMovesAcrossRestart() {
+            postStatus = 503;
+            assertThrows(
+                    IllegalStateException.class,
+                    () -> publisher().publish(TaskFixtures.task(task), TaskFixtures.result(result(List.of()))));
+            assertEquals("head", store.transaction(state -> state.task(id()).reviewIntentSha()));
+            initialSha = "new-head";
+            finalSha = "new-head";
+            reviews = List.of(review("bot", "head", "COMMENTED"));
+            assertEquals(
+                    URL,
+                    new ReviewPublisher(
+                                    github,
+                                    new TaskStore(BotTestConfiguration.home(home), json),
+                                    BotTestConfiguration.configuration("", "bot", ""),
+                                    presentation)
+                            .publish(TaskFixtures.task(task), TaskFixtures.result(Map.of())));
+            assertEquals(1, posts.size());
+        }
     }
 
-    @Test
-    void rejectsUnboundedReviewPayloadsWithoutWritingIntent() {
-        assertThrows(
-                IllegalArgumentException.class,
-                () -> publisher()
-                        .publish(
-                                TaskFixtures.task(task),
-                                TaskFixtures.result(result(Collections.nCopies(31, finding("RIGHT", 21))))));
-        assertThrows(
-                IllegalArgumentException.class,
-                () -> publisher()
-                        .publish(
-                                TaskFixtures.task(task),
-                                TaskFixtures.result(
-                                        Map.of("review", Map.of("headSha", "head", "body", "x".repeat(30001))))));
-        final var oversizedFinding =
-                Map.<String, Object>of("path", "src/App.java", "side", "RIGHT", "line", 21, "body", "x".repeat(10001));
-        assertThrows(
-                IllegalArgumentException.class,
-                () -> publisher()
-                        .publish(TaskFixtures.task(task), TaskFixtures.result(result(List.of(oversizedFinding)))));
-        assertTrue(posts.isEmpty());
-        assertFalse(store.<Boolean>transaction(state -> (state.task(id()).reviewIntent() != null)));
+    @Nested
+    @FusionSupport(modules = CustomModule.class)
+    class Custom {
+        @Test
+        void customTemplatesPreserveLiteralMarkdownAndHostMarkers() {
+            final var literal = "**keep** & <T> {{summary}} {{{body}}} {{#if tests}}literal{{/if}}";
+            final var result = Map.<String, Object>of(
+                    "review",
+                            Map.of(
+                                    "headSha",
+                                    "head",
+                                    "body",
+                                    literal,
+                                    "comments",
+                                    List.of(Map.of(
+                                            "path", "src/App.java", "side", "RIGHT", "line", 21, "body", literal))),
+                    "tests", List.of("not run {{summary}}"));
+            publisher(presentation).publish(TaskFixtures.task(task), TaskFixtures.result(result));
+            final var posted = posts.getFirst();
+            assertEquals(marker() + "\nReport: " + literal + "\nnot run {{summary}}", posted.get("body"));
+            final var inline = TaskStore.map(((List<?>) posted.get("comments")).getFirst());
+            assertEquals(marker() + "\nFinding 1: " + literal, inline.get("body"));
+        }
     }
 
-    @Test
-    void rejectsStaleHeadBeforePublication() {
-        initialSha = "new-head";
-        assertThrows(
-                IllegalArgumentException.class,
-                () -> publisher().publish(TaskFixtures.task(task), TaskFixtures.result(result(List.of()))));
-        assertEquals(1, heads.get());
-        assertTrue(posts.isEmpty());
-    }
-
-    @Test
-    void rechecksHeadAfterDiffValidationBeforeWritingIntent() {
-        finalSha = "changed-during-validation";
-        assertThrows(
-                IllegalArgumentException.class,
-                () -> publisher()
-                        .publish(TaskFixtures.task(task), TaskFixtures.result(result(List.of(finding("RIGHT", 21))))));
-        assertEquals(2, heads.get());
-        assertTrue(posts.isEmpty());
-        assertFalse(store.<Boolean>transaction(state -> (state.task(id()).reviewIntent() != null)));
-    }
-
-    @Test
-    void ambiguousWriteBlocksDuplicatesUntilMatchingNativeReviewIsVisible() {
-        postStatus = 503;
-        assertThrows(
-                IllegalStateException.class,
-                () -> publisher().publish(TaskFixtures.task(task), TaskFixtures.result(result(List.of()))));
-        assertTrue(intentAtPost);
-        assertEquals(1, posts.size());
-        // A marker alone is not enough: author, commit and native review state must all match.
-        reviews = List.of(
-                review("intruder", "head", "COMMENTED"),
-                review("bot", "old-head", "COMMENTED"),
-                review("bot", "head", "PENDING"),
-                review("bot", "head", "APPROVED"));
-        assertThrows(
-                IllegalStateException.class,
-                () -> publisher().publish(TaskFixtures.task(task), TaskFixtures.result(result(List.of()))));
-        assertEquals(1, posts.size());
-        reviews = List.of(review("BoT", "head", "COMMENTED"));
-        // Reopen storage as after a dispatcher restart; no structured review is needed for
-        // reconciliation.
-        assertEquals(
-                URL,
-                BotTestConfiguration.reviewPublisher(
-                                github, new TaskStore(BotTestConfiguration.home(home), json), "bot")
-                        .publish(TaskFixtures.task(task), TaskFixtures.result(Map.of())));
-        assertEquals(1, posts.size());
-    }
-
-    @Test
-    void reconcilesPersistedReviewCommitAfterHeadMovesAcrossRestart() {
-        postStatus = 503;
-        assertThrows(
-                IllegalStateException.class,
-                () -> publisher().publish(TaskFixtures.task(task), TaskFixtures.result(result(List.of()))));
-        assertEquals("head", store.transaction(state -> state.task(id()).reviewIntentSha()));
-        initialSha = "new-head";
-        finalSha = "new-head";
-        reviews = List.of(review("bot", "head", "COMMENTED"));
-        assertEquals(
-                URL,
-                BotTestConfiguration.reviewPublisher(
-                                github, new TaskStore(BotTestConfiguration.home(home), json), "bot")
-                        .publish(TaskFixtures.task(task), TaskFixtures.result(Map.of())));
-        assertEquals(1, posts.size());
+    public static class CustomModule extends GithubConfigurationTestModule {
+        public CustomModule() {
+            super(Map.of(
+                    "github.review.presentation.reportTemplate",
+                    "Report: {{{summary}}}\n{{#each tests}}{{{this}}}{{/each}}",
+                    "github.review.presentation.findingTemplate",
+                    "Finding {{number}}: {{{body}}}"));
+        }
     }
 
     private Map<String, Object> review(final String login, final String sha, final String state) {
@@ -385,16 +418,11 @@ class ReviewPublisherTest {
     }
 
     private ReviewPublisher publisher() {
-        return publisher(presentation(Map.of()));
+        return publisher(presentation);
     }
 
     private ReviewPublisher publisher(final ReviewPresentationConfiguration presentation) {
         return new ReviewPublisher(github, store, BotTestConfiguration.configuration("", "bot", ""), presentation);
-    }
-
-    private ReviewPresentationConfiguration presentation(final Map<String, String> values) {
-        return ConfigurationLoader.load(
-                ReviewPresentationConfiguration.class, key -> Optional.ofNullable(values.get(key)));
     }
 
     private int occurrences(final String value, final String token) {

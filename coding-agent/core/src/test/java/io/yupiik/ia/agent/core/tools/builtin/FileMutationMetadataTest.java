@@ -23,10 +23,14 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.fusion.framework.api.event.Emitter;
+import io.yupiik.fusion.testing.Fusion;
+import io.yupiik.fusion.testing.FusionSupport;
 import io.yupiik.ia.agent.core.agent.AgentEvent;
-import io.yupiik.ia.agent.core.configuration.TestConfigs;
+import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
+import io.yupiik.ia.agent.core.configuration.ConfigurationTestModule;
 import io.yupiik.ia.agent.core.optimize.GenericOutputProcessor;
 import io.yupiik.ia.agent.core.runtime.Cancellations;
+import io.yupiik.ia.agent.core.sandbox.DisabledSandbox;
 import io.yupiik.ia.agent.core.security.ToolExecutionPrepare;
 import io.yupiik.ia.agent.core.tools.EmbeddedTool;
 import io.yupiik.ia.agent.core.tools.FileMutation;
@@ -38,10 +42,19 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+@FusionSupport(modules = FileMutationMetadataTest.OptimizationModule.class)
 class FileMutationMetadataTest {
+    private CodingAgentConfiguration configuration;
+
+    @BeforeEach
+    void configuration(@Fusion final CodingAgentConfiguration configuration) {
+        this.configuration = configuration;
+    }
+
     @TempDir
     Path root;
 
@@ -106,7 +119,9 @@ class FileMutationMetadataTest {
         final var path = root.resolve("edit.txt");
         Files.writeString(path, before);
         final var result = new EditFileTool()
-                .execute(Map.of("path", "edit.txt", "oldString", "old", "newString", "new"), ToolContext.empty(root));
+                .execute(
+                        Map.of("path", "edit.txt", "oldString", "old", "newString", "new"),
+                        ToolContext.empty(root, new DisabledSandbox(root)));
         assertTrue(result.success(), result.output());
         final var content = result.fileMutations().getFirst().content();
         assertEquals(before, content.oldText());
@@ -124,7 +139,7 @@ class FileMutationMetadataTest {
         final var result = new EditFileTool()
                 .execute(
                         Map.of("path", path.toString(), "oldString", "old", "newString", "new"),
-                        ToolContext.empty(root));
+                        ToolContext.empty(root, new DisabledSandbox(root)));
         assertTrue(result.success(), result.output());
         assertEquals(path, result.fileMutations().getFirst().path());
         assertEquals("new\n", Files.readString(root.resolve("destination/a.txt")));
@@ -240,7 +255,9 @@ class FileMutationMetadataTest {
         assertTrue(invalid.fileMutations().isEmpty());
         assertEquals("old\n", Files.readString(root.resolve("a.txt")));
         final var edit = new EditFileTool()
-                .execute(Map.of("path", "a.txt", "oldString", "old", "newString", "old"), ToolContext.empty(root));
+                .execute(
+                        Map.of("path", "a.txt", "oldString", "old", "newString", "old"),
+                        ToolContext.empty(root, new DisabledSandbox(root)));
         assertTrue(edit.success(), edit.output());
         assertTrue(edit.fileMutations().isEmpty());
         final var unchanged = patch("""
@@ -331,23 +348,31 @@ class FileMutationMetadataTest {
         assertNull(binary.fileMutations().getFirst().content());
         Files.writeString(root.resolve("nul.txt"), "old\u0000\n");
         final var nul = new EditFileTool()
-                .execute(Map.of("path", "nul.txt", "oldString", "old", "newString", "new"), ToolContext.empty(root));
+                .execute(
+                        Map.of("path", "nul.txt", "oldString", "old", "newString", "new"),
+                        ToolContext.empty(root, new DisabledSandbox(root)));
         assertTrue(nul.success(), nul.output());
         assertNull(nul.fileMutations().getFirst().content());
         final var big = "old" + "x".repeat(256 * 1024);
         Files.writeString(root.resolve("big.txt"), big);
         final var large = new EditFileTool()
-                .execute(Map.of("path", "big.txt", "oldString", "old", "newString", "new"), ToolContext.empty(root));
+                .execute(
+                        Map.of("path", "big.txt", "oldString", "old", "newString", "new"),
+                        ToolContext.empty(root, new DisabledSandbox(root)));
         assertTrue(large.success(), large.output());
         assertNull(large.fileMutations().getFirst().content());
-        final var created =
-                new WriteFileTool().execute(Map.of("path", "large-new.txt", "content", big), ToolContext.empty(root));
+        final var created = new WriteFileTool()
+                .execute(
+                        Map.of("path", "large-new.txt", "content", big),
+                        ToolContext.empty(root, new DisabledSandbox(root)));
         assertTrue(created.success(), created.output());
         assertEquals(
                 FileMutation.Kind.CREATE, created.fileMutations().getFirst().kind());
         assertNull(created.fileMutations().getFirst().content());
-        final var unknown =
-                new WriteFileTool().execute(Map.of("path", "binary.txt", "content", "safe"), ToolContext.empty(root));
+        final var unknown = new WriteFileTool()
+                .execute(
+                        Map.of("path", "binary.txt", "content", "safe"),
+                        ToolContext.empty(root, new DisabledSandbox(root)));
         assertTrue(unknown.success(), unknown.output());
         assertNull(unknown.fileMutations().getFirst().content());
     }
@@ -522,14 +547,10 @@ class FileMutationMetadataTest {
     }
 
     private ToolResult patch(final String patch) {
-        return new ApplyPatchTool().execute(Map.of("patch", patch), ToolContext.empty(root));
+        return new ApplyPatchTool().execute(Map.of("patch", patch), ToolContext.empty(root, new DisabledSandbox(root)));
     }
 
     private ToolExecutionService service(final RecordingEmitter bus) {
-        final var configuration = TestConfigs.codingAgent(Map.of(
-                "yca.storageHome", root.resolve("storage").toString(),
-                "yca.optimize.enabled", "true",
-                "yca.optimize.genericMaxLines", "10"));
         return new ToolExecutionService(configuration, bus, List.of(new GenericOutputProcessor(configuration)));
     }
 
@@ -548,6 +569,7 @@ class FileMutationMetadataTest {
                 null,
                 null,
                 workdir,
+                new DisabledSandbox(workdir),
                 ordinal,
                 null,
                 null,
@@ -575,6 +597,12 @@ class FileMutationMetadataTest {
                     .filter(AgentEvent.ToolFilesChanged.class::isInstance)
                     .map(AgentEvent.ToolFilesChanged.class::cast)
                     .toList();
+        }
+    }
+
+    public static class OptimizationModule extends ConfigurationTestModule {
+        public OptimizationModule() {
+            super(Map.of("yca.optimize.enabled", "true", "yca.optimize.genericMaxLines", "10"));
         }
     }
 }

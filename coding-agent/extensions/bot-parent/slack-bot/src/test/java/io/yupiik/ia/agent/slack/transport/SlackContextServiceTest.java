@@ -18,14 +18,15 @@ package io.yupiik.ia.agent.slack.transport;
 import static io.yupiik.ia.agent.slack.support.SlackDomainFixture.task;
 import static org.junit.jupiter.api.Assertions.*;
 
-import io.yupiik.fusion.framework.api.configuration.Configuration;
 import io.yupiik.fusion.json.JsonMapper;
-import io.yupiik.ia.agent.core.configuration.ConfigurationLoader;
+import io.yupiik.fusion.testing.Fusion;
+import io.yupiik.fusion.testing.FusionSupport;
 import io.yupiik.ia.agent.slack.configuration.SlackContextConfiguration;
 import io.yupiik.ia.agent.slack.context.SlackActionRegistry;
 import io.yupiik.ia.agent.slack.context.SlackContextService;
 import io.yupiik.ia.agent.slack.model.*;
 import io.yupiik.ia.agent.slack.support.ControlledHttpClient;
+import io.yupiik.ia.agent.slack.support.SlackConfigurationTestModule;
 import io.yupiik.ia.agent.slack.support.SlackJsonMapper;
 import java.net.URI;
 import java.time.Clock;
@@ -47,15 +48,17 @@ import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
 /** In the transport package solely to reuse the real HTTP fixture without widening production visibility. */
+@FusionSupport(modules = SlackContextServiceTest.ContextModule.class)
 class SlackContextServiceTest {
     private static final long NOW = 1800000000L;
     private static final String TS = "1799999900.000001";
     private static final String LINK = "https://example.slack.com/archives/C1/p1799999900000001";
 
     @Test
-    void permanentActionRejectionRevokesAllOperationsWithoutAnUpstreamReplayLatch() throws Exception {
+    void permanentActionRejectionRevokesAllOperationsWithoutAnUpstreamReplayLatch(
+            @Fusion final SlackContextConfiguration configuration) throws Exception {
         for (final var code : List.of("invalid_action_token", "action_token_expired", "expired_action_token")) {
-            try (final var fixture = new ContextFixture(Map.of())) {
+            try (final var fixture = new ContextFixture(configuration)) {
                 fixture.reply("{\"ok\":false,\"error\":\"" + code + "\"}");
                 assertThrows(
                         SlackWebApi.SlackApiException.class, () -> fixture.service.call(Map.of("operation", "search")));
@@ -75,8 +78,26 @@ class SlackContextServiceTest {
     }
 
     @Test
-    void workerStartCannotRenewAdmissionDeadlineAndMemberOnlySummaryHasNoSearchAuthority() throws Exception {
-        try (final var fixture = new ContextFixture(Map.of("searchEnabled", "false"), null)) {
+    void workerStartCannotRenewAdmissionDeadlineAndMemberOnlySummaryHasNoSearchAuthority(
+            @Fusion final SlackContextConfiguration configuration) throws Exception {
+        try (final var fixture = new ContextFixture(
+                new SlackContextConfiguration(
+                        configuration.enabled(),
+                        configuration.resolveMentions(),
+                        false,
+                        configuration.sourceChannels(),
+                        configuration.lookbackDays(),
+                        configuration.maxMembers(),
+                        configuration.maxRequests(),
+                        configuration.maxResults(),
+                        configuration.maxResponseBytes(),
+                        configuration.timeoutSeconds(),
+                        configuration.maxConcurrent(),
+                        configuration.actionRetentionSeconds(),
+                        configuration.allowSwapBackedTmpfs(),
+                        configuration.thread(),
+                        configuration.allowContainerLogs()),
+                null)) {
             fixture.clock.advance(400);
             try (final var delayed =
                     new SlackContextService(fixture.configuration, fixture.api, fixture.grant, fixture.clock)) {
@@ -102,13 +123,8 @@ class SlackContextServiceTest {
     }
 
     @Test
-    void maintenanceCancelsAControlledUpstreamFutureWithoutPollingAndDropsLateCompletion() throws Exception {
-        final var configuration = ConfigurationLoader.load(
-                SlackContextConfiguration.class,
-                Configuration.of(Map.of(
-                        "slack.context.enabled", "true",
-                        "slack.context.searchEnabled", "true",
-                        "slack.context.sourceChannels", "C1")));
+    void maintenanceCancelsAControlledUpstreamFutureWithoutPollingAndDropsLateCompletion(
+            @Fusion final SlackContextConfiguration configuration) throws Exception {
         for (final var cancellable : List.of(true, false)) {
             final var upstream = new ControlledHttpClient(cancellable);
             final var clock = new MutableClock();
@@ -153,8 +169,24 @@ class SlackContextServiceTest {
     }
 
     @Test
-    void grantsOnlyRequesterAndExplicitMentionsAndCachesOnlyMinimalNames() throws Exception {
-        try (final var fixture = new ContextFixture(Map.of("maxMembers", "3"))) {
+    void grantsOnlyRequesterAndExplicitMentionsAndCachesOnlyMinimalNames(
+            @Fusion final SlackContextConfiguration configuration) throws Exception {
+        try (final var fixture = new ContextFixture(new SlackContextConfiguration(
+                configuration.enabled(),
+                configuration.resolveMentions(),
+                configuration.searchEnabled(),
+                configuration.sourceChannels(),
+                configuration.lookbackDays(),
+                3,
+                configuration.maxRequests(),
+                configuration.maxResults(),
+                configuration.maxResponseBytes(),
+                configuration.timeoutSeconds(),
+                configuration.maxConcurrent(),
+                configuration.actionRetentionSeconds(),
+                configuration.allowSwapBackedTmpfs(),
+                configuration.thread(),
+                configuration.allowContainerLogs()))) {
             fixture.reply(member("U2", "T1", false, false));
             assertEquals(
                     List.of("U1", "U2", "W3"),
@@ -181,8 +213,9 @@ class SlackContextServiceTest {
     }
 
     @Test
-    void rejectsForeignDeletedBotMismatchedAndIncompleteMembers() throws Exception {
-        try (final var fixture = new ContextFixture(Map.of())) {
+    void rejectsForeignDeletedBotMismatchedAndIncompleteMembers(@Fusion final SlackContextConfiguration configuration)
+            throws Exception {
+        try (final var fixture = new ContextFixture(configuration)) {
             for (final var body : List.of(
                     member("U2", "T2", false, false),
                     member("U9", "T1", false, false),
@@ -198,8 +231,9 @@ class SlackContextServiceTest {
     }
 
     @Test
-    void requestScopeIsPublicMessagesOnlyWithLiteralTermsAndNoContextExpansion() throws Exception {
-        try (final var fixture = new ContextFixture(Map.of())) {
+    void requestScopeIsPublicMessagesOnlyWithLiteralTermsAndNoContextExpansion(
+            @Fusion final SlackContextConfiguration configuration) throws Exception {
+        try (final var fixture = new ContextFixture(configuration)) {
             fixture.reply(searchBody(List.of(message("U2", "T1", "C1", "hello <@W3>", LINK)), null));
             final var result = fixture.service.call(Map.of(
                     "operation",
@@ -233,8 +267,9 @@ class SlackContextServiceTest {
     }
 
     @Test
-    void rejectsQuerySyntaxScopeOverridesUnknownUsersAndOutOfWindowRangesBeforeHttp() throws Exception {
-        try (final var fixture = new ContextFixture(Map.of())) {
+    void rejectsQuerySyntaxScopeOverridesUnknownUsersAndOutOfWindowRangesBeforeHttp(
+            @Fusion final SlackContextConfiguration configuration) throws Exception {
+        try (final var fixture = new ContextFixture(configuration)) {
             for (final var term : List.of(
                     "in:C2",
                     "foo\" OR in:C2",
@@ -268,8 +303,24 @@ class SlackContextServiceTest {
     }
 
     @Test
-    void validatesEveryResultAndOnlyReturnedAuthorsGainGrants() throws Exception {
-        try (final var fixture = new ContextFixture(Map.of("maxMembers", "6"))) {
+    void validatesEveryResultAndOnlyReturnedAuthorsGainGrants(@Fusion final SlackContextConfiguration configuration)
+            throws Exception {
+        try (final var fixture = new ContextFixture(new SlackContextConfiguration(
+                configuration.enabled(),
+                configuration.resolveMentions(),
+                configuration.searchEnabled(),
+                configuration.sourceChannels(),
+                configuration.lookbackDays(),
+                6,
+                configuration.maxRequests(),
+                configuration.maxResults(),
+                configuration.maxResponseBytes(),
+                configuration.timeoutSeconds(),
+                configuration.maxConcurrent(),
+                configuration.actionRetentionSeconds(),
+                configuration.allowSwapBackedTmpfs(),
+                configuration.thread(),
+                configuration.allowContainerLogs()))) {
             final var candidates = new ArrayList<Map<String, Object>>();
             candidates.add(message("U9", "T2", "C1", "foreign", LINK));
             candidates.add(message("U9", "T1", "C2", "other", LINK));
@@ -300,8 +351,9 @@ class SlackContextServiceTest {
     }
 
     @Test
-    void authorAndMentionFiltersAreAlsoCheckedOnReturnedMessages() throws Exception {
-        try (final var fixture = new ContextFixture(Map.of())) {
+    void authorAndMentionFiltersAreAlsoCheckedOnReturnedMessages(@Fusion final SlackContextConfiguration configuration)
+            throws Exception {
+        try (final var fixture = new ContextFixture(configuration)) {
             fixture.reply(searchBody(
                     List.of(
                             message("U5", "T1", "C1", "<@W3>", LINK),
@@ -317,8 +369,24 @@ class SlackContextServiceTest {
     }
 
     @Test
-    void paginationIsOpaqueSingleUseExactQueryBoundAndExpiresWithTheAttempt() throws Exception {
-        try (final var fixture = new ContextFixture(Map.of("actionRetentionSeconds", "10"))) {
+    void paginationIsOpaqueSingleUseExactQueryBoundAndExpiresWithTheAttempt(
+            @Fusion final SlackContextConfiguration configuration) throws Exception {
+        try (final var fixture = new ContextFixture(new SlackContextConfiguration(
+                configuration.enabled(),
+                configuration.resolveMentions(),
+                configuration.searchEnabled(),
+                configuration.sourceChannels(),
+                configuration.lookbackDays(),
+                configuration.maxMembers(),
+                configuration.maxRequests(),
+                configuration.maxResults(),
+                configuration.maxResponseBytes(),
+                configuration.timeoutSeconds(),
+                configuration.maxConcurrent(),
+                10,
+                configuration.allowSwapBackedTmpfs(),
+                configuration.thread(),
+                configuration.allowContainerLogs()))) {
             fixture.reply(searchBody(List.of(message("U2", "T1", "C1", "safe", LINK)), "upstream-secret"));
             final var first = fixture.service.call(Map.of("operation", "search", "terms", List.of("safe"), "limit", 1));
             fixture.http.take(fixture.http.requests);
@@ -359,9 +427,10 @@ class SlackContextServiceTest {
     }
 
     @Test
-    void independentAttemptsCannotUseEachOthersPageTokens() throws Exception {
-        try (final var one = new ContextFixture(Map.of());
-                final var two = new ContextFixture(Map.of())) {
+    void independentAttemptsCannotUseEachOthersPageTokens(@Fusion final SlackContextConfiguration configuration)
+            throws Exception {
+        try (final var one = new ContextFixture(configuration);
+                final var two = new ContextFixture(configuration)) {
             one.reply(searchBody(List.of(), "cursor"));
             final var token = one.service.call(Map.of("operation", "search")).get("pageToken");
             assertThrows(
@@ -372,22 +441,86 @@ class SlackContextServiceTest {
     }
 
     @Test
-    void disabledFeaturesAndUnlistedSourcesNeverCallSlack() throws Exception {
-        for (final var overrides : List.of(Map.of("searchEnabled", "false"), Map.of("sourceChannels", "C2"))) {
+    void disabledFeaturesAndUnlistedSourcesNeverCallSlack(@Fusion final SlackContextConfiguration configuration)
+            throws Exception {
+        for (final var overrides : List.of(
+                new SlackContextConfiguration(
+                        configuration.enabled(),
+                        configuration.resolveMentions(),
+                        false,
+                        configuration.sourceChannels(),
+                        configuration.lookbackDays(),
+                        configuration.maxMembers(),
+                        configuration.maxRequests(),
+                        configuration.maxResults(),
+                        configuration.maxResponseBytes(),
+                        configuration.timeoutSeconds(),
+                        configuration.maxConcurrent(),
+                        configuration.actionRetentionSeconds(),
+                        configuration.allowSwapBackedTmpfs(),
+                        configuration.thread(),
+                        configuration.allowContainerLogs()),
+                new SlackContextConfiguration(
+                        configuration.enabled(),
+                        configuration.resolveMentions(),
+                        configuration.searchEnabled(),
+                        List.of("C2"),
+                        configuration.lookbackDays(),
+                        configuration.maxMembers(),
+                        configuration.maxRequests(),
+                        configuration.maxResults(),
+                        configuration.maxResponseBytes(),
+                        configuration.timeoutSeconds(),
+                        configuration.maxConcurrent(),
+                        configuration.actionRetentionSeconds(),
+                        configuration.allowSwapBackedTmpfs(),
+                        configuration.thread(),
+                        configuration.allowContainerLogs()))) {
             try (final var fixture = new ContextFixture(overrides)) {
                 assertThrows(IllegalStateException.class, () -> fixture.service.call(Map.of("operation", "search")));
                 assertTrue(fixture.http.requests.isEmpty());
             }
         }
-        try (final var fixture = new ContextFixture(Map.of("resolveMentions", "false"))) {
+        try (final var fixture = new ContextFixture(new SlackContextConfiguration(
+                configuration.enabled(),
+                false,
+                configuration.searchEnabled(),
+                configuration.sourceChannels(),
+                configuration.lookbackDays(),
+                configuration.maxMembers(),
+                configuration.maxRequests(),
+                configuration.maxResults(),
+                configuration.maxResponseBytes(),
+                configuration.timeoutSeconds(),
+                configuration.maxConcurrent(),
+                configuration.actionRetentionSeconds(),
+                configuration.allowSwapBackedTmpfs(),
+                configuration.thread(),
+                configuration.allowContainerLogs()))) {
             assertThrows(IllegalArgumentException.class, () -> fixture.resolve("U1"));
             assertTrue(fixture.http.requests.isEmpty());
         }
     }
 
     @Test
-    void requestFailuresConsumeBudgetAndNeverLeakUpstreamErrorsOrCredentials() throws Exception {
-        try (final var fixture = new ContextFixture(Map.of("maxRequests", "1"))) {
+    void requestFailuresConsumeBudgetAndNeverLeakUpstreamErrorsOrCredentials(
+            @Fusion final SlackContextConfiguration configuration) throws Exception {
+        try (final var fixture = new ContextFixture(new SlackContextConfiguration(
+                configuration.enabled(),
+                configuration.resolveMentions(),
+                configuration.searchEnabled(),
+                configuration.sourceChannels(),
+                configuration.lookbackDays(),
+                configuration.maxMembers(),
+                1,
+                configuration.maxResults(),
+                configuration.maxResponseBytes(),
+                configuration.timeoutSeconds(),
+                configuration.maxConcurrent(),
+                configuration.actionRetentionSeconds(),
+                configuration.allowSwapBackedTmpfs(),
+                configuration.thread(),
+                configuration.allowContainerLogs()))) {
             fixture.reply("{\"ok\":false,\"error\":\"action-secret\"}");
             final var error = assertThrows(IllegalStateException.class, () -> fixture.resolve("U1"));
             assertNull(error.getCause());
@@ -396,7 +529,7 @@ class SlackContextServiceTest {
             assertThrows(IllegalStateException.class, () -> fixture.resolve("U2"));
             assertTrue(fixture.http.requests.isEmpty());
         }
-        try (final var fixture = new ContextFixture(Map.of(), null)) {
+        try (final var fixture = new ContextFixture(configuration, null)) {
             final var error = assertThrows(
                     IllegalStateException.class, () -> fixture.service.call(Map.of("operation", "search")));
             assertNull(error.getCause());
@@ -406,8 +539,24 @@ class SlackContextServiceTest {
     }
 
     @Test
-    void resultAndByteBudgetsPreventUnboundedOutputAndGrants() throws Exception {
-        try (final var fixture = new ContextFixture(Map.of("maxResults", "1"))) {
+    void resultAndByteBudgetsPreventUnboundedOutputAndGrants(@Fusion final SlackContextConfiguration configuration)
+            throws Exception {
+        try (final var fixture = new ContextFixture(new SlackContextConfiguration(
+                configuration.enabled(),
+                configuration.resolveMentions(),
+                configuration.searchEnabled(),
+                configuration.sourceChannels(),
+                configuration.lookbackDays(),
+                configuration.maxMembers(),
+                configuration.maxRequests(),
+                1,
+                configuration.maxResponseBytes(),
+                configuration.timeoutSeconds(),
+                configuration.maxConcurrent(),
+                configuration.actionRetentionSeconds(),
+                configuration.allowSwapBackedTmpfs(),
+                configuration.thread(),
+                configuration.allowContainerLogs()))) {
             fixture.reply(searchBody(
                     List.of(message("U5", "T1", "C1", "one", LINK), message("U6", "T1", "C1", "two", LINK)), "cursor"));
             final var result = fixture.service.call(Map.of("operation", "search"));
@@ -418,7 +567,22 @@ class SlackContextServiceTest {
             assertThrows(IllegalArgumentException.class, () -> fixture.resolve("U6"));
             assertTrue(fixture.http.requests.isEmpty());
         }
-        try (final var fixture = new ContextFixture(Map.of("maxResponseBytes", "4096"))) {
+        try (final var fixture = new ContextFixture(new SlackContextConfiguration(
+                configuration.enabled(),
+                configuration.resolveMentions(),
+                configuration.searchEnabled(),
+                configuration.sourceChannels(),
+                configuration.lookbackDays(),
+                configuration.maxMembers(),
+                configuration.maxRequests(),
+                configuration.maxResults(),
+                4096,
+                configuration.timeoutSeconds(),
+                configuration.maxConcurrent(),
+                configuration.actionRetentionSeconds(),
+                configuration.allowSwapBackedTmpfs(),
+                configuration.thread(),
+                configuration.allowContainerLogs()))) {
             fixture.reply(searchBody(List.of(message("U5", "T1", "C1", "x".repeat(10000), LINK)), null));
             assertThrows(IllegalStateException.class, () -> fixture.service.call(Map.of("operation", "search")));
             assertThrows(IllegalArgumentException.class, () -> fixture.resolve("U5"));
@@ -426,8 +590,24 @@ class SlackContextServiceTest {
     }
 
     @Test
-    void expiryDuringAnUpstreamCallDiscardsTheResponseAndRevokesCachedCapabilities() throws Exception {
-        try (final var fixture = new ContextFixture(Map.of("actionRetentionSeconds", "2"))) {
+    void expiryDuringAnUpstreamCallDiscardsTheResponseAndRevokesCachedCapabilities(
+            @Fusion final SlackContextConfiguration configuration) throws Exception {
+        try (final var fixture = new ContextFixture(new SlackContextConfiguration(
+                configuration.enabled(),
+                configuration.resolveMentions(),
+                configuration.searchEnabled(),
+                configuration.sourceChannels(),
+                configuration.lookbackDays(),
+                configuration.maxMembers(),
+                configuration.maxRequests(),
+                configuration.maxResults(),
+                configuration.maxResponseBytes(),
+                configuration.timeoutSeconds(),
+                configuration.maxConcurrent(),
+                2,
+                configuration.allowSwapBackedTmpfs(),
+                configuration.thread(),
+                configuration.allowContainerLogs()))) {
             fixture.http.respond(request -> {
                 fixture.clock.advance(2);
                 return new SlackTransportFixture.Response(200, Map.of(), member("U1", "T1", false, false));
@@ -440,8 +620,24 @@ class SlackContextServiceTest {
     }
 
     @Test
-    void repeatedCachedResponsesStillConsumeTheCumulativeByteBudget() throws Exception {
-        try (final var fixture = new ContextFixture(Map.of("maxResponseBytes", "1024"))) {
+    void repeatedCachedResponsesStillConsumeTheCumulativeByteBudget(
+            @Fusion final SlackContextConfiguration configuration) throws Exception {
+        try (final var fixture = new ContextFixture(new SlackContextConfiguration(
+                configuration.enabled(),
+                configuration.resolveMentions(),
+                configuration.searchEnabled(),
+                configuration.sourceChannels(),
+                configuration.lookbackDays(),
+                configuration.maxMembers(),
+                configuration.maxRequests(),
+                configuration.maxResults(),
+                1024,
+                configuration.timeoutSeconds(),
+                configuration.maxConcurrent(),
+                configuration.actionRetentionSeconds(),
+                configuration.allowSwapBackedTmpfs(),
+                configuration.thread(),
+                configuration.allowContainerLogs()))) {
             fixture.reply(member("U1", "T1", false, false));
             fixture.resolve("U1");
             fixture.http.take(fixture.http.requests);
@@ -460,8 +656,9 @@ class SlackContextServiceTest {
     }
 
     @Test
-    void closeCancelsInFlightWorkAndRejectsLateResponsesWithoutGrantingAuthors() throws Exception {
-        try (final var fixture = new ContextFixture(Map.of())) {
+    void closeCancelsInFlightWorkAndRejectsLateResponsesWithoutGrantingAuthors(
+            @Fusion final SlackContextConfiguration configuration) throws Exception {
+        try (final var fixture = new ContextFixture(configuration)) {
             final var entered = new CountDownLatch(1);
             final var release = new CountDownLatch(1);
             fixture.http.respond(request -> {
@@ -489,8 +686,24 @@ class SlackContextServiceTest {
     }
 
     @Test
-    void enforcesPerServiceConcurrencyAndCancelsTimeouts() throws Exception {
-        try (final var fixture = new ContextFixture(Map.of("maxConcurrent", "1", "timeoutSeconds", "1"))) {
+    void enforcesPerServiceConcurrencyAndCancelsTimeouts(@Fusion final SlackContextConfiguration configuration)
+            throws Exception {
+        try (final var fixture = new ContextFixture(new SlackContextConfiguration(
+                configuration.enabled(),
+                configuration.resolveMentions(),
+                configuration.searchEnabled(),
+                configuration.sourceChannels(),
+                configuration.lookbackDays(),
+                configuration.maxMembers(),
+                configuration.maxRequests(),
+                configuration.maxResults(),
+                configuration.maxResponseBytes(),
+                1,
+                1,
+                configuration.actionRetentionSeconds(),
+                configuration.allowSwapBackedTmpfs(),
+                configuration.thread(),
+                configuration.allowContainerLogs()))) {
             final var entered = new CountDownLatch(1);
             final var release = new CountDownLatch(1);
             fixture.http.respond(request -> {
@@ -557,6 +770,18 @@ class SlackContextServiceTest {
                 + "\"email\":\"private@example.invalid\"}}}";
     }
 
+    public static class ContextModule extends SlackConfigurationTestModule {
+        public ContextModule() {
+            super(Map.of(
+                    "slack.context.enabled",
+                    "true",
+                    "slack.context.searchEnabled",
+                    "true",
+                    "slack.context.sourceChannels",
+                    "C1"));
+        }
+    }
+
     private static final class ContextFixture implements AutoCloseable {
         private final SlackTransportFixture http = new SlackTransportFixture();
         private final JsonMapper json = SlackJsonMapper.create();
@@ -567,18 +792,12 @@ class SlackContextServiceTest {
         private final SlackContextConfiguration configuration;
         private final SlackWebApi api;
 
-        private ContextFixture(final Map<String, String> overrides) throws Exception {
-            this(overrides, "action-secret");
+        private ContextFixture(final SlackContextConfiguration configuration) throws Exception {
+            this(configuration, "action-secret");
         }
 
-        private ContextFixture(final Map<String, String> overrides, final String token) throws Exception {
-            final var settings = new HashMap<String, String>();
-            settings.put("slack.context.enabled", "true");
-            settings.put("slack.context.searchEnabled", "true");
-            settings.put("slack.context.sourceChannels", "C1");
-            overrides.forEach((key, value) -> settings.put("slack.context." + key, value));
-            configuration = ConfigurationLoader.load(
-                    io.yupiik.ia.agent.slack.configuration.SlackContextConfiguration.class, Configuration.of(settings));
+        private ContextFixture(final SlackContextConfiguration configuration, final String token) throws Exception {
+            this.configuration = configuration;
             api = new SlackWebApi(
                     json,
                     http.extended,

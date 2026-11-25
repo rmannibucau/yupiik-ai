@@ -17,12 +17,13 @@ package io.yupiik.ia.agent.core.llm;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-import io.yupiik.fusion.framework.api.configuration.Configuration;
 import io.yupiik.fusion.httpclient.core.ExtendedHttpClient;
 import io.yupiik.fusion.httpclient.core.ExtendedHttpClientConfiguration;
-import io.yupiik.ia.agent.core.configuration.ConfigurationLoader;
+import io.yupiik.fusion.testing.Fusion;
+import io.yupiik.fusion.testing.FusionSupport;
+import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
+import io.yupiik.ia.agent.core.configuration.ConfigurationTestModule;
 import io.yupiik.ia.agent.core.configuration.NativeProviderConfiguration;
-import io.yupiik.ia.agent.core.configuration.TestConfigs;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import java.io.IOException;
 import java.net.Authenticator;
@@ -51,48 +52,77 @@ import java.util.concurrent.Executor;
 import java.util.concurrent.TimeUnit;
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.SSLParameters;
+import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.params.ParameterizedTest;
-import org.junit.jupiter.params.provider.EnumSource;
+import org.junit.jupiter.api.io.TempDir;
 
 class UnixProviderHttpClientTest {
-    @Test
-    void typedConfigurationUsesDottedKeyAndDefaultsToDisabled() {
-        final var disabled = ConfigurationLoader.load(NativeProviderConfiguration.class, Configuration.of(Map.of()));
-        assertNull(disabled.socket());
-        assertEquals(ApiFlavor.COMPLETIONS, disabled.api());
-        try (final var delegate = new NoNetworkClient()) {
-            assertSame(delegate, UnixProviderHttpClient.fromConfiguration(delegate, disabled));
-            final var configured = ConfigurationLoader.load(
-                    NativeProviderConfiguration.class,
-                    Configuration.of(Map.of("yca.native.provider.socket", "relative")));
-            assertEquals("relative", configured.socket());
-            assertThrows(
-                    IllegalArgumentException.class,
-                    () -> UnixProviderHttpClient.fromConfiguration(delegate, configured));
+    @TempDir
+    static Path nativeRoot;
+
+    @Nested
+    @FusionSupport(modules = ConfigurationTestModule.class)
+    class DisabledConfiguration {
+        @Test
+        void typedConfigurationDefaultsToDisabled(@Fusion final NativeProviderConfiguration disabled) {
+            assertNull(disabled.socket());
+            assertEquals(ApiFlavor.COMPLETIONS, disabled.api());
+            try (final var delegate = new NoNetworkClient()) {
+                assertSame(delegate, UnixProviderHttpClient.fromConfiguration(delegate, disabled));
+            }
         }
     }
 
-    @ParameterizedTest
-    @EnumSource(
-            value = ApiFlavor.class,
-            names = {"COMPLETIONS", "RESPONSES"})
-    void actualChatClientUsesPreparedNativeTransport(final ApiFlavor api) throws Exception {
-        final var directory = Files.createTempDirectory("yca-chat-uds-");
-        final var path = directory.resolve("p");
+    @Nested
+    @FusionSupport(modules = RelativeModule.class)
+    class RelativeConfiguration {
+        @Test
+        void typedConfigurationUsesDottedKey(@Fusion final NativeProviderConfiguration configured) {
+            assertEquals("relative", configured.socket());
+            try (final var delegate = new NoNetworkClient()) {
+                assertThrows(
+                        IllegalArgumentException.class,
+                        () -> UnixProviderHttpClient.fromConfiguration(delegate, configured));
+            }
+        }
+    }
+
+    @Nested
+    @FusionSupport(modules = CompletionsModule.class)
+    class NativeCompletions {
+        @Test
+        void actualChatClientUsesPreparedNativeTransport(
+                @Fusion final CodingAgentConfiguration config,
+                @Fusion final NativeProviderConfiguration nativeConfiguration)
+                throws Exception {
+            nativeTransport(config, nativeConfiguration);
+        }
+    }
+
+    @Nested
+    @FusionSupport(modules = ResponsesModule.class)
+    class NativeResponses {
+        @Test
+        void actualChatClientUsesPreparedNativeTransport(
+                @Fusion final CodingAgentConfiguration config,
+                @Fusion final NativeProviderConfiguration nativeConfiguration)
+                throws Exception {
+            nativeTransport(config, nativeConfiguration);
+        }
+    }
+
+    private void nativeTransport(
+            final CodingAgentConfiguration config, final NativeProviderConfiguration nativeConfiguration)
+            throws Exception {
+        final var api = nativeConfiguration.api();
+        final var path = Path.of(nativeConfiguration.socket());
+        final var directory = Files.createDirectories(path.getParent());
         final var served = new CompletableFuture<Void>();
         try (final var listener = ServerSocketChannel.open(StandardProtocolFamily.UNIX);
                 final var mapper = JsonMappers.create(ignored -> Optional.empty());
                 final var http = new ExtendedHttpClient(new ExtendedHttpClientConfiguration()
                         .setDelegate(UnixProviderHttpClient.fromConfiguration(
-                                new NoNetworkClient(),
-                                ConfigurationLoader.load(
-                                        NativeProviderConfiguration.class,
-                                        Configuration.of(Map.of(
-                                                "yca.native.provider.socket",
-                                                path.toString(),
-                                                "yca.native.provider.api",
-                                                api.name()))))))) {
+                                new NoNetworkClient(), nativeConfiguration)))) {
             listener.bind(UnixDomainSocketAddress.of(path));
             Thread.ofVirtual().start(() -> {
                 try (final var channel = listener.accept()) {
@@ -106,8 +136,10 @@ class UnixProviderHttpClientTest {
                     out.writeInt(200);
                     out.writeUTF("application/json");
                     final var body = (api == ApiFlavor.RESPONSES
-                                    ? "{\"id\":\"r1\",\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"native answer\"}]}]}"
-                                    : "{\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"native answer\"},\"finish_reason\":\"stop\"}]}")
+                                    ? "{\"id\":\"r1\",\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"native"
+                                            + " answer\"}]}]}"
+                                    : "{\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"native"
+                                            + " answer\"},\"finish_reason\":\"stop\"}]}")
                             .getBytes(StandardCharsets.UTF_8);
                     out.writeInt(body.length);
                     out.write(body);
@@ -117,14 +149,6 @@ class UnixProviderHttpClientTest {
                     served.completeExceptionally(e);
                 }
             });
-            final var config = TestConfigs.codingAgent(Map.of(
-                    "yca.storageHome", directory.toString(),
-                    "yca.provider.baseUrl", UnixProviderProtocol.endpoint(api).toString(),
-                    "yca.provider.apiKey", "attempt-capability",
-                    "yca.provider.model", "test-model",
-                    "yca.provider.api", api.name(),
-                    "yca.provider.contextWindow", "128000",
-                    "yca.llm.retriesMaxAttempts", "1"));
             try (final var chat =
                     new ChatClient(config, mapper, new ProviderManager(config, mapper), Clock.systemUTC(), http)) {
                 final var result = chat.chat(new ChatCompletionRequest(
@@ -332,5 +356,37 @@ class UnixProviderHttpClientTest {
                 final HttpResponse.PushPromiseHandler<T> push) {
             throw new AssertionError("Unexpected network dispatch");
         }
+    }
+
+    public static class RelativeModule extends ConfigurationTestModule {
+        public RelativeModule() {
+            super(Map.of("yca.native.provider.socket", "relative"));
+        }
+    }
+
+    public static class CompletionsModule extends ConfigurationTestModule {
+        public CompletionsModule() {
+            super(nativeValues(ApiFlavor.COMPLETIONS));
+        }
+    }
+
+    public static class ResponsesModule extends ConfigurationTestModule {
+        public ResponsesModule() {
+            super(nativeValues(ApiFlavor.RESPONSES));
+        }
+    }
+
+    private static Map<String, String> nativeValues(final ApiFlavor api) {
+        final var directory = nativeRoot.resolve(api.name());
+        return Map.of(
+                "yca.storageHome", directory.toString(),
+                "yca.provider.baseUrl", UnixProviderProtocol.endpoint(api).toString(),
+                "yca.provider.apiKey", "attempt-capability",
+                "yca.provider.model", "test-model",
+                "yca.provider.api", api.name(),
+                "yca.provider.contextWindow", "128000",
+                "yca.llm.retriesMaxAttempts", "1",
+                "yca.native.provider.socket", directory.resolve("p").toString(),
+                "yca.native.provider.api", api.name());
     }
 }

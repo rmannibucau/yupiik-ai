@@ -27,11 +27,13 @@ import io.yupiik.ia.agent.core.memory.MemoryProductionPolicy;
 import io.yupiik.ia.agent.core.permissions.PermissionService;
 import io.yupiik.ia.agent.core.question.UserFeedbackService;
 import io.yupiik.ia.agent.core.runtime.StatusReporter;
+import io.yupiik.ia.agent.core.sandbox.Sandbox;
 import io.yupiik.ia.agent.core.session.SessionMetadata;
 import io.yupiik.ia.agent.core.todo.TodoStore;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Objects;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.BooleanSupplier;
 
 /**
@@ -69,7 +71,8 @@ public final class SessionRuntime {
             final StatusReporter status,
             final ContextManager contextManager,
             final SystemPromptBuilder systemPromptBuilder,
-            final Path workdir) {
+            final Path workdir,
+            final Sandbox sandbox) {
         this(
                 loop,
                 permissions,
@@ -81,7 +84,8 @@ public final class SessionRuntime {
                 systemPromptBuilder,
                 null,
                 null,
-                workdir);
+                workdir,
+                sandbox);
     }
 
     SessionRuntime(
@@ -95,10 +99,14 @@ public final class SessionRuntime {
             final SystemPromptBuilder systemPromptBuilder,
             final MemoryProductionPolicy memoryProductionPolicy,
             final String memoryProductionKey,
-            final Path workdir) {
+            final Path workdir,
+            final Sandbox sandbox) {
         this.workdir = Objects.requireNonNull(workdir, "workdir");
+        this.sandbox = Objects.requireNonNull(sandbox, "sandbox");
         this.loop = loop;
         this.permissions = permissions;
+        permissions.setAgentModeChangeListener(sandbox::revoke);
+        permissions.setPermissionModeChangeListener(sandbox::revoke);
         this.feedback = feedback;
         this.usage = usage;
         this.todos = todos;
@@ -107,6 +115,13 @@ public final class SessionRuntime {
         this.systemPromptBuilder = systemPromptBuilder;
         this.memoryProductionPolicy = memoryProductionPolicy;
         this.memoryProductionKey = memoryProductionKey;
+    }
+
+    private final Sandbox sandbox;
+    private final AtomicBoolean closed = new AtomicBoolean();
+
+    public Sandbox sandbox() {
+        return sandbox;
     }
 
     public Path workdir() {
@@ -213,8 +228,15 @@ public final class SessionRuntime {
 
     /** Releases the session: fires the {@code yca.hooks.SessionEnded} hook once (idempotent like the loop). */
     public void close() {
+        if (!closed.compareAndSet(false, true)) {
+            return;
+        }
         permissions.subagentRoutes().close();
-        loop.close();
+        try {
+            loop.close();
+        } finally {
+            sandbox.close();
+        }
         // release the per-session memory-production flag so the application-scoped policy never leaks
         if (memoryProductionPolicy != null && memoryProductionKey != null && !memoryProductionKey.isBlank()) {
             memoryProductionPolicy.clear(memoryProductionKey);

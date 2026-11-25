@@ -16,7 +16,7 @@
 package io.yupiik.ia.agent.core.mcp;
 
 import io.yupiik.ai.mcp.client.McpServerTool;
-import io.yupiik.ia.agent.core.tools.EmbeddedTool;
+import io.yupiik.ia.agent.core.tools.SandboxIntegration;
 import io.yupiik.ia.agent.core.tools.ToolCategory;
 import io.yupiik.ia.agent.core.tools.ToolContext;
 import io.yupiik.ia.agent.core.tools.ToolResult;
@@ -24,7 +24,7 @@ import java.nio.file.Path;
 import java.util.Map;
 import java.util.regex.Pattern;
 
-class McpEmbeddedTool implements EmbeddedTool {
+class McpEmbeddedTool implements SandboxIntegration {
     private static final Pattern UNSAFE_NAME = Pattern.compile("[^A-Za-z0-9_-]");
 
     private final McpManager manager;
@@ -41,6 +41,11 @@ class McpEmbeddedTool implements EmbeddedTool {
 
     private static String sanitize(final String s) {
         return UNSAFE_NAME.matcher(s).replaceAll("_");
+    }
+
+    @Override
+    public String sandboxIntegrationId() {
+        return "mcp:" + serverName;
     }
 
     @Override

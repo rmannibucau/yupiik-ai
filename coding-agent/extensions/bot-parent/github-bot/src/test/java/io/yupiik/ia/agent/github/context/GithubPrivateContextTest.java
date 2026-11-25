@@ -19,7 +19,8 @@ import static org.junit.jupiter.api.Assertions.*;
 
 import com.sun.net.httpserver.HttpServer;
 import io.yupiik.fusion.json.JsonMapper;
-import io.yupiik.ia.agent.core.configuration.ConfigurationLoader;
+import io.yupiik.fusion.testing.Fusion;
+import io.yupiik.fusion.testing.FusionSupport;
 import io.yupiik.ia.agent.github.client.GitHubClient;
 import io.yupiik.ia.agent.github.configuration.GithubExecutorConfiguration;
 import io.yupiik.ia.agent.github.configuration.PromptConfiguration;
@@ -27,6 +28,7 @@ import io.yupiik.ia.agent.github.configuration.WorkerOptions.SourceMode;
 import io.yupiik.ia.agent.github.execution.AttemptPreparation;
 import io.yupiik.ia.agent.github.support.BotJsonMapper;
 import io.yupiik.ia.agent.github.support.BotTestConfiguration;
+import io.yupiik.ia.agent.github.support.GithubConfigurationTestModule;
 import io.yupiik.ia.agent.github.support.TaskFixtures;
 import java.io.IOException;
 import java.net.InetSocketAddress;
@@ -46,7 +48,14 @@ import java.util.function.Function;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+@FusionSupport(modules = GithubConfigurationTestModule.class)
 class GithubPrivateContextTest {
+    @Fusion
+    private PromptConfiguration prompts;
+
+    @Fusion
+    private GithubExecutorConfiguration executorRoot;
+
     private static final String HEAD = "a".repeat(40);
     private static final String TREE = "b".repeat(40);
     private static final String PREFIX = "/repos/acme/private/git/";
@@ -70,11 +79,7 @@ class GithubPrivateContextTest {
     @Test
     void promptDescribesCredentialFreeExportAndHostOwnedSolve() {
         try (final var json = BotJsonMapper.create(key -> Optional.empty())) {
-            final var prompt = new AttemptPreparation(
-                            json,
-                            ConfigurationLoader.load(PromptConfiguration.class, key -> Optional.empty()),
-                            ConfigurationLoader.load(GithubExecutorConfiguration.class, key -> Optional.empty())
-                                    .shared())
+            final var prompt = new AttemptPreparation(json, prompts, executorRoot.shared())
                     .prompt(TaskFixtures.task(TASK), "example-fork", false);
             assertTrue(prompt.contains("github-source.json"));
             assertTrue(prompt.contains("not a Git clone"));
@@ -82,11 +87,7 @@ class GithubPrivateContextTest {
             assertFalse(prompt.contains("gh auth setup-git"));
             final var task = new LinkedHashMap<>(TASK);
             task.put("kind", "solve");
-            final var solve = new AttemptPreparation(
-                            json,
-                            ConfigurationLoader.load(PromptConfiguration.class, key -> Optional.empty()),
-                            ConfigurationLoader.load(GithubExecutorConfiguration.class, key -> Optional.empty())
-                                    .shared())
+            final var solve = new AttemptPreparation(json, prompts, executorRoot.shared())
                     .prompt(TaskFixtures.task(task), "example-fork", false);
             assertTrue(solve.contains("The host alone creates Git objects"));
             assertTrue(solve.contains("github-solve.json"));

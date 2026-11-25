@@ -21,20 +21,23 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import io.yupiik.fusion.httpclient.core.ExtendedHttpClient;
 import io.yupiik.fusion.httpclient.core.ExtendedHttpClientConfiguration;
 import io.yupiik.fusion.json.JsonMapper;
-import io.yupiik.ia.agent.core.configuration.TestConfigs;
+import io.yupiik.fusion.testing.Fusion;
+import io.yupiik.fusion.testing.FusionSupport;
+import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
+import io.yupiik.ia.agent.core.configuration.ConfigurationTestModule;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import io.yupiik.ia.agent.test.TestJsonMapper;
 import java.net.http.HttpClient;
 import java.time.Clock;
-import java.util.Map;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 
 @ExtendWith(TestJsonMapper.class)
+@FusionSupport(modules = ConfigurationTestModule.class)
 class ChatClientHttpClientLifecycleTest {
     @Test
-    void closeLeavesInjectedHttpClientOpenForItsOwner(final JsonMapper mapper) {
-        final var configuration = TestConfigs.codingAgent(Map.of());
+    void closeLeavesInjectedHttpClientOpenForItsOwner(
+            final JsonMapper mapper, @Fusion final CodingAgentConfiguration configuration) {
         // ExtendedHttpClient does not close an explicitly supplied raw delegate.
         try (final var delegate = HttpClient.newHttpClient()) {
             final var httpClient = new TrackingHttpClient(delegate);

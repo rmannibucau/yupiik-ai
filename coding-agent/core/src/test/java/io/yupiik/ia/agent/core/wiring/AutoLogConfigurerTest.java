@@ -22,9 +22,13 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import io.yupiik.fusion.framework.api.ConfiguringContainer;
 import io.yupiik.fusion.framework.api.lifecycle.Start;
 import io.yupiik.fusion.framework.api.lifecycle.Stop;
-import io.yupiik.ia.agent.core.configuration.TestConfigs;
+import io.yupiik.fusion.testing.Fusion;
+import io.yupiik.fusion.testing.FusionSupport;
+import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
+import io.yupiik.ia.agent.core.configuration.ConfigurationTestModule;
 import io.yupiik.ia.agent.core.test.TestJvm;
 import io.yupiik.logging.jul.formatter.InlineFormatter;
 import io.yupiik.logging.jul.handler.StandardHandler;
@@ -36,6 +40,7 @@ import java.util.logging.Handler;
 import java.util.logging.Level;
 import java.util.logging.LogManager;
 import java.util.logging.Logger;
+import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.api.parallel.ResourceLock;
@@ -58,36 +63,46 @@ class AutoLogConfigurerTest {
 
     public static final class JdkManagerPeer {
         public static void main(final String[] args) {
-            final var tests = new AutoLogConfigurerTest();
-            tests.installsInlineRootHandlerByDefault();
-            tests.stopRestoresTheRootLoggerHandlers();
-            tests.secondStartMustNotStackASecondInlineHandler();
-            tests.replacesTheJdkConsoleHandlerSoRecordsArePrintedOnce();
-        }
-    }
-
-    @Test
-    void leavesYupiikManagerHandlersAlone() {
-        assertEquals(
-                "io.yupiik.logging.jul.YupiikLogManager",
-                LogManager.getLogManager().getClass().getName());
-        final var root = Logger.getLogger("");
-        final var handlers = root.getHandlers();
-        final var configurer = new AutoLogConfigurer(TestConfigs.codingAgent(Map.of()));
-        try {
-            configurer.onStart(new Start());
-            assertNull(configurer.installedInlineHandler());
-            assertEquals(handlers.length, root.getHandlers().length);
-            for (final var handler : handlers) {
-                assertTrue(contains(root.getHandlers(), handler));
+            try (final var container = ConfiguringContainer.of()
+                            .register(new ConfigurationTestModule())
+                            .start();
+                    final var instance = container.lookup(CodingAgentConfiguration.class)) {
+                final var configuration = instance.instance();
+                final var tests = new AutoLogConfigurerTest();
+                tests.installsInlineRootHandlerByDefault(configuration);
+                tests.stopRestoresTheRootLoggerHandlers(configuration);
+                tests.secondStartMustNotStackASecondInlineHandler(configuration);
+                tests.replacesTheJdkConsoleHandlerSoRecordsArePrintedOnce(configuration);
             }
-        } finally {
-            configurer.onStop(new Stop());
         }
     }
 
-    private void installsInlineRootHandlerByDefault() {
-        final var configurer = new AutoLogConfigurer(TestConfigs.codingAgent(Map.of()));
+    @Nested
+    @FusionSupport(modules = ConfigurationTestModule.class)
+    class Defaults {
+        @Test
+        void leavesYupiikManagerHandlersAlone(@Fusion final CodingAgentConfiguration configuration) {
+            assertEquals(
+                    "io.yupiik.logging.jul.YupiikLogManager",
+                    LogManager.getLogManager().getClass().getName());
+            final var root = Logger.getLogger("");
+            final var handlers = root.getHandlers();
+            final var configurer = new AutoLogConfigurer(configuration);
+            try {
+                configurer.onStart(new Start());
+                assertNull(configurer.installedInlineHandler());
+                assertEquals(handlers.length, root.getHandlers().length);
+                for (final var handler : handlers) {
+                    assertTrue(contains(root.getHandlers(), handler));
+                }
+            } finally {
+                configurer.onStop(new Stop());
+            }
+        }
+    }
+
+    private void installsInlineRootHandlerByDefault(final CodingAgentConfiguration configuration) {
+        final var configurer = new AutoLogConfigurer(configuration);
         try {
             configurer.onStart(new Start());
             final var inline = configurer.installedInlineHandler();
@@ -105,8 +120,8 @@ class AutoLogConfigurerTest {
         assertNull(configurer.installedInlineHandler(), "the Stop listener must clear the handler");
     }
 
-    private void stopRestoresTheRootLoggerHandlers() {
-        final var configurer = new AutoLogConfigurer(TestConfigs.codingAgent(Map.of()));
+    private void stopRestoresTheRootLoggerHandlers(final CodingAgentConfiguration configuration) {
+        final var configurer = new AutoLogConfigurer(configuration);
         configurer.onStart(new Start());
         final var inline = configurer.installedInlineHandler();
         assertNotNull(inline);
@@ -117,17 +132,21 @@ class AutoLogConfigurerTest {
         assertNull(configurer.installedInlineHandler());
     }
 
-    @Test
-    void leavesTheRootLoggerAloneWhenAutoIsDisabled() {
-        final var configurer = new AutoLogConfigurer(TestConfigs.codingAgent(Map.of("yca.logging.auto", "false")));
-        try {
-            configurer.onStart(new Start());
-            assertNull(configurer.installedInlineHandler(), "auto=false must skip the installation");
-            assertFalse(
-                    containsStandardHandler(Logger.getLogger("").getHandlers()),
-                    "no yupiik handler may be attached when auto is disabled");
-        } finally {
-            configurer.onStop(new Stop());
+    @Nested
+    @FusionSupport(modules = DisabledModule.class)
+    class Disabled {
+        @Test
+        void leavesTheRootLoggerAloneWhenAutoIsDisabled(@Fusion final CodingAgentConfiguration configuration) {
+            final var configurer = new AutoLogConfigurer(configuration);
+            try {
+                configurer.onStart(new Start());
+                assertNull(configurer.installedInlineHandler(), "auto=false must skip the installation");
+                assertFalse(
+                        containsStandardHandler(Logger.getLogger("").getHandlers()),
+                        "no yupiik handler may be attached when auto is disabled");
+            } finally {
+                configurer.onStop(new Stop());
+            }
         }
     }
 
@@ -143,33 +162,39 @@ class AutoLogConfigurerTest {
 
     public static final class ConfigFilePeer {
         public static void main(final String[] args) {
-            final var root = Logger.getLogger("");
-            final var handlers = root.getHandlers();
-            assertEquals(Level.WARNING, root.getLevel(), "JUL must load the explicit configuration at startup");
-            assertEquals(1, handlers.length);
-            assertInstanceOf(ConsoleHandler.class, handlers[0]);
-            final var configurer = new AutoLogConfigurer(TestConfigs.codingAgent(Map.of()));
-            try {
-                configurer.onStart(new Start());
-                assertNull(
-                        configurer.installedInlineHandler(),
-                        "an explicit java.util.logging.config.file must preserve the supplied configuration");
-                assertFalse(containsStandardHandler(root.getHandlers()));
-                assertEquals(Level.WARNING, root.getLevel());
-                assertEquals(1, root.getHandlers().length);
-                assertTrue(contains(root.getHandlers(), handlers[0]), "the configured handler must be preserved");
-            } finally {
-                configurer.onStop(new Stop());
+            try (final var container = ConfiguringContainer.of()
+                            .register(new ConfigurationTestModule())
+                            .start();
+                    final var instance = container.lookup(CodingAgentConfiguration.class)) {
+                final var configuration = instance.instance();
+                final var root = Logger.getLogger("");
+                final var handlers = root.getHandlers();
+                assertEquals(Level.WARNING, root.getLevel(), "JUL must load the explicit configuration at startup");
+                assertEquals(1, handlers.length);
+                assertInstanceOf(ConsoleHandler.class, handlers[0]);
+                final var configurer = new AutoLogConfigurer(configuration);
+                try {
+                    configurer.onStart(new Start());
+                    assertNull(
+                            configurer.installedInlineHandler(),
+                            "an explicit java.util.logging.config.file must preserve the supplied configuration");
+                    assertFalse(containsStandardHandler(root.getHandlers()));
+                    assertEquals(Level.WARNING, root.getLevel());
+                    assertEquals(1, root.getHandlers().length);
+                    assertTrue(contains(root.getHandlers(), handlers[0]), "the configured handler must be preserved");
+                } finally {
+                    configurer.onStop(new Stop());
+                }
             }
         }
     }
 
-    private void secondStartMustNotStackASecondInlineHandler() {
+    private void secondStartMustNotStackASecondInlineHandler(final CodingAgentConfiguration configuration) {
         // Regression for the native duplicate-logs issue: the GraalVM build can resolve this
         // @ApplicationScoped bean twice and run onStart twice, which used to stack two inline
         // StandardHandlers and print every JUL record twice with identical timestamps.
-        final var configurer = new AutoLogConfigurer(TestConfigs.codingAgent(Map.of()));
-        final var other = new AutoLogConfigurer(TestConfigs.codingAgent(Map.of()));
+        final var configurer = new AutoLogConfigurer(configuration);
+        final var other = new AutoLogConfigurer(configuration);
         try {
             configurer.onStart(new Start());
             final var first = configurer.installedInlineHandler();
@@ -186,11 +211,11 @@ class AutoLogConfigurerTest {
         }
     }
 
-    private void replacesTheJdkConsoleHandlerSoRecordsArePrintedOnce() {
+    private void replacesTheJdkConsoleHandlerSoRecordsArePrintedOnce(final CodingAgentConfiguration configuration) {
         final var root = Logger.getLogger("");
         final var console = new ConsoleHandler();
         root.addHandler(console);
-        final var configurer = new AutoLogConfigurer(TestConfigs.codingAgent(Map.of()));
+        final var configurer = new AutoLogConfigurer(configuration);
         try {
             configurer.onStart(new Start());
             assertFalse(
@@ -231,5 +256,11 @@ class AutoLogConfigurerTest {
             }
         }
         return count;
+    }
+
+    public static class DisabledModule extends ConfigurationTestModule {
+        public DisabledModule() {
+            super(Map.of("yca.logging.auto", "false"));
+        }
     }
 }

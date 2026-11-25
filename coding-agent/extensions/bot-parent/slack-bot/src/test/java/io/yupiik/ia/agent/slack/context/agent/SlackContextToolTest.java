@@ -19,6 +19,7 @@ import static org.junit.jupiter.api.Assertions.*;
 
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.llm.JsonMappers;
+import io.yupiik.ia.agent.core.sandbox.DisabledSandbox;
 import io.yupiik.ia.agent.core.tools.ToolCategory;
 import io.yupiik.ia.agent.core.tools.ToolContext;
 import io.yupiik.ia.agent.core.tools.ToolResult;
@@ -67,8 +68,9 @@ class SlackContextToolTest {
                     new AgentSlackContextConfiguration(true, home.toString(), "C1", 301))) {
                 final var tool = new SlackContextTool(new SlackContextClient(configuration, json));
                 assertFalse(tool.usable(home));
-                assertTrue(tool.execute(Map.of("operation", "summary"), ToolContext.empty(home))
-                        .error());
+                assertTrue(
+                        tool.execute(Map.of("operation", "summary"), ToolContext.empty(home, new DisabledSandbox(home)))
+                                .error());
             }
             assertFalse(Files.exists(Path.of(missing)));
         }
@@ -106,7 +108,8 @@ class SlackContextToolTest {
                     Map.of("operation", "thread", "pageToken", ""))) {
                 assertEquals(
                         "Invalid Slack context arguments.",
-                        tool.execute(arguments, ToolContext.empty(home)).output());
+                        tool.execute(arguments, ToolContext.empty(home, new DisabledSandbox(home)))
+                                .output());
             }
             final var denied = context(() -> false, () -> false, Set.of("other_tool"));
             assertEquals(
@@ -149,7 +152,8 @@ class SlackContextToolTest {
             Thread.currentThread().interrupt();
             assertEquals(
                     "Slack context request cancelled.",
-                    client.call(args, ToolContext.empty(testWorkdir)).output());
+                    client.call(args, ToolContext.empty(testWorkdir, new DisabledSandbox(testWorkdir)))
+                            .output());
             assertTrue(Thread.currentThread().isInterrupted());
         } finally {
             Thread.interrupted();
@@ -159,12 +163,15 @@ class SlackContextToolTest {
         assertFalse(disabled.usable());
         assertEquals(
                 "Slack context capability unavailable.",
-                disabled.call(args, ToolContext.empty(testWorkdir)).output());
+                disabled.call(args, ToolContext.empty(testWorkdir, new DisabledSandbox(testWorkdir)))
+                        .output());
         final var unconfigured = new SlackContextClient(null, null);
         assertFalse(unconfigured.usable());
         assertEquals(
                 "Slack context capability unavailable.",
-                unconfigured.call(args, ToolContext.empty(testWorkdir)).output());
+                unconfigured
+                        .call(args, ToolContext.empty(testWorkdir, new DisabledSandbox(testWorkdir)))
+                        .output());
         try (final var files = Files.list(root)) {
             assertEquals(0, files.count());
         }
@@ -253,7 +260,8 @@ class SlackContextToolTest {
         final var root = privateDirectory();
         try (final var json = json()) {
             final var tool = tool(root, json);
-            assertTrue(tool.execute(null, ToolContext.empty(home)).error());
+            assertTrue(tool.execute(null, ToolContext.empty(home, new DisabledSandbox(home)))
+                    .error());
             for (final var args : List.<Map<String, Object>>of(
                     Map.of(),
                     Map.of("operation", "unknown"),
@@ -290,7 +298,8 @@ class SlackContextToolTest {
                     Map.of("operation", "search", "pageToken", "x".repeat(129)))) {
                 assertEquals(
                         "Invalid Slack context arguments.",
-                        tool.execute(args, ToolContext.empty(home)).output(),
+                        tool.execute(args, ToolContext.empty(home, new DisabledSandbox(home)))
+                                .output(),
                         args.toString());
             }
             assertFalse(Files.exists(root.resolve("request.json")));
@@ -307,14 +316,18 @@ class SlackContextToolTest {
                 for (var i = 0; i < 100; i++) {
                     assertEquals(
                             "Invalid Slack context arguments.",
-                            tool.execute(Map.of("operation", "resolve_user", "userId", longId), ToolContext.empty(home))
+                            tool.execute(
+                                            Map.of("operation", "resolve_user", "userId", longId),
+                                            ToolContext.empty(home, new DisabledSandbox(home)))
                                     .output());
                 }
             });
             for (final var id : List.of("", "U", "u1", "U1\n", "U1 ", "U.*", "U" + "A".repeat(64))) {
                 assertEquals(
                         "Invalid Slack context arguments.",
-                        tool.execute(Map.of("operation", "resolve_user", "userId", id), ToolContext.empty(home))
+                        tool.execute(
+                                        Map.of("operation", "resolve_user", "userId", id),
+                                        ToolContext.empty(home, new DisabledSandbox(home)))
                                 .output());
             }
         }
@@ -365,7 +378,8 @@ class SlackContextToolTest {
                             "pageToken",
                             "opaque-token"),
                     nullableSearch)) {
-                final var future = executor.submit(() -> tool.execute(args, ToolContext.empty(home)));
+                final var future =
+                        executor.submit(() -> tool.execute(args, ToolContext.empty(home, new DisabledSandbox(home))));
                 final var request = await(controller, previousId);
                 previousId = request.id();
                 assertEquals("C1", request.channel());
@@ -379,8 +393,8 @@ class SlackContextToolTest {
                 assertTrue(result.output().contains("\"status\":\"ok\""));
             }
             for (final var status : List.of("no_results", "denied", "cancelled", "rate_limited", "failed", "unknown")) {
-                final var future =
-                        executor.submit(() -> tool.execute(Map.of("operation", "summary"), ToolContext.empty(home)));
+                final var future = executor.submit(() -> tool.execute(
+                        Map.of("operation", "summary"), ToolContext.empty(home, new DisabledSandbox(home))));
                 final var request = await(controller, previousId);
                 previousId = request.id();
                 controller.respond(request, Map.of("status", status));
@@ -398,8 +412,8 @@ class SlackContextToolTest {
         try (final var json = json();
                 final var controller = new SlackContextMailbox(root, json, "C1");
                 final var executor = Executors.newVirtualThreadPerTaskExecutor()) {
-            final var future = executor.submit(
-                    () -> tool(root, json).execute(Map.of("operation", "summary"), ToolContext.empty(home)));
+            final var future = executor.submit(() -> tool(root, json)
+                    .execute(Map.of("operation", "summary"), ToolContext.empty(home, new DisabledSandbox(home))));
             await(controller, null);
             Files.writeString(root.resolve("response.json"), "private-diagnostic-payload");
             Files.setPosixFilePermissions(root.resolve("response.json"), PosixFilePermissions.fromString("rw-------"));
@@ -425,6 +439,7 @@ class SlackContextToolTest {
                 null,
                 callCancelled,
                 testWorkdir,
+                new DisabledSandbox(testWorkdir),
                 -1,
                 allowedTools,
                 null,

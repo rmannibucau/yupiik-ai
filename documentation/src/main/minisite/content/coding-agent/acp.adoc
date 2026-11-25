@@ -251,6 +251,14 @@ Keep secrets out of client system instructions, which are persisted text rather 
 
 Sessions start with `PermissionMode.ASK`; configured rules and user-selected permission settings still determine when a tool needs approval.
 Mode selector changes restore ASK, and `/permissions` explicitly changes the current session's permission policy, not the process-global configuration.
+The permission choices are `ask`, `auto_edit`, `yolo` and `full_yolo`; these are separate from the PLAN/BUILD selector.
+`yolo` skips ordinary tool prompts but retains sandbox checks and human sandbox-expansion prompts.
+
+WARNING: `full_yolo` bypasses tool permission policy and disables the built-in sandbox; unrestricted host execution is not recommended.
+
+See xref:features/permissions.adoc[permission modes] for the yellow/red TUI and web warning indicators; ACP clients control their own presentation.
+Configured and client-supplied MCP servers are trusted by default, outside session confinement, while other unadapted ACP filesystem and terminal capabilities require explicit trusted-global integration configuration under sandboxing.
+See xref:sandboxing/overview.adoc#_capability_approval_and_integration_limits[integration limits]; advertised client capabilities alone do not grant trust.
 `session/request_permission` offers `allow_once`, `allow_session` labelled "Allow for this session only" with ACP kind `allow_always`, and `reject_once`.
 The remembered choice follows core's in-memory session grant rules, including command anchors where applicable, not a permanent global allow or necessarily an exact-argument-only grant.
 Switching back to PLAN clears session grants, and closing/reopening does not restore them.

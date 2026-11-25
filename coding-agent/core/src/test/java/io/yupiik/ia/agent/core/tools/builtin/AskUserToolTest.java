@@ -24,6 +24,7 @@ import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.question.Question;
 import io.yupiik.ia.agent.core.question.UserFeedbackService;
 import io.yupiik.ia.agent.core.runtime.Cancellations;
+import io.yupiik.ia.agent.core.sandbox.DisabledSandbox;
 import io.yupiik.ia.agent.core.tools.ToolContext;
 import io.yupiik.ia.agent.core.tools.ToolResult;
 import io.yupiik.ia.agent.test.TestJsonMapper;
@@ -64,7 +65,20 @@ class AskUserToolTest {
 
     private ToolContext context() {
         return new ToolContext(
-                "s1", null, null, null, feedback, null, null, null, null, Cancellations.NEVER, null, null, testWorkdir);
+                "s1",
+                null,
+                null,
+                null,
+                feedback,
+                null,
+                null,
+                null,
+                null,
+                Cancellations.NEVER,
+                null,
+                null,
+                testWorkdir,
+                new DisabledSandbox(testWorkdir));
     }
 
     @Test
@@ -254,7 +268,8 @@ class AskUserToolTest {
                 Cancellations.NEVER,
                 null,
                 null,
-                testWorkdir);
+                testWorkdir,
+                new DisabledSandbox(testWorkdir));
         final var args = Map.<String, Object>of("questions", List.of(Map.of("id", "q1", "prompt", "Pick?")));
         final ToolResult result = tool.execute(args, rejecting);
         assertNotNull(result);
@@ -267,7 +282,20 @@ class AskUserToolTest {
     void executeReturnsErrorWhenNoFeedbackGateIsInstalled() {
         // genuinely gate-less (no interactive feedback service): keeps the hard error.
         final var gateLess = new ToolContext(
-                "s1", null, null, null, null, null, null, null, null, Cancellations.NEVER, null, null, testWorkdir);
+                "s1",
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                Cancellations.NEVER,
+                null,
+                null,
+                testWorkdir,
+                new DisabledSandbox(testWorkdir));
         final var args = Map.<String, Object>of("questions", List.of(Map.of("id", "q1", "prompt", "Pick?")));
         final ToolResult result = tool.execute(args, gateLess);
         assertNotNull(result);

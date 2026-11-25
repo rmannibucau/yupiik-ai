@@ -25,5 +25,6 @@ Switching modes preserves todos without an extra LLM request; missing todos are 
 In plan mode, read-only tools and plan-resolved bash rules run without prompting.
 File-mutating tools are hidden from the model; other gated actions follow the permission rules and are refused without an interactive approval path.
 
-The plan/build axis is separate from xref:permissions.adoc[permission modes].
-Neither is an OS isolation boundary; use xref:sandboxes.adoc[external sandboxing] when process-level confinement is required.
+The plan/build axis is separate from the xref:permissions.adoc[permission modes] `ask`, `auto_edit`, `yolo` and `full_yolo`.
+`yolo` retains sandbox checks and human prompts for capability expansion; `full_yolo` bypasses permission policy and disables the built-in sandbox, and is not recommended.
+Neither axis provides OS isolation by itself; see xref:../sandboxing/overview.adoc[Sandboxes and tool permissions] for built-in enforcement, its current limitations and external isolation alternatives.

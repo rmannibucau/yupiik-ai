@@ -24,13 +24,18 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import io.yupiik.fusion.json.JsonMapper;
+import io.yupiik.fusion.testing.Fusion;
+import io.yupiik.fusion.testing.FusionSupport;
+import io.yupiik.ia.agent.core.configuration.BuiltinToolsConfiguration;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
+import io.yupiik.ia.agent.core.configuration.ConfigurationTestModule;
 import io.yupiik.ia.agent.core.configuration.McpConfiguration;
 import io.yupiik.ia.agent.core.configuration.McpServerConfiguration;
 import io.yupiik.ia.agent.core.configuration.MetricsConfiguration;
 import io.yupiik.ia.agent.core.configuration.MetricsDisplayMode;
 import io.yupiik.ia.agent.core.configuration.NativeProviderConfiguration;
-import io.yupiik.ia.agent.core.configuration.TestConfigs;
+import io.yupiik.ia.agent.core.configuration.ToolsConfiguration;
+import io.yupiik.ia.agent.core.sandbox.DisabledSandbox;
 import io.yupiik.ia.agent.core.tools.EmbeddedTool;
 import io.yupiik.ia.agent.core.tools.ToolCategory;
 import io.yupiik.ia.agent.core.tools.ToolContext;
@@ -68,7 +73,14 @@ import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 @ExtendWith(TestJsonMapper.class)
+@FusionSupport(modules = ConfigurationTestModule.class)
 class McpManagerTest {
+    private CodingAgentConfiguration baseline;
+
+    @BeforeEach
+    void configuration(@Fusion final CodingAgentConfiguration configuration) {
+        baseline = configuration;
+    }
 
     @Test
     void startupOverrideCanUseConstructorWithoutConfiguration() {
@@ -93,13 +105,19 @@ class McpManagerTest {
                 AdversarialMcpServer.class.getName(),
                 "silent-initialize",
                 tmp.toString());
-        final var config = TestConfigs.codingAgent(Map.of(
-                "yca.mcp.callTimeoutSeconds", "1",
-                "yca.tools.builtin.enabled", "false",
-                "yca.mcp.servers.length", "1",
-                "yca.mcp.servers.0.name", "silent",
-                "yca.mcp.servers.0.command", command.getFirst(),
-                "yca.mcp.servers.0.args", String.join(",", command.subList(1, command.size()))));
+        final var config = configuration(
+                List.of(new McpServerConfiguration(
+                        "silent",
+                        command.getFirst(),
+                        command.subList(1, command.size()),
+                        List.of(),
+                        null,
+                        null,
+                        null,
+                        List.of(),
+                        true,
+                        List.of())),
+                1);
         final var launched = new AtomicReference<Process>();
         final var processes = new ProcessService() {
             @Override
@@ -139,9 +157,8 @@ class McpManagerTest {
     private static SessionCapableClient httpClient;
 
     @BeforeAll
-    static void bootClient() {
-        httpClient = new HttpClientProducer()
-                .httpClient(TestConfigs.codingAgent(Map.of()), new NativeProviderConfiguration(null, null));
+    static void bootClient(@Fusion final CodingAgentConfiguration configuration) {
+        httpClient = new HttpClientProducer().httpClient(configuration, new NativeProviderConfiguration(null, null));
     }
 
     @AfterAll
@@ -182,13 +199,15 @@ class McpManagerTest {
                 respond(
                         exchange,
                         200,
-                        "{\"jsonrpc\":\"2.0\",\"result\":{\"tools\":[{\"name\":\"find_docs\",\"description\":\"find docs\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"q\":{\"type\":\"string\"}}}}]},\"id\":2}",
+                        "{\"jsonrpc\":\"2.0\",\"result\":{\"tools\":[{\"name\":\"find_docs\",\"description\":\"find"
+                                + " docs\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"q\":{\"type\":\"string\"}}}}]},\"id\":2}",
                         "application/json");
             } else if (body.contains("\"method\":\"tools/call\"")) {
                 respond(
                         exchange,
                         200,
-                        "{\"jsonrpc\":\"2.0\",\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"hello from server\"}]},\"id\":3}",
+                        "{\"jsonrpc\":\"2.0\",\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"hello from"
+                                + " server\"}]},\"id\":3}",
                         "application/json");
             } else {
                 respond(
@@ -268,7 +287,8 @@ class McpManagerTest {
                 respond(
                         exchange,
                         200,
-                        "{\"jsonrpc\":\"2.0\",\"result\":{\"tools\":[{\"name\":\"find_docs\",\"description\":\"find docs\",\"inputSchema\":{\"type\":\"object\"}}]},\"id\":2}",
+                        "{\"jsonrpc\":\"2.0\",\"result\":{\"tools\":[{\"name\":\"find_docs\",\"description\":\"find"
+                                + " docs\",\"inputSchema\":{\"type\":\"object\"}}]},\"id\":2}",
                         "application/json");
             } else {
                 respond(exchange, 200, "{}", "application/json");
@@ -323,7 +343,8 @@ class McpManagerTest {
                 respond(
                         exchange,
                         200,
-                        "{\"jsonrpc\":\"2.0\",\"result\":{\"tools\":[{\"name\":\"find_docs\",\"description\":\"find docs\",\"inputSchema\":{\"type\":\"object\"}}]},\"id\":2}",
+                        "{\"jsonrpc\":\"2.0\",\"result\":{\"tools\":[{\"name\":\"find_docs\",\"description\":\"find"
+                                + " docs\",\"inputSchema\":{\"type\":\"object\"}}]},\"id\":2}",
                         "application/json");
             } else {
                 respond(exchange, 200, "{}", "application/json");
@@ -365,7 +386,7 @@ class McpManagerTest {
 
     @Test
     void builtinsAreServedInProcessWithoutMcpWrapping(@TempDir final Path root) {
-        final var base = TestConfigs.codingAgent(Map.of());
+        final var base = baseline;
         final var manager = new McpManager(
                 base,
                 mapper,
@@ -402,7 +423,7 @@ class McpManagerTest {
         final var tools = manager.tools();
         assertEquals(1, tools.size());
         assertEquals("probe", tools.get(0).name());
-        final var result = tools.get(0).execute(Map.of(), ToolContext.empty(root));
+        final var result = tools.get(0).execute(Map.of(), ToolContext.empty(root, new DisabledSandbox(root)));
         assertFalse(result.success());
         assertEquals("File not found: nope.txt. Did you mean: nope.md?", result.output());
         assertTrue(
@@ -505,7 +526,7 @@ class McpManagerTest {
             manager.close();
             assertEquals(0, initializations.get());
         }
-        final var local = new McpManager(TestConfigs.codingAgent(Map.of()), mapper, List.of(), httpClient, null);
+        final var local = new McpManager(baseline, mapper, List.of(), httpClient, null);
         assertEquals(
                 List.of(new McpManager.ServerStatus("yca", McpManager.ServerState.NOT_STARTED)),
                 local.serverStatuses());
@@ -579,8 +600,12 @@ class McpManagerTest {
         server.start();
     }
 
-    private static CodingAgentConfiguration configuration(final List<McpServerConfiguration> servers) {
-        final var base = TestConfigs.codingAgent(Map.of("yca.tools.builtin.enabled", "false"));
+    private CodingAgentConfiguration configuration(final List<McpServerConfiguration> servers) {
+        return configuration(servers, 10);
+    }
+
+    private CodingAgentConfiguration configuration(final List<McpServerConfiguration> servers, final int timeout) {
+        final var base = baseline;
         return new CodingAgentConfiguration(
                 base.storageHome(),
                 base.home(),
@@ -596,7 +621,8 @@ class McpManagerTest {
                 base.todos(),
                 base.optimize(),
                 base.permissions(),
-                new McpConfiguration(true, servers, 10),
+                base.sandbox(),
+                new McpConfiguration(true, servers, timeout),
                 base.mavenRepositoryKnowledge(),
                 base.structuralCodeGraph(),
                 base.sessions(),
@@ -604,7 +630,20 @@ class McpManagerTest {
                 base.agents(),
                 base.mode(),
                 base.httpClient(),
-                base.tools(),
+                new ToolsConfiguration(
+                        new BuiltinToolsConfiguration(
+                                false,
+                                base.tools().builtin().enabledTools(),
+                                base.tools().builtin().disabledTools()),
+                        base.tools().spawnSubagent(),
+                        base.tools().websearch(),
+                        base.tools().manageContext(),
+                        base.tools().parallelReadonly(),
+                        base.tools().maxOutputChars(),
+                        base.tools().repeatSuccessThreshold(),
+                        base.tools().alwaysSuggestMavenKnowledge(),
+                        base.tools().shell(),
+                        base.tools().bashOverrides()),
                 base.subagents(),
                 base.schedulerThreads(),
                 new MetricsConfiguration(true, true, MetricsDisplayMode.COMPACT),

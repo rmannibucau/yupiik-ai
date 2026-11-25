@@ -17,11 +17,12 @@ package io.yupiik.ia.agent.slack.context;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-import io.yupiik.fusion.framework.api.configuration.Configuration;
 import io.yupiik.fusion.framework.api.event.Emitter;
 import io.yupiik.fusion.httpclient.core.ExtendedHttpClient;
 import io.yupiik.fusion.httpclient.core.ExtendedHttpClientConfiguration;
 import io.yupiik.fusion.json.JsonMapper;
+import io.yupiik.fusion.testing.Fusion;
+import io.yupiik.fusion.testing.FusionSupport;
 import io.yupiik.ia.agent.bot.runtime.admission.HostAdmission;
 import io.yupiik.ia.agent.bot.runtime.admission.HostAdmissionConfiguration;
 import io.yupiik.ia.agent.bot.runtime.configuration.ExecutorConfiguration;
@@ -32,7 +33,7 @@ import io.yupiik.ia.agent.core.agent.AgentProvider;
 import io.yupiik.ia.agent.core.agent.MemoryExtractor;
 import io.yupiik.ia.agent.core.agent.SystemPromptBuilder;
 import io.yupiik.ia.agent.core.codegraph.StructuralCodeGraph;
-import io.yupiik.ia.agent.core.configuration.ConfigurationLoader;
+import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.context.ContextManager;
 import io.yupiik.ia.agent.core.context.ContextWindowCache;
 import io.yupiik.ia.agent.core.context.UsageTracker;
@@ -40,6 +41,7 @@ import io.yupiik.ia.agent.core.llm.ChatClient;
 import io.yupiik.ia.agent.core.mcp.McpManager;
 import io.yupiik.ia.agent.core.permissions.PermissionService;
 import io.yupiik.ia.agent.core.runtime.StatusReporter;
+import io.yupiik.ia.agent.core.sandbox.DisabledSandbox;
 import io.yupiik.ia.agent.core.session.FileSessionStore;
 import io.yupiik.ia.agent.core.todo.InMemoryTodoStore;
 import io.yupiik.ia.agent.core.tools.ToolExecutionService;
@@ -47,6 +49,7 @@ import io.yupiik.ia.agent.core.tools.ToolRegistry;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import io.yupiik.ia.agent.slack.configuration.AgentSlackContextConfiguration;
 import io.yupiik.ia.agent.slack.configuration.SlackContextConfiguration;
+import io.yupiik.ia.agent.slack.configuration.SlackPrompts;
 import io.yupiik.ia.agent.slack.configuration.SlackThreadConfiguration;
 import io.yupiik.ia.agent.slack.context.agent.SlackContextClient;
 import io.yupiik.ia.agent.slack.context.agent.SlackContextTool;
@@ -58,6 +61,7 @@ import io.yupiik.ia.agent.slack.service.SlackMentionParser;
 import io.yupiik.ia.agent.slack.service.SlackPromptRenderer;
 import io.yupiik.ia.agent.slack.service.SlackWorker;
 import io.yupiik.ia.agent.slack.store.SlackStore;
+import io.yupiik.ia.agent.slack.support.SlackConfigurationTestModule;
 import io.yupiik.ia.agent.slack.support.SlackDomainFixture;
 import io.yupiik.ia.agent.slack.support.SlackJsonMapper;
 import io.yupiik.llm.client.openai.model.*;
@@ -101,7 +105,11 @@ import org.junit.jupiter.params.provider.ValueSource;
  * sessions; it translates the container mount path and writes the loop's answer to the worker result.
  * The mount fixture tests wiring, not real tmpfs or Docker isolation (covered separately).
  */
+@FusionSupport(modules = SlackContextAgentLoopTest.AgentModule.class)
 class SlackContextAgentLoopTest {
+    @Fusion
+    private SlackPrompts baselinePrompts;
+
     private static final String TOKEN = "agent-loop-action-secret";
     private static final String NAME = "CanaryMemberAgentLoop";
     private static final String QUERY = "canary query agent loop";
@@ -254,7 +262,7 @@ class SlackContextAgentLoopTest {
             assertFalse(worker.runOne(), "Neither success nor ambiguous publication may replay the answer");
             assertEquals(3, fixture.exchanges.size());
             assertEquals(3, sandbox.requests.size());
-            final var nextPrompt = new SlackPromptRenderer(SlackDomainFixture.prompts(), fixture.json)
+            final var nextPrompt = new SlackPromptRenderer(SlackDomainFixture.prompts(baselinePrompts), fixture.json)
                     .render(
                             SlackDomainFixture.task("next", "U1", TaskStatus.queued, System.currentTimeMillis()),
                             fixture.store.list(),
@@ -310,9 +318,10 @@ class SlackContextAgentLoopTest {
                 executor,
                 fixture.json,
                 fixture.store,
-                new SlackPromptRenderer(SlackDomainFixture.prompts(), fixture.json),
+                new SlackPromptRenderer(SlackDomainFixture.prompts(baselinePrompts), fixture.json),
                 sandbox,
-                new SlackFeedback(fixture.configuration, SlackDomainFixture.prompts(), fixture.store, fixture.api),
+                new SlackFeedback(
+                        fixture.configuration, SlackDomainFixture.prompts(baselinePrompts), fixture.store, fixture.api),
                 fixture.api,
                 new HostAdmission(new HostAdmissionConfiguration("", 1, "")),
                 config,
@@ -365,7 +374,32 @@ class SlackContextAgentLoopTest {
         return SlackJsonMapper.create();
     }
 
-    private static final class CoreSandbox implements Sandbox {
+    @Fusion
+    private CodingAgentConfiguration baselineAgent;
+
+    public static class AgentModule extends SlackConfigurationTestModule {
+        public AgentModule() {
+            super(Map.ofEntries(
+                    Map.entry("yca.provider.providers.length", "1"),
+                    Map.entry("yca.provider.providers.0.id", "default"),
+                    Map.entry("yca.provider.providers.0.baseUrl", "http://model.invalid/v1/chat/completions"),
+                    Map.entry("yca.provider.providers.0.api", "completions"),
+                    Map.entry("yca.provider.providers.0.apiKey", "synthetic-inference-key"),
+                    Map.entry("yca.provider.providers.0.model", "slack-context-acceptance"),
+                    Map.entry("yca.provider.providers.0.contextWindow", "128000"),
+                    Map.entry("yca.provider.providers.0.outputTokens", "1024"),
+                    Map.entry("yca.llm.maxIterations", "4"),
+                    Map.entry("yca.permissions.mode", "yolo"),
+                    Map.entry("yca.memory.enabled", "false"),
+                    Map.entry("yca.pruning.enabled", "false"),
+                    Map.entry("yca.compaction.enabled", "false"),
+                    Map.entry("yca.compression.enabled", "false"),
+                    Map.entry("yca.structuralCodeGraph.enabled", "false"),
+                    Map.entry("yca.mcp.servers.length", "0")));
+        }
+    }
+
+    private final class CoreSandbox implements Sandbox {
         private final SlackDomainFixture fixture;
         private final CompletableFuture<Void> completed = new CompletableFuture<>();
         private final AtomicBoolean stopped = new AtomicBoolean();
@@ -404,30 +438,43 @@ class SlackContextAgentLoopTest {
                         final var transport = new InferenceTransport(json, requests, permalink);
                         final var http =
                                 new ExtendedHttpClient(new ExtendedHttpClientConfiguration().setDelegate(transport))) {
-                    final var configuration = ConfigurationLoader.load(
-                            io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration.class,
-                            Configuration.of(Map.ofEntries(
-                                    Map.entry("yca.storageHome", home.toString()),
-                                    Map.entry("yca.workingDir", workdir.toString()),
-                                    Map.entry("yca.projectDir", workdir.toString()),
-                                    Map.entry("yca.provider.providers.length", "1"),
-                                    Map.entry("yca.provider.providers.0.id", "default"),
-                                    Map.entry(
-                                            "yca.provider.providers.0.baseUrl",
-                                            "http://model.invalid/v1/chat/completions"),
-                                    Map.entry("yca.provider.providers.0.api", "completions"),
-                                    Map.entry("yca.provider.providers.0.apiKey", "synthetic-inference-key"),
-                                    Map.entry("yca.provider.providers.0.model", "slack-context-acceptance"),
-                                    Map.entry("yca.provider.providers.0.contextWindow", "128000"),
-                                    Map.entry("yca.provider.providers.0.outputTokens", "1024"),
-                                    Map.entry("yca.llm.maxIterations", "4"),
-                                    Map.entry("yca.permissions.mode", "yolo"),
-                                    Map.entry("yca.memory.enabled", "false"),
-                                    Map.entry("yca.pruning.enabled", "false"),
-                                    Map.entry("yca.compaction.enabled", "false"),
-                                    Map.entry("yca.compression.enabled", "false"),
-                                    Map.entry("yca.structuralCodeGraph.enabled", "false"),
-                                    Map.entry("yca.mcp.servers.length", "0"))));
+                    final var configuration = new CodingAgentConfiguration(
+                            home.toString(),
+                            baselineAgent.home(),
+                            workdir.toString(),
+                            workdir.toString(),
+                            baselineAgent.provider(),
+                            baselineAgent.model(),
+                            baselineAgent.llm(),
+                            baselineAgent.compaction(),
+                            baselineAgent.pruning(),
+                            baselineAgent.compression(),
+                            baselineAgent.memory(),
+                            baselineAgent.todos(),
+                            baselineAgent.optimize(),
+                            baselineAgent.permissions(),
+                            baselineAgent.sandbox(),
+                            baselineAgent.mcp(),
+                            baselineAgent.mavenRepositoryKnowledge(),
+                            baselineAgent.structuralCodeGraph(),
+                            baselineAgent.sessions(),
+                            baselineAgent.skills(),
+                            baselineAgent.agents(),
+                            baselineAgent.mode(),
+                            baselineAgent.httpClient(),
+                            baselineAgent.tools(),
+                            baselineAgent.subagents(),
+                            baselineAgent.schedulerThreads(),
+                            baselineAgent.metrics(),
+                            baselineAgent.maxLineLength(),
+                            baselineAgent.resumeAliases(),
+                            baselineAgent.slashcommands(),
+                            baselineAgent.prompt(),
+                            baselineAgent.labels(),
+                            baselineAgent.logging(),
+                            baselineAgent.hooks(),
+                            baselineAgent.notifications(),
+                            baselineAgent.secrets());
                     final var clock = Clock.systemUTC();
                     final var providers = new ProviderManager(configuration, json);
                     try (final var chat = new ChatClient(configuration, json, providers, clock, http)) {
@@ -495,7 +542,8 @@ class SlackContextAgentLoopTest {
                                     todos,
                                     null,
                                     null,
-                                    workdir);
+                                    workdir,
+                                    new DisabledSandbox(workdir));
                             try {
 
                                 final var answer = loop.run(prompt, "build", sessionId, List.of(), () -> false);

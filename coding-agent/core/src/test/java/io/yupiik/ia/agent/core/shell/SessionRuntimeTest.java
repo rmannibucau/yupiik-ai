@@ -20,22 +20,34 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.fusion.json.JsonMapper;
+import io.yupiik.fusion.testing.Fusion;
+import io.yupiik.fusion.testing.FusionSupport;
 import io.yupiik.ia.agent.core.configuration.AgentMode;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
-import io.yupiik.ia.agent.core.configuration.TestConfigs;
+import io.yupiik.ia.agent.core.configuration.ConfigurationTestModule;
+import io.yupiik.ia.agent.core.configuration.PermissionMode;
 import io.yupiik.ia.agent.core.context.BackoffSleeper;
 import io.yupiik.ia.agent.core.permissions.ApprovalGate;
+import io.yupiik.ia.agent.core.permissions.PermissionService;
+import io.yupiik.ia.agent.core.sandbox.SessionSandbox;
 import io.yupiik.ia.agent.core.todo.TodoItem;
 import io.yupiik.ia.agent.core.wiring.PrecisionDurationMarkerProvider;
 import io.yupiik.ia.agent.test.TestJsonMapper;
+import java.io.IOException;
+import java.net.URI;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Clock;
-import java.util.HashMap;
+import java.util.Comparator;
 import java.util.List;
+import java.util.Map;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -49,22 +61,31 @@ import org.junit.jupiter.api.io.TempDir;
  * budget but nothing conversation-scoped).
  */
 @ExtendWith(TestJsonMapper.class)
+@FusionSupport(modules = SessionRuntimeTest.SessionConfigurationModule.class)
 class SessionRuntimeTest {
 
     @TempDir
-    Path storageHome;
+    static Path storageHome;
+
+    @Fusion
+    CodingAgentConfiguration configuration;
 
     private JsonMapper mapper;
 
     @BeforeEach
-    void bindMapper(final JsonMapper mapper) {
+    void bindMapper(final JsonMapper mapper) throws IOException {
         this.mapper = mapper;
+        // The class-owned configuration has a stable path; every test still starts with empty storage.
+        try (final var paths = Files.walk(storageHome)) {
+            for (final var path : paths.sorted(Comparator.reverseOrder()).toList()) {
+                if (!path.equals(storageHome)) {
+                    Files.delete(path);
+                }
+            }
+        }
     }
 
     private SessionRuntimeFactory factory() {
-        final var props = new HashMap<String, String>();
-        props.put("yca.storageHome", storageHome.toString());
-        final CodingAgentConfiguration configuration = TestConfigs.codingAgent(props);
         return new SessionRuntimeFactory(
                 null,
                 null,
@@ -93,16 +114,146 @@ class SessionRuntimeTest {
     }
 
     @Test
+    void actualModeSwitchRevokesSandboxGrantsIndependentlyOfToolPermissions() throws Exception {
+        for (final var permissionMode : List.of(PermissionMode.ASK, PermissionMode.AUTO_EDIT, PermissionMode.YOLO)) {
+            final var permissions = new PermissionService(configuration, storageHome);
+            permissions.setPermissionMode(permissionMode);
+            permissions.grantSession("unrelated-tool");
+            final var decision = new AtomicReference<>(ApprovalGate.Result.ALLOW_SESSION);
+            permissions.setGate(request -> decision.get());
+            try (final var sandbox = sandbox(permissions)) {
+                final var runtime =
+                        new SessionRuntime(null, permissions, null, null, null, null, null, null, storageHome, sandbox);
+                final var outside = storageHome.resolve("outside");
+                final var destination = URI.create("https://8.8.8.8");
+                for (final var next : List.of(AgentMode.BUILD, AgentMode.PLAN)) {
+                    decision.set(ApprovalGate.Result.ALLOW_SESSION);
+                    sandbox.request("filesystem", outside.toString(), true);
+                    sandbox.request("network", "8.8.8.8:443", false);
+                    decision.set(ApprovalGate.Result.DENY);
+
+                    // Reasserting the effective modes preserves capabilities.
+                    runtime.permissions().setMode(permissions.mode());
+                    permissions.setPermissionMode(permissionMode);
+                    sandbox.requireRead(outside);
+                    sandbox.requireWrite(outside);
+                    sandbox.requireNetwork(destination);
+
+                    permissions.setPermissionMode(permissionMode);
+                    runtime.permissions().setMode(next);
+                    assertThrows(SecurityException.class, () -> sandbox.requireRead(outside));
+                    assertThrows(SecurityException.class, () -> sandbox.requireWrite(outside));
+                    assertThrows(SecurityException.class, () -> sandbox.requireNetwork(destination));
+                    // Only dynamic sandbox capabilities were removed; configured policy survives.
+                    sandbox.requireRead(storageHome.resolve("project"));
+                    sandbox.requireNetwork(URI.create("https://1.1.1.1"));
+                    assertTrue(permissions.sessionGrants().isEmpty());
+                }
+            }
+        }
+    }
+
+    @Test
+    void permissionModeSwitchRevokesGrantsAndReenablesConfiguredSandbox() throws Exception {
+        final var permissions = new PermissionService(configuration, storageHome);
+        final var decision = new AtomicReference<>(ApprovalGate.Result.ALLOW_SESSION);
+        permissions.setGate(request -> decision.get());
+        try (final var sandbox = sandbox(permissions)) {
+            final var runtime =
+                    new SessionRuntime(null, permissions, null, null, null, null, null, null, storageHome, sandbox);
+            final var outside = storageHome.resolve("outside");
+            sandbox.request("filesystem", outside.toString(), true);
+            sandbox.request("network", "8.8.8.8:443", false);
+            permissions.grantSession("write");
+            runtime.permissions().setPermissionMode(PermissionMode.FULL_YOLO);
+            assertFalse(sandbox.enabled());
+            sandbox.requireWrite(outside);
+            sandbox.requireNetwork(URI.create("https://127.0.0.1"));
+            decision.set(ApprovalGate.Result.DENY);
+            runtime.permissions().setPermissionMode(PermissionMode.YOLO);
+            assertTrue(sandbox.enabled());
+            assertTrue(permissions.sessionGrants().isEmpty());
+            assertThrows(SecurityException.class, () -> sandbox.requireRead(outside));
+            assertThrows(SecurityException.class, () -> sandbox.requireNetwork(URI.create("https://8.8.8.8")));
+            sandbox.requireRead(storageHome.resolve("project"));
+            sandbox.requireNetwork(URI.create("https://1.1.1.1"));
+        }
+    }
+
+    @Test
+    void permissionModeSwitchExpiresPendingSandboxApprovals() throws Exception {
+        pendingSandboxApprovalsExpire(true);
+    }
+
+    @Test
+    void modeSwitchExpiresPendingSandboxApprovals() throws Exception {
+        pendingSandboxApprovalsExpire(false);
+    }
+
+    private void pendingSandboxApprovalsExpire(final boolean permissionModeChange) throws Exception {
+        for (final var result : List.of(ApprovalGate.Result.ALLOW_ONCE, ApprovalGate.Result.ALLOW_SESSION)) {
+            for (final var operation : List.of("read", "filesystem", "network", "launch")) {
+                final var permissions = new PermissionService(configuration, storageHome);
+                final var entered = new CountDownLatch(1);
+                final var release = new CountDownLatch(1);
+                permissions.setGate(request -> {
+                    entered.countDown();
+                    try {
+                        release.await();
+                    } catch (final InterruptedException error) {
+                        Thread.currentThread().interrupt();
+                        throw new IllegalStateException(error);
+                    }
+                    return result;
+                });
+                try (final var sandbox = sandbox(permissions);
+                        final var executor = Executors.newVirtualThreadPerTaskExecutor()) {
+                    final var runtime = new SessionRuntime(
+                            null, permissions, null, null, null, null, null, null, storageHome, sandbox);
+                    final var target = storageHome.resolve("outside");
+                    final var pending = executor.submit(() -> assertThrows(SecurityException.class, () -> {
+                        switch (operation) {
+                            case "read" -> sandbox.requireRead(target);
+                            case "filesystem" -> sandbox.request(operation, target.toString(), true);
+                            case "network" -> sandbox.request(operation, "8.8.8.8:443", false);
+                            default -> sandbox.launch(new ProcessBuilder("never-execute").directory(target.toFile()));
+                        }
+                    }));
+                    entered.await();
+                    try {
+                        if (permissionModeChange) {
+                            runtime.permissions().setPermissionMode(PermissionMode.FULL_YOLO);
+                            runtime.permissions().setPermissionMode(PermissionMode.ASK);
+                        } else {
+                            runtime.permissions().setMode(AgentMode.BUILD);
+                        }
+                    } finally {
+                        release.countDown();
+                    }
+                    pending.get();
+                    permissions.setGate(request -> ApprovalGate.Result.DENY);
+                    assertThrows(SecurityException.class, () -> sandbox.requireRead(target));
+                    assertThrows(SecurityException.class, () -> sandbox.requireWrite(target));
+                    assertThrows(SecurityException.class, () -> sandbox.requireNetwork(URI.create("https://8.8.8.8")));
+                }
+            }
+        }
+    }
+
+    private SessionSandbox sandbox(final PermissionService permissions) throws Exception {
+        final var project = Files.createDirectories(storageHome.resolve("project"));
+        return new SessionSandbox(
+                configuration.sandbox(), project, project, permissions, storageHome.resolve("scratch"));
+    }
+
+    @Test
     void routeApprovalsAreSessionOwnedAndClearedOnDisposal() {
         final var factory = factory();
         final var first = factory.create("k1", "s1", storageHome);
         final var second = factory.create("k2", "s2", storageHome);
         final var routes = first.permissions().subagentRoutes();
         assertTrue(routes.approve(
-                "$private/main",
-                "$external/model",
-                (title, detail, tool, args) -> ApprovalGate.Result.ALLOW_SESSION,
-                () -> false));
+                "$private/main", "$external/model", request -> ApprovalGate.Result.ALLOW_SESSION, () -> false));
         assertTrue(routes.allows("$external/model"));
         assertFalse(second.permissions().subagentRoutes().allows("$external/model"));
         first.close();
@@ -175,5 +326,21 @@ class SessionRuntimeTest {
         first.updateChatSettings(first.chatSettings().withModel("model-a"));
         assertEquals("model-a", first.chatSettings().model());
         assertNull(second.chatSettings().model(), "model selection of one tab must not leak to the other");
+    }
+
+    public static class SessionConfigurationModule extends ConfigurationTestModule {
+        public SessionConfigurationModule() {
+            super(Map.of(
+                    "yca.storageHome", storageHome.toString(),
+                    "yca.mode", "PLAN",
+                    "yca.sandbox.enabled", "true",
+                    "yca.sandbox.filesystem.allowRead",
+                            storageHome.resolve("project").toString(),
+                    "yca.sandbox.filesystem.allowWrite",
+                            storageHome.resolve("project").toString(),
+                    "yca.sandbox.filesystem.denyRead", "",
+                    "yca.sandbox.filesystem.denyWrite", "",
+                    "yca.sandbox.network.allowedDomains", "1.1.1.1:443"));
+        }
     }
 }

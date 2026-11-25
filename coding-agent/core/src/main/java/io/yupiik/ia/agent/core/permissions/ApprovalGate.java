@@ -15,10 +15,25 @@
  */
 package io.yupiik.ia.agent.core.permissions;
 
+import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Objects;
 
 public interface ApprovalGate {
-    Result approve(String title, String detail, String toolName, Map<String, Object> args);
+    Result approve(Request request);
+
+    enum Origin {
+        PERMISSION,
+        SANDBOX
+    }
+
+    record Request(Origin origin, String title, String detail, String toolName, Map<String, Object> args) {
+        public Request {
+            Objects.requireNonNull(origin, "origin");
+            args = Collections.unmodifiableMap(new LinkedHashMap<>(args));
+        }
+    }
 
     enum Result {
         DENY,

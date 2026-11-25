@@ -19,6 +19,7 @@ import static org.junit.jupiter.api.Assertions.*;
 
 import io.yupiik.fusion.framework.api.configuration.Configuration;
 import io.yupiik.fusion.json.internal.JsonMapperImpl;
+import io.yupiik.ia.agent.core.sandbox.DisabledSandbox;
 import io.yupiik.ia.agent.core.tools.EmbeddedTool;
 import io.yupiik.ia.agent.core.tools.ToolCategory;
 import io.yupiik.ia.agent.core.tools.ToolContext;
@@ -57,7 +58,7 @@ class ContextToolsTest {
                                     tool.name().equals("git")
                                             ? Map.of("argv", List.of("log"))
                                             : Map.of("operation", "summary"),
-                                    ToolContext.empty(testWorkdir))
+                                    ToolContext.empty(testWorkdir, new DisabledSandbox(testWorkdir)))
                             .error());
                 }
             }
@@ -126,14 +127,19 @@ class ContextToolsTest {
             args.put("repository", null);
             assertEquals(
                     "Context capability unavailable.",
-                    git.execute(args, ToolContext.empty(testWorkdir)).output());
-            assertEquals(
-                    "Invalid Git arguments.",
-                    git.execute(Map.of("argv", List.of(1)), ToolContext.empty(testWorkdir))
+                    git.execute(args, ToolContext.empty(testWorkdir, new DisabledSandbox(testWorkdir)))
                             .output());
             assertEquals(
                     "Invalid Git arguments.",
-                    git.execute(Map.of("argv", List.of("log"), "shell", "evil"), ToolContext.empty(testWorkdir))
+                    git.execute(
+                                    Map.of("argv", List.of(1)),
+                                    ToolContext.empty(testWorkdir, new DisabledSandbox(testWorkdir)))
+                            .output());
+            assertEquals(
+                    "Invalid Git arguments.",
+                    git.execute(
+                                    Map.of("argv", List.of("log"), "shell", "evil"),
+                                    ToolContext.empty(testWorkdir, new DisabledSandbox(testWorkdir)))
                             .output());
             for (final var operation : List.of(
                     "summary",
@@ -154,34 +160,42 @@ class ContextToolsTest {
                 }
                 assertEquals(
                         "Context capability unavailable.",
-                        context.execute(input, ToolContext.empty(testWorkdir)).output());
+                        context.execute(input, ToolContext.empty(testWorkdir, new DisabledSandbox(testWorkdir)))
+                                .output());
             }
             assertEquals(
                     "Invalid context arguments.",
-                    context.execute(Map.of("operation", "git"), ToolContext.empty(testWorkdir))
+                    context.execute(
+                                    Map.of("operation", "git"),
+                                    ToolContext.empty(testWorkdir, new DisabledSandbox(testWorkdir)))
                             .output());
             assertEquals(
                     "Invalid context arguments.",
-                    context.execute(Map.of(), ToolContext.empty(testWorkdir)).output());
-            assertEquals(
-                    "Invalid context arguments.",
-                    context.execute(new HashMap<>(Map.of("page", 1)), ToolContext.empty(testWorkdir))
+                    context.execute(Map.of(), ToolContext.empty(testWorkdir, new DisabledSandbox(testWorkdir)))
                             .output());
             assertEquals(
                     "Invalid context arguments.",
-                    context.execute(Map.of("operation", "prepare_source", "depth", 1.5), ToolContext.empty(testWorkdir))
+                    context.execute(
+                                    new HashMap<>(Map.of("page", 1)),
+                                    ToolContext.empty(testWorkdir, new DisabledSandbox(testWorkdir)))
+                            .output());
+            assertEquals(
+                    "Invalid context arguments.",
+                    context.execute(
+                                    Map.of("operation", "prepare_source", "depth", 1.5),
+                                    ToolContext.empty(testWorkdir, new DisabledSandbox(testWorkdir)))
                             .output());
             assertEquals(
                     "Invalid context arguments.",
                     context.execute(
                                     Map.of("operation", "prepare_source", "revision", "main"),
-                                    ToolContext.empty(testWorkdir))
+                                    ToolContext.empty(testWorkdir, new DisabledSandbox(testWorkdir)))
                             .output());
             assertEquals(
                     "Invalid context arguments.",
                     context.execute(
                                     Map.of("operation", "summary", "url", "https://example.org"),
-                                    ToolContext.empty(testWorkdir))
+                                    ToolContext.empty(testWorkdir, new DisabledSandbox(testWorkdir)))
                             .output());
         }
     }
@@ -202,6 +216,7 @@ class ContextToolsTest {
                 null,
                 () -> callCancelled,
                 testWorkdir,
+                new DisabledSandbox(testWorkdir),
                 -1,
                 allowed,
                 null,

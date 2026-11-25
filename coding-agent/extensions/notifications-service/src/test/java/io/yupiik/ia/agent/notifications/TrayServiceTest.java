@@ -41,7 +41,7 @@ class TrayServiceTest {
             try {
                 assertTrue(tray.waiting.await(2, TimeUnit.SECONDS));
                 assertEquals(0, tray.timeout);
-                state.publish(new Notice(1, "s", "Reactive notification", "approval_required", "main", 1));
+                state.publish(new Notice(1, "s", "Reactive notification", "approval_required", "main", 1, null));
                 loop.get(3, TimeUnit.SECONDS);
                 assertEquals(1, tray.waits);
                 assertEquals(2, tray.updates);
@@ -60,7 +60,7 @@ class TrayServiceTest {
         try (final var container = ConfiguringContainer.of().start();
                 final var endpoint = container.lookup(NotificationEndpoint.class)) {
             final var state = new UnreadNotifications();
-            state.publish(new Notice(1, "s", "Session", "approval_required", "main", 2000));
+            state.publish(new Notice(1, "s", "Session", "approval_required", "main", 2000, null));
             final var tray = new FakeTray(true);
             new TrayService(endpoint.instance(), clock).run(state, tray, false);
             assertTrue(tray.disposed);
@@ -76,7 +76,7 @@ class TrayServiceTest {
         try (final var container = ConfiguringContainer.of().start();
                 final var endpoint = container.lookup(NotificationEndpoint.class)) {
             final var state = new UnreadNotifications();
-            state.publish(new Notice(1, "s", "Session", "input_required", "main", 3000));
+            state.publish(new Notice(1, "s", "Session", "input_required", "main", 3000, null));
             final var tray = new FakeTray(false);
             new TrayService(endpoint.instance(), clock).run(state, tray, true);
             assertTrue(tray.disposed);
@@ -98,7 +98,7 @@ class TrayServiceTest {
     @Test
     void blinkChangesAttentionWithoutRebuildingTheMenu() throws Exception {
         final var state = new UnreadNotifications();
-        final var notice = new Notice(1, "one", "Blink", "turn_end", "main", 1);
+        final var notice = new Notice(1, "one", "Blink", "turn_end", "main", 1, null);
         state.publish(notice);
         final var now = new AtomicLong();
         final var clock = new Clock() {
@@ -129,11 +129,11 @@ class TrayServiceTest {
     @Test
     void dismissesOnlySelectedVersionsBeforePublishingTheLatestSnapshot() throws Exception {
         final var state = new UnreadNotifications();
-        final var selected = new Notice(1, "one", "Selected", "approval_required", "main", 1);
-        final var replaced = new Notice(1, "one", "Old", "input_required", "btw", 2);
-        final var other = new Notice(1, "two", "Other", "turn_end", "main", 3);
-        final var newer = new Notice(1, "one", "New", "input_required", "btw", 4);
-        final var arrived = new Notice(1, "three", "Arrived", "turn_end", "main", 5);
+        final var selected = new Notice(1, "one", "Selected", "approval_required", "main", 1, null);
+        final var replaced = new Notice(1, "one", "Old", "input_required", "btw", 2, null);
+        final var other = new Notice(1, "two", "Other", "turn_end", "main", 3, null);
+        final var newer = new Notice(1, "one", "New", "input_required", "btw", 4, null);
+        final var arrived = new Notice(1, "three", "Arrived", "turn_end", "main", 5, null);
         state.publish(selected);
         state.publish(replaced);
         state.publish(other);
@@ -155,8 +155,8 @@ class TrayServiceTest {
     @Test
     void dismissingOneMenuRowPreservesOtherRemindersInTheSameSession() throws Exception {
         final var state = new UnreadNotifications();
-        final var selected = new Notice(1, "one", "Selected", "approval_required", "main", 1);
-        final var other = new Notice(1, "one", "Other source", "input_required", "btw", 2);
+        final var selected = new Notice(1, "one", "Selected", "approval_required", "main", 1, null);
+        final var other = new Notice(1, "one", "Other source", "input_required", "btw", 2, null);
         state.publish(selected);
         state.publish(other);
         final var tray = new ScriptedTray(current -> {
@@ -173,7 +173,7 @@ class TrayServiceTest {
     @Test
     void closingDetailsWithoutDismissalLeavesEveryNoticeUnread() throws Exception {
         final var state = new UnreadNotifications();
-        final var notice = new Notice(1, "one", "Close details", "input_required", "main", 1);
+        final var notice = new Notice(1, "one", "Close details", "input_required", "main", 1, null);
         state.publish(notice);
         // Closing a details view returns no dismissals and does not close the tray.
         final var tray = new ScriptedTray(ignored -> {});

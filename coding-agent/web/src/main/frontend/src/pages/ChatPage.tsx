@@ -46,6 +46,7 @@ type SidebarInfo = {
   todos: TodoItem[];
   mode: string;
   permissionMode?: string;
+  sandboxEnabled?: boolean;
   model?: string;
   flavor?: string;
   provider?: string;
@@ -58,6 +59,7 @@ type SidebarInfo = {
 type SidebarMeta = {
   mode?: string;
   permissionMode?: string;
+  sandboxEnabled?: boolean;
   model?: string;
   flavor?: string;
   provider?: string;
@@ -385,7 +387,7 @@ export function ChatPage({
       const m: 'plan' | 'build' = isBuild ? 'build' : 'plan';
       // session.metadata reports permissionMode as lowercase already (web API normalizes), but keep
       // the defensive toLowerCase like the mode above so the dropdown value always matches the
-      // <option value="ask|auto_edit|yolo"> entries and the status-dot comparisons.
+      // permission options and the status-indicator comparisons.
       const permissionMode =
         typeof meta.permissionMode === 'string' ? meta.permissionMode.toLowerCase() : meta.permissionMode;
       setSidebar({
@@ -396,6 +398,7 @@ export function ChatPage({
         todos: todos ?? [],
         mode: m,
         permissionMode,
+        sandboxEnabled: meta.sandboxEnabled,
         model: meta.model,
         flavor: meta.flavor,
         provider: meta.provider,
@@ -1415,6 +1418,7 @@ function Sidebar({
         flavor={sidebar.flavor}
         provider={sidebar.provider}
         permissionMode={sidebar.permissionMode}
+        sandboxEnabled={sidebar.sandboxEnabled}
         modelCandidates={sidebar.modelCandidates}
         providerCandidates={sidebar.providerCandidates}
         onSetProject={onSetProject}

@@ -33,7 +33,6 @@ import io.yupiik.ia.agent.core.snapshot.SnapshotStore;
 import io.yupiik.ia.agent.core.todo.PlanFileService;
 import io.yupiik.ia.agent.core.todo.PlanTodoSeeder;
 import io.yupiik.ia.agent.core.tools.EmbeddedTool;
-import io.yupiik.ia.agent.core.tools.ToolContext;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -486,7 +485,7 @@ public class AgentSessionService {
                         Path.of(configuration.resolveStorageHome()),
                         titleFallback == null ? "" : titleFallback,
                         sessionId)
-                : ToolContext.empty(runtime.workdir()).resolvePath(arg);
+                : runtime.workdir().resolve(arg).normalize();
         final var content = planFileService.render(plan, runtime.todos().all());
         try {
             if (path.getParent() != null) {

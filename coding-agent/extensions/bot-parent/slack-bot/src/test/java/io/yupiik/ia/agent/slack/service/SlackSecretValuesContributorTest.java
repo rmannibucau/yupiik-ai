@@ -20,13 +20,15 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.fusion.framework.api.configuration.Configuration;
-import io.yupiik.ia.agent.core.configuration.ConfigurationLoader;
+import io.yupiik.fusion.testing.Fusion;
+import io.yupiik.fusion.testing.FusionSupport;
 import io.yupiik.ia.agent.core.configuration.SecretRedactionMode;
 import io.yupiik.ia.agent.core.security.SecretRedactor;
 import io.yupiik.ia.agent.core.security.SecretRegistry;
 import io.yupiik.ia.agent.core.security.SecretSessionModes;
 import io.yupiik.ia.agent.core.security.SecretVault;
 import io.yupiik.ia.agent.slack.configuration.SlackConfiguration;
+import io.yupiik.ia.agent.slack.support.SlackConfigurationTestModule;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -38,7 +40,11 @@ import java.util.logging.LogRecord;
 import java.util.logging.Logger;
 import org.junit.jupiter.api.Test;
 
+@FusionSupport(modules = SlackSecretValuesContributorTest.SettingsModule.class)
 class SlackSecretValuesContributorTest {
+    @Fusion
+    private SlackConfiguration configuration;
+
     private static final String PASSWORD_ENV = "slack.executor.docker.services.keyStorePasswordEnv";
     private static final Map<String, String> SETTINGS = Map.of(
             "slack.appTokenEnv",
@@ -161,8 +167,13 @@ class SlackSecretValuesContributorTest {
         }
     }
 
+    public static class SettingsModule extends SlackConfigurationTestModule {
+        public SettingsModule() {
+            super(SETTINGS);
+        }
+    }
+
     private SlackSecretValuesContributor contributor(final Configuration source) {
-        final var conf = ConfigurationLoader.load(SlackConfiguration.class, source);
-        return new SlackSecretValuesContributor(conf, source);
+        return new SlackSecretValuesContributor(configuration, source);
     }
 }

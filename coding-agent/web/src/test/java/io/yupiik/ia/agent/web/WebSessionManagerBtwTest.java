@@ -23,14 +23,17 @@ import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.fusion.json.JsonMapper;
+import io.yupiik.fusion.testing.Fusion;
+import io.yupiik.fusion.testing.FusionSupport;
 import io.yupiik.ia.agent.core.agent.SystemPromptBuilder;
-import io.yupiik.ia.agent.core.configuration.CodingAgentConfigurations;
+import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.context.BackoffSleeper;
 import io.yupiik.ia.agent.core.context.UsageTracker;
 import io.yupiik.ia.agent.core.llm.ChatSettings;
 import io.yupiik.ia.agent.core.llm.Usage;
 import io.yupiik.ia.agent.core.permissions.ApprovalGate;
 import io.yupiik.ia.agent.core.question.UserFeedbackService;
+import io.yupiik.ia.agent.core.sandbox.Sandbox;
 import io.yupiik.ia.agent.core.session.InMemorySessionStore;
 import io.yupiik.ia.agent.core.session.SessionStore;
 import io.yupiik.ia.agent.core.shell.SessionLifecycle;
@@ -66,10 +69,17 @@ import org.junit.jupiter.api.io.TempDir;
  * {@code btw} SSE broadcasts, {@code clearBtw} and the snapshot re-seed of a live btw.
  */
 @ExtendWith(TestWebJsonMapper.class)
+@FusionSupport(modules = WebSessionManagerBtwTest.SessionModule.class)
 class WebSessionManagerBtwTest {
 
     @TempDir
-    Path storageHome;
+    static Path storageHome;
+
+    public static class SessionModule extends WebConfigurationTestModule {
+        public SessionModule() {
+            super(Map.of("yca.storageHome", storageHome.toString(), "yca.workingDir", storageHome.toString()));
+        }
+    }
 
     private JsonMapper mapper;
     private WebSessionManager manager;
@@ -78,18 +88,11 @@ class WebSessionManagerBtwTest {
     private SessionStore sessionStore;
 
     @BeforeEach
-    void setup(final JsonMapper mapper) {
+    void setup(final JsonMapper mapper, @Fusion final CodingAgentConfiguration configuration) {
         this.mapper = mapper;
         this.broker = new FakeSseBroker(mapper);
         this.answerer = new FakeBtwAnswerer();
 
-        // public main helper (same one core's own tests use to point a provider at a mock): avoids
-        // touching the fusion-generated config factory directly, which is not package-accessible here.
-        final var configuration = CodingAgentConfigurations.builder()
-                .baseUrl("http://localhost:0")
-                .storageHome(storageHome.toString())
-                .custom(Map.of("yca.workingDir", storageHome.toString()))
-                .build();
         sessionStore = new InMemorySessionStore(Clock.systemUTC());
         final var runtimeFactory = new SessionRuntimeFactory(
                 null,
@@ -467,7 +470,8 @@ class WebSessionManagerBtwTest {
                 final BooleanSupplier cancelled,
                 final ApprovalGate sessionGate,
                 final ChatSettings sessionSettings,
-                final Path workdir) {
+                final Path workdir,
+                final Sandbox sandbox) {
             this.pending.put(question, new CompletableFuture<>());
             this.cancelled.put(question, cancelled);
             return this.pending.get(question);
@@ -485,12 +489,13 @@ class WebSessionManagerBtwTest {
                 final UserFeedbackService feedback,
                 final Path workdir,
                 final ToolRegistry registry,
-                final Set<String> ceiling) {
+                final Set<String> ceiling,
+                final Sandbox sandbox) {
             assertNotNull(ceiling);
             requests.put(
                     question,
                     new Request(workdir, sessionSettings, usage, systemPromptBuilder, registry, Set.copyOf(ceiling)));
-            return ask(question, sessionId, usage, cancelled, sessionGate, sessionSettings, workdir);
+            return ask(question, sessionId, usage, cancelled, sessionGate, sessionSettings, workdir, sandbox);
         }
 
         private BooleanSupplier cancelledSupplier(final String question) {

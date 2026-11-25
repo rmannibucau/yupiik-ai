@@ -15,11 +15,9 @@
  */
 package io.yupiik.ia.agent.core.configuration;
 
-import io.yupiik.fusion.framework.api.configuration.Configuration;
 import io.yupiik.fusion.framework.build.api.configuration.Property;
 import io.yupiik.fusion.framework.build.api.json.JsonModel;
 import java.util.List;
-import java.util.Map;
 
 /**
  * Tool output optimization settings (rtk style token reduction).
@@ -83,14 +81,4 @@ public record OptimizeConfiguration(
                                 + "INFO/debug logs of a test run do not bloat every subsequent LLM turn. By default "
                                 + "dropped levels are INFO/FINE/FINER/FINEST/CONFIG/DEBUG; WARNING/SEVERE/ERROR are "
                                 + "never dropped.")
-        LogNoiseConfiguration logNoise) {
-    /**
-     * Materializes the default {@link OptimizeConfiguration} with every nested default applied (in particular the
-     * {@link LogNoiseConfiguration} drop rules declared in {@code @Property(defaultValue=...)}), as
-     * the container would at startup with no {@code yca.optimize.*} property set.
-     */
-    public static OptimizeConfiguration defaults() {
-        return ConfigurationLoader.load(CodingAgentConfiguration.class, Configuration.of(Map.of()))
-                .optimize();
-    }
-}
+        LogNoiseConfiguration logNoise) {}

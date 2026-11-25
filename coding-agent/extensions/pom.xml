@@ -17,5 +17,6 @@
     <module>bot-parent</module>
     <module>nono-notifications</module>
     <module>notifications-service</module>
+    <module>sandbox-helper</module>
   </modules>
 </project>

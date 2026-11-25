@@ -18,6 +18,7 @@ package io.yupiik.ia.agent.core.codegraph;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import io.yupiik.ia.agent.core.sandbox.DisabledSandbox;
 import io.yupiik.ia.agent.core.tools.ToolContext;
 import java.io.IOException;
 import java.nio.file.Files;
@@ -50,7 +51,8 @@ class ReadSymbolToolTest {
                         Map.of(),
                         1L)));
 
-        final var result = tool.execute(Map.of("symbol", "p.Sample#add", "context", "1"), ToolContext.empty(root));
+        final var result = tool.execute(
+                Map.of("symbol", "p.Sample#add", "context", "1"), ToolContext.empty(root, new DisabledSandbox(root)));
         assertTrue(result.success(), result.output());
         final var text = result.output();
         assertTrue(text.contains("symbol METHOD p.Sample#add (src/Sample.java:3-5)"), text);
@@ -73,11 +75,11 @@ class ReadSymbolToolTest {
                         Map.of(),
                         1L)));
 
-        final var bySimple = tool.execute(Map.of("symbol", "Foo"), ToolContext.empty(root));
+        final var bySimple = tool.execute(Map.of("symbol", "Foo"), ToolContext.empty(root, new DisabledSandbox(root)));
         assertTrue(bySimple.success(), bySimple.output());
         assertTrue(bySimple.output().contains("symbol TYPE q.Foo (src/Foo.java:2-2)"), bySimple.output());
 
-        final var byFqn = tool.execute(Map.of("symbol", "q.Foo"), ToolContext.empty(root));
+        final var byFqn = tool.execute(Map.of("symbol", "q.Foo"), ToolContext.empty(root, new DisabledSandbox(root)));
         assertTrue(byFqn.success());
         assertTrue(byFqn.output().contains("public class Foo"), byFqn.output());
     }
@@ -103,7 +105,8 @@ class ReadSymbolToolTest {
                         Map.of(),
                         1L)));
 
-        final var result = tool.execute(Map.of("symbol", "p.Sample#add", "context", "0"), ToolContext.empty(root));
+        final var result = tool.execute(
+                Map.of("symbol", "p.Sample#add", "context", "0"), ToolContext.empty(root, new DisabledSandbox(root)));
         assertTrue(result.success(), result.output());
         assertTrue(result.output().contains("symbol METHOD p.Sample.add (src/Sample.java:3-5)"), result.output());
         assertTrue(result.output().contains("signature int add(int a, int b)"), result.output());
@@ -128,11 +131,13 @@ class ReadSymbolToolTest {
                         Map.of(),
                         1L)));
 
-        final var aRes = tool.execute(Map.of("symbol", "q.A#run", "context", "0"), ToolContext.empty(root));
+        final var aRes = tool.execute(
+                Map.of("symbol", "q.A#run", "context", "0"), ToolContext.empty(root, new DisabledSandbox(root)));
         assertTrue(aRes.success(), aRes.output());
         assertTrue(aRes.output().contains("symbol METHOD q.A.run (src/A.java:3-4)"), aRes.output());
 
-        final var bRes = tool.execute(Map.of("symbol", "q.B#run", "context", "0"), ToolContext.empty(root));
+        final var bRes = tool.execute(
+                Map.of("symbol", "q.B#run", "context", "0"), ToolContext.empty(root, new DisabledSandbox(root)));
         assertTrue(bRes.success(), bRes.output());
         assertTrue(bRes.output().contains("symbol METHOD q.B.run (src/B.java:3-4)"), bRes.output());
     }
@@ -192,7 +197,8 @@ class ReadSymbolToolTest {
 
         // the stored FQN is fully qualified while the request uses a short class prefix; the method simple
         // name is also globally ambiguous, so only the class-aware fallback can resolve it
-        final var result = tool.execute(Map.of("symbol", "ModelsResponse.Model#maxTokens"), ToolContext.empty(root));
+        final var result = tool.execute(
+                Map.of("symbol", "ModelsResponse.Model#maxTokens"), ToolContext.empty(root, new DisabledSandbox(root)));
         assertTrue(result.success(), result.output());
         assertTrue(
                 result.output()
@@ -235,7 +241,8 @@ class ReadSymbolToolTest {
                         1L)));
 
         // two methods match under the given class prefix: report not found instead of returning the first
-        final var result = tool.execute(Map.of("symbol", "ModelsResponse.Model#maxTokens"), ToolContext.empty(root));
+        final var result = tool.execute(
+                Map.of("symbol", "ModelsResponse.Model#maxTokens"), ToolContext.empty(root, new DisabledSandbox(root)));
         assertFalse(result.success());
         assertTrue(result.output().contains("Symbol not found: ModelsResponse.Model#maxTokens"), result.output());
         assertTrue(result.output().contains("code_find_code"), result.output());
@@ -244,7 +251,7 @@ class ReadSymbolToolTest {
     @Test
     void errorsOnUnknownSymbolWithCodeFindHint(@TempDir final Path root) {
         final var tool = new ReadSymbolTool(fake(root, GraphStore.empty()));
-        final var result = tool.execute(Map.of("symbol", "NoSuch"), ToolContext.empty(root));
+        final var result = tool.execute(Map.of("symbol", "NoSuch"), ToolContext.empty(root, new DisabledSandbox(root)));
         assertFalse(result.success());
         assertTrue(result.output().contains("Symbol not found: NoSuch"), result.output());
         assertTrue(result.output().contains("code_find_code"), result.output());
@@ -253,7 +260,8 @@ class ReadSymbolToolTest {
     @Test
     void requiresSymbol(@TempDir final Path root) {
         final var tool = new ReadSymbolTool(fake(root, GraphStore.empty()));
-        assertFalse(tool.execute(Map.of(), ToolContext.empty(root)).success());
+        assertFalse(tool.execute(Map.of(), ToolContext.empty(root, new DisabledSandbox(root)))
+                .success());
     }
 
     private static StructuralCodeGraph fake(final Path root, final GraphStore store) {

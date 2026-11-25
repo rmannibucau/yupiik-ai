@@ -83,6 +83,11 @@
       <scope>test</scope>
     </dependency>
     <dependency>
+      <groupId>io.yupiik.fusion</groupId>
+      <artifactId>fusion-testing</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
       <groupId>io.yupiik.ai</groupId>
       <artifactId>a2a-client</artifactId>
       <version>${project.version}</version>
@@ -188,6 +193,8 @@
             <minisite-menu-1-5-title>GitHub bot</minisite-menu-1-5-title>
             <minisite-menu-1-6>/coding-agent/slack-bot/index.html</minisite-menu-1-6>
             <minisite-menu-1-6-title>Slack bot</minisite-menu-1-6-title>
+            <minisite-menu-1-7>/coding-agent/sandboxing/overview.html</minisite-menu-1-7>
+            <minisite-menu-1-7-title>Sandboxing</minisite-menu-1-7-title>
             <minisite-menu-2>/llm-client/index.html</minisite-menu-2>
             <minisite-menu-2-title>LLM clients</minisite-menu-2-title>
             <minisite-menu-2-icon>fas fa-comments</minisite-menu-2-icon>

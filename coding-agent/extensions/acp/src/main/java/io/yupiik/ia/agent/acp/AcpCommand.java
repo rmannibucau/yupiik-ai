@@ -34,7 +34,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
 @DefaultScoped
 @Command(
         name = "acp",
-        description = "Run the Agent Client Protocol v1 over stdio (for Jetbrains Air and other ACP clients).")
+        description =
+                "Run the Agent Client Protocol v1 over stdio (for Jetbrains Air and other ACP clients). All modes accept --sandbox true|false (yca.sandbox.enabled); sandbox policy is independent of tool permissions.")
 public class AcpCommand implements Runnable {
     // Shared by the adapter and the same-package generated Fusion configuration factory.
     static final List<String> DEFAULT_ELICITATION_SENSITIVE_MARKERS = List.of(

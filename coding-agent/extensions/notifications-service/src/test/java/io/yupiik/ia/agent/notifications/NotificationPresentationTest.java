@@ -15,6 +15,14 @@ import org.junit.jupiter.api.Test;
 
 class NotificationPresentationTest {
     @Test
+    void originIsDisplayedWithoutReplacingSideQuestionSource() {
+        final var notice = new Notice(1, "s", "Title", "approval_required", "btw", 1, "SANDBOX");
+        assertTrue(NotificationPresentation.preview(notice).startsWith("Sandbox approval requested"));
+        assertTrue(NotificationPresentation.details(notice).contains("Source: btw"));
+        assertTrue(NotificationPresentation.details(notice).contains("Origin: SANDBOX"));
+    }
+
+    @Test
     void summaryCountsDistinctSessionsWithoutExposingTitles() {
         final var first = notice("one", "Private title", "approval_required", "main");
         final var sameSession = notice("one", "Another title", "input_required", "btw");
@@ -97,6 +105,6 @@ class NotificationPresentationTest {
     }
 
     private Notice notice(final String session, final String title, final String type, final String source) {
-        return new Notice(1, session, title, type, source, 1_700_000_000_123L);
+        return new Notice(1, session, title, type, source, 1_700_000_000_123L, null);
     }
 }

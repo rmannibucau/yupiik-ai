@@ -19,7 +19,6 @@ import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.LogNoiseConfiguration;
 import io.yupiik.ia.agent.core.configuration.LogNoisePatternConfiguration;
-import io.yupiik.ia.agent.core.configuration.OptimizeConfiguration;
 import java.util.List;
 import java.util.Set;
 import java.util.stream.Stream;
@@ -44,18 +43,17 @@ public class LogNoiseOutputProcessor implements OutputProcessor {
     private final List<FastRegex> excludes;
     private final List<FastRegex> includes;
 
-    public LogNoiseOutputProcessor(final CodingAgentConfiguration configuration) {
-        this(configuration.optimize());
+    // Fusion's application-scoped forwarding subclass must not initialize the real processor.
+    protected LogNoiseOutputProcessor() {
+        this.excludes = List.of();
+        this.includes = List.of();
     }
 
-    protected LogNoiseOutputProcessor(final OptimizeConfiguration configuration) {
-        final var logNoise = configuration == null ? null : configuration.logNoise();
+    public LogNoiseOutputProcessor(final CodingAgentConfiguration configuration) {
+        final var optimize = configuration.optimize();
+        final var logNoise = optimize == null ? null : optimize.logNoise();
         this.excludes = toFastRegex(logNoise == null ? null : logNoise.excludes());
         this.includes = toFastRegex(logNoise == null ? null : logNoise.includes());
-    }
-
-    public LogNoiseOutputProcessor() {
-        this(OptimizeConfiguration.defaults());
     }
 
     private static List<FastRegex> toFastRegex(final List<LogNoisePatternConfiguration> list) {

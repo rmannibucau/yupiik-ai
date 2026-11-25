@@ -23,14 +23,17 @@ import io.yupiik.fusion.httpserver.jre.JreHttpServer;
 import io.yupiik.fusion.httpserver.jre.JreHttpServerConfiguration;
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.fusion.jsonrpc.impl.JsonRpcMethod;
+import io.yupiik.fusion.testing.Fusion;
+import io.yupiik.fusion.testing.FusionSupport;
 import io.yupiik.ia.agent.core.agent.SystemPromptBuilder;
-import io.yupiik.ia.agent.core.configuration.CodingAgentConfigurations;
+import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.context.BackoffSleeper;
 import io.yupiik.ia.agent.core.context.UsageTracker;
 import io.yupiik.ia.agent.core.llm.ChatSettings;
 import io.yupiik.ia.agent.core.permissions.ApprovalGate;
 import io.yupiik.ia.agent.core.question.Question;
 import io.yupiik.ia.agent.core.question.UserFeedbackService;
+import io.yupiik.ia.agent.core.sandbox.Sandbox;
 import io.yupiik.ia.agent.core.session.SessionStore;
 import io.yupiik.ia.agent.core.shell.SessionLifecycle;
 import io.yupiik.ia.agent.core.shell.SessionRuntimeFactory;
@@ -84,12 +87,19 @@ import org.junit.jupiter.api.io.TempDir;
  * JSON-RPC error.
  */
 @ExtendWith(TestWebJsonMapper.class)
+@FusionSupport(modules = WebSessionResolveNullResultTest.SessionModule.class)
 @Timeout(30)
 class WebSessionResolveNullResultTest {
     private static final Pattern LINE_BREAK = Pattern.compile("\\R");
 
     @TempDir
-    Path storageHome;
+    static Path storageHome;
+
+    public static class SessionModule extends WebConfigurationTestModule {
+        public SessionModule() {
+            super(Map.of("yca.storageHome", storageHome.toString()));
+        }
+    }
 
     private JsonMapper mapper;
     private WebSessionManager manager;
@@ -98,15 +108,11 @@ class WebSessionResolveNullResultTest {
     private FakeBtwAnswerer answerer;
 
     @BeforeEach
-    void setup(final JsonMapper mapper) {
+    void setup(final JsonMapper mapper, @Fusion final CodingAgentConfiguration configuration) {
         this.mapper = mapper;
         this.broker = new FakeSseBroker(mapper);
         this.answerer = new FakeBtwAnswerer();
 
-        final var configuration = CodingAgentConfigurations.builder()
-                .baseUrl("http://localhost:0")
-                .storageHome(storageHome.toString())
-                .build();
         final var sessionStore = new SessionStore() {};
         runtimeFactory = new SessionRuntimeFactory(
                 null,
@@ -325,8 +331,11 @@ class WebSessionResolveNullResultTest {
         final SseBroker.SseSubscription tab = bytes -> live.add(new String(bytes, StandardCharsets.UTF_8));
         manager.subscribe("s1", tab);
         final var approval = new CompletableFuture<ApprovalGate.Result>();
-        final var approving = Thread.startVirtualThread(() -> approval.complete(
-                session.env().io().approvalGate().approve("Run?", "Detail", "exec", Map.of("command", "pwd"))));
+        final var approving = Thread.startVirtualThread(() -> approval.complete(session.env()
+                .io()
+                .approvalGate()
+                .approve(new ApprovalGate.Request(
+                        ApprovalGate.Origin.PERMISSION, "Run?", "Detail", "exec", Map.of("command", "pwd")))));
         try {
             final var original = awaitFrame(live);
             broker.unsubscribe("s1", tab);
@@ -517,7 +526,8 @@ class WebSessionResolveNullResultTest {
                 final BooleanSupplier cancelled,
                 final ApprovalGate sessionGate,
                 final ChatSettings sessionSettings,
-                final Path workdir) {
+                final Path workdir,
+                final Sandbox sandbox) {
             return CompletableFuture.completedFuture(new BtwAnswerer.BtwAnswer("unused", false));
         }
 
@@ -533,9 +543,10 @@ class WebSessionResolveNullResultTest {
                 final UserFeedbackService feedback,
                 final Path workdir,
                 final ToolRegistry registry,
-                final Set<String> ceiling) {
+                final Set<String> ceiling,
+                final Sandbox sandbox) {
             assertNotNull(ceiling);
-            return ask(question, sessionId, usage, cancelled, sessionGate, sessionSettings, workdir);
+            return ask(question, sessionId, usage, cancelled, sessionGate, sessionSettings, workdir, sandbox);
         }
     }
 }

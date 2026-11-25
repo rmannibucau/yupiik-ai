@@ -38,10 +38,6 @@ public class GradleOutputProcessor implements OutputProcessor {
         this(logNoise, new CommandOutputPostProcessor());
     }
 
-    public GradleOutputProcessor() {
-        this(new LogNoiseOutputProcessor());
-    }
-
     @Override
     public boolean supports(final String command) {
         return commandOutput.matchesHead(command, "gradle", "gradlew");

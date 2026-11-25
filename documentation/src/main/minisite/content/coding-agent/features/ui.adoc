@@ -1,7 +1,7 @@
 = Interactive UI and headless mode
 :minisite-breadcrumb: Home[../index.html] > Features[../features.html] > Interactive UI and headless mode
-:minisite-nav-prev-link: sandboxes.html
-:minisite-nav-prev-label: External sandboxing (nono, AgentFS, isx)
+:minisite-nav-prev-link: external-sandboxes.html
+:minisite-nav-prev-label: External sandbox alternatives
 :minisite-nav-next-link: streaming.html
 :minisite-nav-next-label: Streaming output and reasoning
 
@@ -22,6 +22,13 @@ yca provides terminal and web interfaces, plus a headless command for automation
 Tool activity uses the logging channel rather than interactive cards or cursor controls.
 
 For web frontend architecture, interactive-request wire contracts and source provenance, see xref:ui-advanced.adoc[Advanced web UI integration].
+
+== Permission warnings
+
+The TUI and web interface show `yolo` in yellow with a warning marker when sandboxing is active, and in red with a warning marker when sandboxing is disabled.
+`full_yolo` is always red with a warning marker because it bypasses tool permission policy and disables built-in sandboxing, regardless of configured sandbox settings.
+This unrestricted mode is not recommended; `yolo` retains sandbox checks and human approval of eligible capability expansion.
+See xref:permissions.adoc[Permission modes] for the policy distinctions; a color indicator is not itself an isolation guarantee.
 
 == Tool requests and results
 

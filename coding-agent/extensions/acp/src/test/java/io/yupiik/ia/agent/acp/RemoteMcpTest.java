@@ -17,12 +17,14 @@ package io.yupiik.ia.agent.acp;
 
 import static org.junit.jupiter.api.Assertions.*;
 
+import io.yupiik.fusion.testing.Fusion;
+import io.yupiik.fusion.testing.FusionSupport;
 import io.yupiik.ia.agent.core.configuration.AgentMode;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
-import io.yupiik.ia.agent.core.configuration.ConfigurationLoader;
 import io.yupiik.ia.agent.core.configuration.NativeProviderConfiguration;
 import io.yupiik.ia.agent.core.mcp.McpManager;
 import io.yupiik.ia.agent.core.permissions.PermissionService;
+import io.yupiik.ia.agent.core.sandbox.DisabledSandbox;
 import io.yupiik.ia.agent.core.tools.ToolContext;
 import io.yupiik.ia.agent.core.wiring.HttpClientProducer;
 import java.io.IOException;
@@ -31,19 +33,21 @@ import java.nio.file.Path;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
-import java.util.Optional;
 import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.EnumSource;
 
+@FusionSupport(modules = AcpConfigurationTestModule.class)
 class RemoteMcpTest {
+    @Fusion
+    private CodingAgentConfiguration configuration;
+
     @ParameterizedTest
     @EnumSource(McpManager.RemoteTransport.class)
     @Timeout(30)
     void remoteSessionsArePrivateAndDiscoveryFailureReapsEarlierChildren(
             final McpManager.RemoteTransport transport, @TempDir final Path tmp) throws Exception {
-        final var configuration = ConfigurationLoader.load(CodingAgentConfiguration.class, key -> Optional.empty());
         try (final var mapper = CodecsTest.mapper();
                 final var http = new HttpClientProducer()
                         .httpClient(configuration, new NativeProviderConfiguration(null, null));
@@ -67,7 +71,8 @@ class RemoteMcpTest {
                     () -> false,
                     null,
                     () -> false,
-                    tmp);
+                    tmp,
+                    new DisabledSandbox(tmp));
             final var secondContext = new ToolContext(
                     "second",
                     null,
@@ -81,7 +86,8 @@ class RemoteMcpTest {
                     () -> false,
                     null,
                     () -> false,
-                    tmp);
+                    tmp,
+                    new DisabledSandbox(tmp));
             // Identical name and destination, but private clients, headers, and negotiated session IDs.
             try (final var first = manager.openSession(
                             List.of(new McpManager.RemoteServer("same-name", transport, url, remote.headers("first"))),

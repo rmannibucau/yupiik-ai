@@ -53,7 +53,7 @@ class UnreadNotificationsTest {
         state.acknowledge(List.of(selected));
         assertEquals(List.of(otherSession, sameSession), state.read());
 
-        final var replacement = new Notice(1, "one", "Updated title", "input_required", "btw", 2);
+        final var replacement = new Notice(1, "one", "Updated title", "input_required", "btw", 2, null);
         state.publish(replacement);
         state.acknowledge(List.of(sameSession));
         assertEquals(List.of(otherSession, replacement), state.read());
@@ -156,10 +156,10 @@ class UnreadNotificationsTest {
     }
 
     private Notice acknowledgement(final String session, final long timestamp) {
-        return new Notice(1, session, "", "session_acknowledged", "main", timestamp);
+        return new Notice(1, session, "", "session_acknowledged", "main", timestamp, null);
     }
 
     private Notice notice(final String session, final String source, final int offset) {
-        return new Notice(1, session, "Session " + session, "approval_required", source, offset);
+        return new Notice(1, session, "Session " + session, "approval_required", source, offset, null);
     }
 }

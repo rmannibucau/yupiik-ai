@@ -21,11 +21,13 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.fusion.framework.api.event.Emitter;
 import io.yupiik.fusion.json.JsonMapper;
+import io.yupiik.fusion.testing.Fusion;
+import io.yupiik.fusion.testing.FusionSupport;
 import io.yupiik.ia.agent.core.codegraph.StructuralCodeGraph;
 import io.yupiik.ia.agent.core.configuration.AgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.AgentMode;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
-import io.yupiik.ia.agent.core.configuration.TestConfigs;
+import io.yupiik.ia.agent.core.configuration.ConfigurationTestModule;
 import io.yupiik.ia.agent.core.context.ContextManager;
 import io.yupiik.ia.agent.core.context.UsageTracker;
 import io.yupiik.ia.agent.core.llm.ChatClient;
@@ -38,6 +40,7 @@ import io.yupiik.ia.agent.core.llm.ToolCall;
 import io.yupiik.ia.agent.core.llm.Usage;
 import io.yupiik.ia.agent.core.permissions.PermissionService;
 import io.yupiik.ia.agent.core.runtime.StatusReporter;
+import io.yupiik.ia.agent.core.sandbox.DisabledSandbox;
 import io.yupiik.ia.agent.core.session.SessionEntry;
 import io.yupiik.ia.agent.core.session.SessionStore;
 import io.yupiik.ia.agent.core.todo.TodoItem;
@@ -59,7 +62,6 @@ import java.nio.file.StandardOpenOption;
 import java.time.Clock;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.function.BooleanSupplier;
@@ -67,6 +69,7 @@ import java.util.function.Consumer;
 import java.util.function.Predicate;
 import java.util.stream.IntStream;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.api.io.TempDir;
@@ -85,288 +88,19 @@ class ExplorationPlateauRegressionTest {
     private int nextCall;
 
     @BeforeEach
-    void prepare(final JsonMapper mapper) throws IOException {
+    void prepare(final JsonMapper mapper, @Fusion final CodingAgentConfiguration configuration) throws IOException {
         this.mapper = mapper;
+        this.configuration = withStorageHomeHome(
+                configuration, home.toString(), home.resolve("home").toString());
         source = home.resolve("source.txt");
         Files.write(
                 source,
                 IntStream.rangeClosed(1, 500).mapToObj(i -> "source line " + i).toList());
     }
 
-    @Test
-    void negativeOneNudgesAtFirstRedundantRoundWithoutStopping() {
-        final var fixture = fixture(Map.of("yca.llm.plateauRounds", "-1"));
-        assertEquals("done", fixture.run(read(1, 20), read(2, 10), answer()));
-        assertEquals(1, fixture.notices("exploration-plateau nudge"));
-        assertEquals(3, fixture.requests.size());
-        fixture.assertNoErrors();
-    }
-
-    @Test
-    void negativeOneWithFeedbackNoneNeverNudges() {
-        final var fixture = fixture(Map.of(
-                "yca.llm.plateauRounds", "-1", "yca.provider.providers.0.models.0.behavior.plateauFeedback", "none"));
-        assertEquals("done", fixture.run(read(1, 20), read(2, 10), read(3, 5), answer()));
-        assertEquals(0, fixture.notices("exploration-plateau nudge"));
-        fixture.assertNoErrors();
-    }
-
-    @Test
-    void positiveLimitKeepsHardStopWithFeedbackNone() {
-        final var fixture = fixture(Map.of(
-                "yca.llm.plateauRounds", "2",
-                "yca.provider.providers.0.models.0.behavior.plateauFeedback", "none"));
-        assertNull(fixture.run(read(1, 30), read(2, 10), read(3, 10), answer()));
-        assertEquals(3, fixture.requests.size());
-        assertEquals(0, fixture.notices("exploration-plateau nudge"));
-        fixture.assertError("Exploration plateau");
-    }
-
-    @Test
-    void positiveLimitNudgesOnceBeforeStopping() {
-        final var fixture = fixture(Map.of(
-                "yca.llm.plateauRounds", "4",
-                "yca.provider.providers.0.models.0.behavior.plateauFeedback", "nudge_2"));
-        assertNull(fixture.run(read(1, 30), read(2, 10), read(3, 10), read(4, 10), read(5, 10), answer()));
-        assertEquals(5, fixture.requests.size());
-        assertEquals(1, fixture.notices("exploration-plateau nudge"));
-        fixture.assertError("Exploration plateau");
-    }
-
-    @Test
-    void successfulWriteInvalidatesPreviouslyDeliveredReadCoverage() {
-        final var fixture = plateauStopsAtOne();
-        fixture.extraTools.add(tool("write_file", ToolCategory.EDIT, false, ToolResult.ok("updated")));
-        assertEquals(
-                "done",
-                fixture.run(
-                        read(1, 30), batch(call("write_file", Map.of("path", source.toString(), "content", "updated"))),
-                        read(2, 10), answer()));
-        fixture.assertNoErrors();
-    }
-
-    @Test
-    void plateauNudgeRemainsOneShotAfterNovelCoverageResetsTheStreak() {
-        final var fixture = fixture(Map.of("yca.llm.plateauRounds", "-1"));
-        assertEquals("done", fixture.run(read(1, 20), read(2, 10), read(100, 20), read(101, 10), answer()));
-        assertEquals(1, fixture.notices("exploration-plateau nudge"));
-        fixture.assertNoErrors();
-    }
-
-    @Test
-    void adjacentSmallReadsInsideTheSameFormerBucketAreNovel() {
-        final var fixture = plateauStopsAtOne();
-        assertEquals("done", fixture.run(read(1, 10), read(11, 10), read(21, 10), answer()));
-        fixture.assertNoErrors();
-    }
-
-    @Test
-    void partiallyOverlappingReadIsNovelWhenItDeliversAnUnseenTail() {
-        final var fixture = plateauStopsAtOne();
-        assertEquals("done", fixture.run(read(1, 20), read(15, 20), answer()));
-        fixture.assertNoErrors();
-    }
-
-    @Test
-    void containedReadIsRedundantEvenWhenItsRequestedBucketDiffers() {
-        final var fixture = plateauStopsAtOne();
-        assertNull(fixture.run(read(1, 400), read(201, 10), answer()));
-        assertEquals(2, fixture.requests.size());
-        fixture.assertError("Exploration plateau");
-    }
-
-    @Test
-    void adjacentDeliveredIntervalsMergeForLaterContainedRead() {
-        final var fixture = plateauStopsAtOne();
-        assertNull(fixture.run(read(1, 20), read(21, 20), read(10, 20), answer()));
-        assertEquals(3, fixture.requests.size());
-        fixture.assertError("Exploration plateau");
-    }
-
-    @Test
-    void requestedLimitDoesNotInventCoverageBeyondEof() {
-        // The first read asks for 1000 lines but only receives 500. Appending and reading the
-        // new tail must remain novel, even though that tail lay inside the old requested range.
-        final var fixture = plateauStopsAtOne();
-        // A scripted client callback changes the file, not a tool/write marker that could reset
-        // the coverage tracker and hide a requested-versus-delivered regression.
-        fixture.beforeReply = index -> {
-            if (index == 1) {
-                try {
-                    Files.writeString(source, "new line\n", StandardOpenOption.APPEND);
-                } catch (final IOException e) {
-                    throw new IllegalStateException(e);
-                }
-            }
-        };
-        assertEquals("done", fixture.run(read(1, 1000), read(501, 1), answer()));
-        fixture.assertNoErrors();
-    }
-
-    @Test
-    void unknownReadOutputIsNovelRatherThanGuessedFromArguments() {
-        final var fixture = plateauStopsAtOne();
-        fixture.readOverride = tool("read", ToolCategory.READ, true, ToolResult.ok("opaque read payload"));
-        assertEquals("done", fixture.run(read(1, 20), read(2, 10), read(3, 5), answer()));
-        fixture.assertNoErrors();
-    }
-
-    @Test
-    void mixedRedundantReadAndFailureResetsPlateau() {
-        assertMixedReset("failing", ToolCategory.READ, true, ToolResult.error("temporary read failure"));
-    }
-
-    @Test
-    void mixedRedundantReadAndPendingWorkResetsPlateau() {
-        assertMixedReset("pending_work", ToolCategory.READ, true, ToolResult.pending("worker is still running"));
-    }
-
-    @Test
-    void mixedRedundantReadAndMutatingBashResetsPlateau() {
-        assertMixedReset("bash", ToolCategory.BASH, false, ToolResult.ok("updated generated file"));
-    }
-
-    @Test
-    void mixedRedundantReadAndUnclassifiedSuccessfulWorkResetsPlateau() {
-        assertMixedReset("inspect_remote", ToolCategory.READ, true, ToolResult.ok("remote inspection complete"));
-    }
-
-    @Test
-    void mixedRedundantReadAndRejectedUnknownToolResetsPlateau() {
-        final var fixture = fixture(Map.of(
-                "yca.llm.plateauRounds", "2", "yca.provider.providers.0.models.0.behavior.plateauFeedback", "none"));
-        assertEquals(
-                "done",
-                fixture.run(
-                        read(1, 30),
-                        read(2, 10),
-                        batch(readCall(3, 10), call("not_registered", Map.of())),
-                        read(4, 10),
-                        answer()));
-        assertTrue(fixture.events.stream()
-                .anyMatch(e -> e instanceof AgentEvent.ToolFinished finished
-                        && finished.output().contains("Unknown tool")));
-        fixture.assertNoErrors();
-    }
-
-    @Test
-    void mixedRedundantReadAndDoomRefusalResetsPlateau() {
-        final var fixture = fixture(Map.of(
-                "yca.llm.plateauRounds",
-                "2",
-                "yca.provider.providers.0.models.0.behavior.plateauFeedback",
-                "none",
-                "yca.tools.repeatSuccessThreshold",
-                "1"));
-        fixture.extraTools.add(tool("bash", ToolCategory.BASH, false, ToolResult.ok("stable command output")));
-        final var args = Map.<String, Object>of("command", "touch generated.txt");
-        assertEquals(
-                "done",
-                fixture.run(
-                        batch(call("bash", args)),
-                        read(1, 30),
-                        read(2, 10),
-                        batch(readCall(3, 10), call("bash", args)),
-                        read(4, 10),
-                        answer()));
-        assertEquals(1, fixture.notices("doom-loop refusal"));
-        fixture.assertNoErrors();
-    }
-
-    @Test
-    void plateauNudgeDoesNotRenewTheIterationWindow() {
-        final var fixture = fixture(Map.of("yca.llm.maxIterations", "3", "yca.llm.plateauRounds", "-1"));
-        assertNull(fixture.run(read(1, 30), read(2, 10), read(3, 10), answer()));
-        assertEquals(1, fixture.notices("exploration-plateau nudge"));
-        fixture.assertCappedAt(3);
-    }
-
-    @Test
-    void explorationNudgeDoesNotRenewTheIterationWindow() {
-        final var fixture = fixture(Map.of("yca.llm.maxIterations", "3", "yca.llm.explorationNudgeRounds", "2"));
-        assertNull(fixture.run(read(1, 10), read(11, 10), read(21, 10), answer()));
-        assertEquals(1, fixture.notices("exploration nudge"));
-        fixture.assertCappedAt(3);
-    }
-
-    @Test
-    void doomLoopNudgeDoesNotRenewTheIterationWindow() {
-        final var fixture = fixture(Map.of("yca.llm.maxIterations", "3", "yca.tools.repeatSuccessThreshold", "1"));
-        fixture.extraTools.add(tool("bash", ToolCategory.BASH, false, ToolResult.ok("stable command output")));
-        final var args = Map.<String, Object>of("command", "touch generated.txt");
-        assertNull(fixture.run(batch(call("bash", args)), batch(call("bash", args)), read(1, 10), answer()));
-        assertEquals(1, fixture.notices("doom-loop refusal"));
-        fixture.assertCappedAt(3);
-    }
-
-    @Test
-    void textEndRoundGateDoesNotRenewTheIterationWindow() {
-        final var fixture = fixture(Map.of(
-                "yca.llm.maxIterations", "3",
-                "yca.provider.providers.0.models.0.behavior.turnContinuesOnTextEnd", "true"));
-        fixture.todos.items = List.of(new TodoItem("finish the work", "in_progress"));
-        assertNull(fixture.run(
-                read(1, 10),
-                Message.assistant("still working", null),
-                Message.assistant("not finished yet", null),
-                answer()));
-        assertEquals(2, fixture.notices("continuing the round automatically"));
-        fixture.assertCappedAt(3);
-    }
-
-    @Test
-    void unboundedWindowStillAllowsAnAnswerAfterBothNudges() {
-        final var fixture = fixture(Map.of(
-                "yca.llm.maxIterations", "-1", "yca.llm.plateauRounds", "-1", "yca.llm.explorationNudgeRounds", "1"));
-        assertEquals("done", fixture.run(read(1, 30), read(2, 10), read(100, 10), read(101, 5), answer()));
-        assertEquals(1, fixture.notices("exploration nudge"));
-        assertEquals(1, fixture.notices("exploration-plateau nudge"));
-        assertEquals(5, fixture.requests.size());
-        fixture.assertNoErrors();
-    }
-
-    @Test
-    void todoAutoContinuationStillStartsAFreshWindowAtTheCap() {
-        final var fixture = fixture(Map.of(
-                "yca.llm.maxIterations", "2", "yca.todos.continueOnUnfinished", "true", "yca.todos.maxContinues", "1"));
-        fixture.todos.items = List.of(new TodoItem("finish the work", "in_progress"));
-        fixture.extraTools.add(new EmbeddedTool() {
-            @Override
-            public String name() {
-                return "close_todos";
-            }
-
-            @Override
-            public String description(final Path workdir) {
-                return "complete the work";
-            }
-
-            @Override
-            public ToolCategory category() {
-                return ToolCategory.EDIT;
-            }
-
-            @Override
-            public Map<String, Object> schema() {
-                return Map.of("type", "object");
-            }
-
-            @Override
-            public ToolResult execute(final Map<String, Object> args, final ToolContext context) {
-                fixture.todos.items = List.of(new TodoItem("finish the work", "completed"));
-                return ToolResult.ok("todo completed");
-            }
-        });
-        assertEquals("done", fixture.run(read(1, 10), read(11, 10), batch(call("close_todos", Map.of())), answer()));
-        assertEquals(4, fixture.requests.size());
-        assertEquals(1, fixture.notices("continuing automatically"));
-        fixture.assertNoErrors();
-    }
-
     private void assertMixedReset(
             final String name, final ToolCategory category, final boolean readonly, final ToolResult result) {
-        final var fixture = fixture(Map.of(
-                "yca.llm.plateauRounds", "2", "yca.provider.providers.0.models.0.behavior.plateauFeedback", "none"));
+        final var fixture = fixture(configuration);
         fixture.extraTools.add(tool(name, category, readonly, result));
         final var args = "bash".equals(name)
                 ? Map.<String, Object>of("command", "touch generated.txt")
@@ -382,30 +116,8 @@ class ExplorationPlateauRegressionTest {
         fixture.assertNoErrors();
     }
 
-    private Fixture plateauStopsAtOne() {
-        return fixture(Map.of(
-                "yca.llm.plateauRounds", "1", "yca.provider.providers.0.models.0.behavior.plateauFeedback", "none"));
-    }
-
-    private Fixture fixture(final Map<String, String> overrides) {
-        final var entries = new HashMap<String, String>();
-        entries.put("yca.storageHome", home.toString());
-        entries.put("yca.home", home.resolve("home").toString());
-        entries.put("yca.mode", "build");
-        entries.put("yca.permissions.mode", "yolo");
-        entries.put("yca.provider.providers.length", "1");
-        entries.put("yca.provider.providers.0.id", "default");
-        entries.put("yca.provider.providers.0.baseUrl", "http://localhost:1/v1/chat/completions");
-        entries.put("yca.provider.providers.0.apiKey", "test-key");
-        entries.put("yca.provider.providers.0.model", "test-model");
-        entries.put("yca.provider.providers.0.models.length", "1");
-        entries.put("yca.provider.providers.0.models.0.model", "test-model");
-        entries.put("yca.llm.maxIterations", "20");
-        entries.put("yca.llm.explorationNudgeRounds", "0");
-        entries.put("yca.llm.retriesMaxAttempts", "1");
-        entries.put("yca.todos.continueOnUnfinished", "false");
-        entries.putAll(overrides);
-        return new Fixture(TestConfigs.codingAgent(entries));
+    private Fixture fixture(final CodingAgentConfiguration configuration) {
+        return new Fixture(configuration);
     }
 
     private Message read(final int offset, final int limit) {
@@ -619,7 +331,8 @@ class ExplorationPlateauRegressionTest {
                     todos,
                     null,
                     null,
-                    (config).resolveWorkingDir());
+                    (config).resolveWorkingDir(),
+                    new DisabledSandbox((config).resolveWorkingDir()));
             return loop.run("inspect the source and complete the work", null, "plateau-regression", null, () -> false);
         }
 
@@ -651,5 +364,713 @@ class ExplorationPlateauRegressionTest {
                     "nudges/round gates must consume the current window, not replace it");
             assertError("Maximum iterations reached");
         }
+    }
+
+    private CodingAgentConfiguration configuration;
+
+    @Nested
+    @FusionSupport(modules = NegativeOneNudgesAtFirstRedundantRoundWithoutStoppingModule.class)
+    class NegativeOneNudgesAtFirstRedundantRoundWithoutStoppingTests {
+        @TempDir
+        static Path root;
+
+        @Test
+        void negativeOneNudgesAtFirstRedundantRoundWithoutStopping() {
+            final var fixture = fixture(configuration);
+            assertEquals("done", fixture.run(read(1, 20), read(2, 10), answer()));
+            assertEquals(1, fixture.notices("exploration-plateau nudge"));
+            assertEquals(3, fixture.requests.size());
+            fixture.assertNoErrors();
+        }
+
+        @Test
+        void plateauNudgeRemainsOneShotAfterNovelCoverageResetsTheStreak() {
+            final var fixture = fixture(configuration);
+            assertEquals("done", fixture.run(read(1, 20), read(2, 10), read(100, 20), read(101, 10), answer()));
+            assertEquals(1, fixture.notices("exploration-plateau nudge"));
+            fixture.assertNoErrors();
+        }
+    }
+
+    public static class NegativeOneNudgesAtFirstRedundantRoundWithoutStoppingModule extends ConfigurationTestModule {
+        public NegativeOneNudgesAtFirstRedundantRoundWithoutStoppingModule() {
+            super(Map.ofEntries(
+                    Map.entry(
+                            "yca.storageHome",
+                            NegativeOneNudgesAtFirstRedundantRoundWithoutStoppingTests.root.toString()),
+                    Map.entry(
+                            "yca.home",
+                            NegativeOneNudgesAtFirstRedundantRoundWithoutStoppingTests.root
+                                    .resolve("home")
+                                    .toString()),
+                    Map.entry("yca.mode", "build"),
+                    Map.entry("yca.permissions.mode", "yolo"),
+                    Map.entry("yca.provider.providers.length", "1"),
+                    Map.entry("yca.provider.providers.0.id", "default"),
+                    Map.entry("yca.provider.providers.0.baseUrl", "http://localhost:1/v1/chat/completions"),
+                    Map.entry("yca.provider.providers.0.apiKey", "test-key"),
+                    Map.entry("yca.provider.providers.0.model", "test-model"),
+                    Map.entry("yca.provider.providers.0.models.length", "1"),
+                    Map.entry("yca.provider.providers.0.models.0.model", "test-model"),
+                    Map.entry("yca.llm.maxIterations", "20"),
+                    Map.entry("yca.llm.explorationNudgeRounds", "0"),
+                    Map.entry("yca.llm.retriesMaxAttempts", "1"),
+                    Map.entry("yca.todos.continueOnUnfinished", "false"),
+                    Map.entry("yca.llm.plateauRounds", "-1")));
+        }
+    }
+
+    @Nested
+    @FusionSupport(modules = NegativeOneWithFeedbackNoneNeverNudgesModule.class)
+    class NegativeOneWithFeedbackNoneNeverNudgesTests {
+        @TempDir
+        static Path root;
+
+        @Test
+        void negativeOneWithFeedbackNoneNeverNudges() {
+            final var fixture = fixture(configuration);
+            assertEquals("done", fixture.run(read(1, 20), read(2, 10), read(3, 5), answer()));
+            assertEquals(0, fixture.notices("exploration-plateau nudge"));
+            fixture.assertNoErrors();
+        }
+    }
+
+    public static class NegativeOneWithFeedbackNoneNeverNudgesModule extends ConfigurationTestModule {
+        public NegativeOneWithFeedbackNoneNeverNudgesModule() {
+            super(Map.ofEntries(
+                    Map.entry("yca.storageHome", NegativeOneWithFeedbackNoneNeverNudgesTests.root.toString()),
+                    Map.entry(
+                            "yca.home",
+                            NegativeOneWithFeedbackNoneNeverNudgesTests.root
+                                    .resolve("home")
+                                    .toString()),
+                    Map.entry("yca.mode", "build"),
+                    Map.entry("yca.permissions.mode", "yolo"),
+                    Map.entry("yca.provider.providers.length", "1"),
+                    Map.entry("yca.provider.providers.0.id", "default"),
+                    Map.entry("yca.provider.providers.0.baseUrl", "http://localhost:1/v1/chat/completions"),
+                    Map.entry("yca.provider.providers.0.apiKey", "test-key"),
+                    Map.entry("yca.provider.providers.0.model", "test-model"),
+                    Map.entry("yca.provider.providers.0.models.length", "1"),
+                    Map.entry("yca.provider.providers.0.models.0.model", "test-model"),
+                    Map.entry("yca.llm.maxIterations", "20"),
+                    Map.entry("yca.llm.explorationNudgeRounds", "0"),
+                    Map.entry("yca.llm.retriesMaxAttempts", "1"),
+                    Map.entry("yca.todos.continueOnUnfinished", "false"),
+                    Map.entry("yca.llm.plateauRounds", "-1"),
+                    Map.entry("yca.provider.providers.0.models.0.behavior.plateauFeedback", "none")));
+        }
+    }
+
+    @Nested
+    @FusionSupport(modules = PositiveLimitKeepsHardStopWithFeedbackNoneModule.class)
+    class PositiveLimitKeepsHardStopWithFeedbackNoneTests {
+        @TempDir
+        static Path root;
+
+        @Test
+        void positiveLimitKeepsHardStopWithFeedbackNone() {
+            final var fixture = fixture(configuration);
+            assertNull(fixture.run(read(1, 30), read(2, 10), read(3, 10), answer()));
+            assertEquals(3, fixture.requests.size());
+            assertEquals(0, fixture.notices("exploration-plateau nudge"));
+            fixture.assertError("Exploration plateau");
+        }
+
+        @Test
+        void mixedRedundantReadAndFailureResetsPlateau() {
+            assertMixedReset("failing", ToolCategory.READ, true, ToolResult.error("temporary read failure"));
+        }
+
+        @Test
+        void mixedRedundantReadAndPendingWorkResetsPlateau() {
+            assertMixedReset("pending_work", ToolCategory.READ, true, ToolResult.pending("worker is still running"));
+        }
+
+        @Test
+        void mixedRedundantReadAndMutatingBashResetsPlateau() {
+            assertMixedReset("bash", ToolCategory.BASH, false, ToolResult.ok("updated generated file"));
+        }
+
+        @Test
+        void mixedRedundantReadAndUnclassifiedSuccessfulWorkResetsPlateau() {
+            assertMixedReset("inspect_remote", ToolCategory.READ, true, ToolResult.ok("remote inspection complete"));
+        }
+
+        @Test
+        void mixedRedundantReadAndRejectedUnknownToolResetsPlateau() {
+            final var fixture = fixture(configuration);
+            assertEquals(
+                    "done",
+                    fixture.run(
+                            read(1, 30),
+                            read(2, 10),
+                            batch(readCall(3, 10), call("not_registered", Map.of())),
+                            read(4, 10),
+                            answer()));
+            assertTrue(fixture.events.stream()
+                    .anyMatch(e -> e instanceof AgentEvent.ToolFinished finished
+                            && finished.output().contains("Unknown tool")));
+            fixture.assertNoErrors();
+        }
+    }
+
+    public static class PositiveLimitKeepsHardStopWithFeedbackNoneModule extends ConfigurationTestModule {
+        public PositiveLimitKeepsHardStopWithFeedbackNoneModule() {
+            super(Map.ofEntries(
+                    Map.entry("yca.storageHome", PositiveLimitKeepsHardStopWithFeedbackNoneTests.root.toString()),
+                    Map.entry(
+                            "yca.home",
+                            PositiveLimitKeepsHardStopWithFeedbackNoneTests.root
+                                    .resolve("home")
+                                    .toString()),
+                    Map.entry("yca.mode", "build"),
+                    Map.entry("yca.permissions.mode", "yolo"),
+                    Map.entry("yca.provider.providers.length", "1"),
+                    Map.entry("yca.provider.providers.0.id", "default"),
+                    Map.entry("yca.provider.providers.0.baseUrl", "http://localhost:1/v1/chat/completions"),
+                    Map.entry("yca.provider.providers.0.apiKey", "test-key"),
+                    Map.entry("yca.provider.providers.0.model", "test-model"),
+                    Map.entry("yca.provider.providers.0.models.length", "1"),
+                    Map.entry("yca.provider.providers.0.models.0.model", "test-model"),
+                    Map.entry("yca.llm.maxIterations", "20"),
+                    Map.entry("yca.llm.explorationNudgeRounds", "0"),
+                    Map.entry("yca.llm.retriesMaxAttempts", "1"),
+                    Map.entry("yca.todos.continueOnUnfinished", "false"),
+                    Map.entry("yca.llm.plateauRounds", "2"),
+                    Map.entry("yca.provider.providers.0.models.0.behavior.plateauFeedback", "none")));
+        }
+    }
+
+    @Nested
+    @FusionSupport(modules = PositiveLimitNudgesOnceBeforeStoppingModule.class)
+    class PositiveLimitNudgesOnceBeforeStoppingTests {
+        @TempDir
+        static Path root;
+
+        @Test
+        void positiveLimitNudgesOnceBeforeStopping() {
+            final var fixture = fixture(configuration);
+            assertNull(fixture.run(read(1, 30), read(2, 10), read(3, 10), read(4, 10), read(5, 10), answer()));
+            assertEquals(5, fixture.requests.size());
+            assertEquals(1, fixture.notices("exploration-plateau nudge"));
+            fixture.assertError("Exploration plateau");
+        }
+    }
+
+    public static class PositiveLimitNudgesOnceBeforeStoppingModule extends ConfigurationTestModule {
+        public PositiveLimitNudgesOnceBeforeStoppingModule() {
+            super(Map.ofEntries(
+                    Map.entry("yca.storageHome", PositiveLimitNudgesOnceBeforeStoppingTests.root.toString()),
+                    Map.entry(
+                            "yca.home",
+                            PositiveLimitNudgesOnceBeforeStoppingTests.root
+                                    .resolve("home")
+                                    .toString()),
+                    Map.entry("yca.mode", "build"),
+                    Map.entry("yca.permissions.mode", "yolo"),
+                    Map.entry("yca.provider.providers.length", "1"),
+                    Map.entry("yca.provider.providers.0.id", "default"),
+                    Map.entry("yca.provider.providers.0.baseUrl", "http://localhost:1/v1/chat/completions"),
+                    Map.entry("yca.provider.providers.0.apiKey", "test-key"),
+                    Map.entry("yca.provider.providers.0.model", "test-model"),
+                    Map.entry("yca.provider.providers.0.models.length", "1"),
+                    Map.entry("yca.provider.providers.0.models.0.model", "test-model"),
+                    Map.entry("yca.llm.maxIterations", "20"),
+                    Map.entry("yca.llm.explorationNudgeRounds", "0"),
+                    Map.entry("yca.llm.retriesMaxAttempts", "1"),
+                    Map.entry("yca.todos.continueOnUnfinished", "false"),
+                    Map.entry("yca.llm.plateauRounds", "4"),
+                    Map.entry("yca.provider.providers.0.models.0.behavior.plateauFeedback", "nudge_2")));
+        }
+    }
+
+    @Nested
+    @FusionSupport(modules = SuccessfulWriteInvalidatesPreviouslyDeliveredReadCoverageModule.class)
+    class SuccessfulWriteInvalidatesPreviouslyDeliveredReadCoverageTests {
+        @TempDir
+        static Path root;
+
+        @Test
+        void successfulWriteInvalidatesPreviouslyDeliveredReadCoverage() {
+            final var fixture = fixture(configuration);
+            fixture.extraTools.add(tool("write_file", ToolCategory.EDIT, false, ToolResult.ok("updated")));
+            assertEquals(
+                    "done",
+                    fixture.run(
+                            read(1, 30),
+                                    batch(call("write_file", Map.of("path", source.toString(), "content", "updated"))),
+                            read(2, 10), answer()));
+            fixture.assertNoErrors();
+        }
+
+        @Test
+        void adjacentSmallReadsInsideTheSameFormerBucketAreNovel() {
+            final var fixture = fixture(configuration);
+            assertEquals("done", fixture.run(read(1, 10), read(11, 10), read(21, 10), answer()));
+            fixture.assertNoErrors();
+        }
+
+        @Test
+        void partiallyOverlappingReadIsNovelWhenItDeliversAnUnseenTail() {
+            final var fixture = fixture(configuration);
+            assertEquals("done", fixture.run(read(1, 20), read(15, 20), answer()));
+            fixture.assertNoErrors();
+        }
+
+        @Test
+        void containedReadIsRedundantEvenWhenItsRequestedBucketDiffers() {
+            final var fixture = fixture(configuration);
+            assertNull(fixture.run(read(1, 400), read(201, 10), answer()));
+            assertEquals(2, fixture.requests.size());
+            fixture.assertError("Exploration plateau");
+        }
+
+        @Test
+        void adjacentDeliveredIntervalsMergeForLaterContainedRead() {
+            final var fixture = fixture(configuration);
+            assertNull(fixture.run(read(1, 20), read(21, 20), read(10, 20), answer()));
+            assertEquals(3, fixture.requests.size());
+            fixture.assertError("Exploration plateau");
+        }
+
+        @Test
+        void requestedLimitDoesNotInventCoverageBeyondEof() {
+            // The first read asks for 1000 lines but only receives 500. Appending and reading the
+            // new tail must remain novel, even though that tail lay inside the old requested range.
+            final var fixture = fixture(configuration);
+            // A scripted client callback changes the file, not a tool/write marker that could reset
+            // the coverage tracker and hide a requested-versus-delivered regression.
+            fixture.beforeReply = index -> {
+                if (index == 1) {
+                    try {
+                        Files.writeString(source, "new line\n", StandardOpenOption.APPEND);
+                    } catch (final IOException e) {
+                        throw new IllegalStateException(e);
+                    }
+                }
+            };
+            assertEquals("done", fixture.run(read(1, 1000), read(501, 1), answer()));
+            fixture.assertNoErrors();
+        }
+
+        @Test
+        void unknownReadOutputIsNovelRatherThanGuessedFromArguments() {
+            final var fixture = fixture(configuration);
+            fixture.readOverride = tool("read", ToolCategory.READ, true, ToolResult.ok("opaque read payload"));
+            assertEquals("done", fixture.run(read(1, 20), read(2, 10), read(3, 5), answer()));
+            fixture.assertNoErrors();
+        }
+    }
+
+    public static class SuccessfulWriteInvalidatesPreviouslyDeliveredReadCoverageModule
+            extends ConfigurationTestModule {
+        public SuccessfulWriteInvalidatesPreviouslyDeliveredReadCoverageModule() {
+            super(Map.ofEntries(
+                    Map.entry(
+                            "yca.storageHome",
+                            SuccessfulWriteInvalidatesPreviouslyDeliveredReadCoverageTests.root.toString()),
+                    Map.entry(
+                            "yca.home",
+                            SuccessfulWriteInvalidatesPreviouslyDeliveredReadCoverageTests.root
+                                    .resolve("home")
+                                    .toString()),
+                    Map.entry("yca.mode", "build"),
+                    Map.entry("yca.permissions.mode", "yolo"),
+                    Map.entry("yca.provider.providers.length", "1"),
+                    Map.entry("yca.provider.providers.0.id", "default"),
+                    Map.entry("yca.provider.providers.0.baseUrl", "http://localhost:1/v1/chat/completions"),
+                    Map.entry("yca.provider.providers.0.apiKey", "test-key"),
+                    Map.entry("yca.provider.providers.0.model", "test-model"),
+                    Map.entry("yca.provider.providers.0.models.length", "1"),
+                    Map.entry("yca.provider.providers.0.models.0.model", "test-model"),
+                    Map.entry("yca.llm.maxIterations", "20"),
+                    Map.entry("yca.llm.explorationNudgeRounds", "0"),
+                    Map.entry("yca.llm.retriesMaxAttempts", "1"),
+                    Map.entry("yca.todos.continueOnUnfinished", "false"),
+                    Map.entry("yca.llm.plateauRounds", "1"),
+                    Map.entry("yca.provider.providers.0.models.0.behavior.plateauFeedback", "none")));
+        }
+    }
+
+    @Nested
+    @FusionSupport(modules = MixedRedundantReadAndDoomRefusalResetsPlateauModule.class)
+    class MixedRedundantReadAndDoomRefusalResetsPlateauTests {
+        @TempDir
+        static Path root;
+
+        @Test
+        void mixedRedundantReadAndDoomRefusalResetsPlateau() {
+            final var fixture = fixture(configuration);
+            fixture.extraTools.add(tool("bash", ToolCategory.BASH, false, ToolResult.ok("stable command output")));
+            final var args = Map.<String, Object>of("command", "touch generated.txt");
+            assertEquals(
+                    "done",
+                    fixture.run(
+                            batch(call("bash", args)),
+                            read(1, 30),
+                            read(2, 10),
+                            batch(readCall(3, 10), call("bash", args)),
+                            read(4, 10),
+                            answer()));
+            assertEquals(1, fixture.notices("doom-loop refusal"));
+            fixture.assertNoErrors();
+        }
+    }
+
+    public static class MixedRedundantReadAndDoomRefusalResetsPlateauModule extends ConfigurationTestModule {
+        public MixedRedundantReadAndDoomRefusalResetsPlateauModule() {
+            super(Map.ofEntries(
+                    Map.entry("yca.storageHome", MixedRedundantReadAndDoomRefusalResetsPlateauTests.root.toString()),
+                    Map.entry(
+                            "yca.home",
+                            MixedRedundantReadAndDoomRefusalResetsPlateauTests.root
+                                    .resolve("home")
+                                    .toString()),
+                    Map.entry("yca.mode", "build"),
+                    Map.entry("yca.permissions.mode", "yolo"),
+                    Map.entry("yca.provider.providers.length", "1"),
+                    Map.entry("yca.provider.providers.0.id", "default"),
+                    Map.entry("yca.provider.providers.0.baseUrl", "http://localhost:1/v1/chat/completions"),
+                    Map.entry("yca.provider.providers.0.apiKey", "test-key"),
+                    Map.entry("yca.provider.providers.0.model", "test-model"),
+                    Map.entry("yca.provider.providers.0.models.length", "1"),
+                    Map.entry("yca.provider.providers.0.models.0.model", "test-model"),
+                    Map.entry("yca.llm.maxIterations", "20"),
+                    Map.entry("yca.llm.explorationNudgeRounds", "0"),
+                    Map.entry("yca.llm.retriesMaxAttempts", "1"),
+                    Map.entry("yca.todos.continueOnUnfinished", "false"),
+                    Map.entry("yca.llm.plateauRounds", "2"),
+                    Map.entry("yca.provider.providers.0.models.0.behavior.plateauFeedback", "none"),
+                    Map.entry("yca.tools.repeatSuccessThreshold", "1")));
+        }
+    }
+
+    @Nested
+    @FusionSupport(modules = PlateauNudgeDoesNotRenewTheIterationWindowModule.class)
+    class PlateauNudgeDoesNotRenewTheIterationWindowTests {
+        @TempDir
+        static Path root;
+
+        @Test
+        void plateauNudgeDoesNotRenewTheIterationWindow() {
+            final var fixture = fixture(configuration);
+            assertNull(fixture.run(read(1, 30), read(2, 10), read(3, 10), answer()));
+            assertEquals(1, fixture.notices("exploration-plateau nudge"));
+            fixture.assertCappedAt(3);
+        }
+    }
+
+    public static class PlateauNudgeDoesNotRenewTheIterationWindowModule extends ConfigurationTestModule {
+        public PlateauNudgeDoesNotRenewTheIterationWindowModule() {
+            super(Map.ofEntries(
+                    Map.entry("yca.storageHome", PlateauNudgeDoesNotRenewTheIterationWindowTests.root.toString()),
+                    Map.entry(
+                            "yca.home",
+                            PlateauNudgeDoesNotRenewTheIterationWindowTests.root
+                                    .resolve("home")
+                                    .toString()),
+                    Map.entry("yca.mode", "build"),
+                    Map.entry("yca.permissions.mode", "yolo"),
+                    Map.entry("yca.provider.providers.length", "1"),
+                    Map.entry("yca.provider.providers.0.id", "default"),
+                    Map.entry("yca.provider.providers.0.baseUrl", "http://localhost:1/v1/chat/completions"),
+                    Map.entry("yca.provider.providers.0.apiKey", "test-key"),
+                    Map.entry("yca.provider.providers.0.model", "test-model"),
+                    Map.entry("yca.provider.providers.0.models.length", "1"),
+                    Map.entry("yca.provider.providers.0.models.0.model", "test-model"),
+                    Map.entry("yca.llm.maxIterations", "3"),
+                    Map.entry("yca.llm.explorationNudgeRounds", "0"),
+                    Map.entry("yca.llm.retriesMaxAttempts", "1"),
+                    Map.entry("yca.todos.continueOnUnfinished", "false"),
+                    Map.entry("yca.llm.plateauRounds", "-1")));
+        }
+    }
+
+    @Nested
+    @FusionSupport(modules = ExplorationNudgeDoesNotRenewTheIterationWindowModule.class)
+    class ExplorationNudgeDoesNotRenewTheIterationWindowTests {
+        @TempDir
+        static Path root;
+
+        @Test
+        void explorationNudgeDoesNotRenewTheIterationWindow() {
+            final var fixture = fixture(configuration);
+            assertNull(fixture.run(read(1, 10), read(11, 10), read(21, 10), answer()));
+            assertEquals(1, fixture.notices("exploration nudge"));
+            fixture.assertCappedAt(3);
+        }
+    }
+
+    public static class ExplorationNudgeDoesNotRenewTheIterationWindowModule extends ConfigurationTestModule {
+        public ExplorationNudgeDoesNotRenewTheIterationWindowModule() {
+            super(Map.ofEntries(
+                    Map.entry("yca.storageHome", ExplorationNudgeDoesNotRenewTheIterationWindowTests.root.toString()),
+                    Map.entry(
+                            "yca.home",
+                            ExplorationNudgeDoesNotRenewTheIterationWindowTests.root
+                                    .resolve("home")
+                                    .toString()),
+                    Map.entry("yca.mode", "build"),
+                    Map.entry("yca.permissions.mode", "yolo"),
+                    Map.entry("yca.provider.providers.length", "1"),
+                    Map.entry("yca.provider.providers.0.id", "default"),
+                    Map.entry("yca.provider.providers.0.baseUrl", "http://localhost:1/v1/chat/completions"),
+                    Map.entry("yca.provider.providers.0.apiKey", "test-key"),
+                    Map.entry("yca.provider.providers.0.model", "test-model"),
+                    Map.entry("yca.provider.providers.0.models.length", "1"),
+                    Map.entry("yca.provider.providers.0.models.0.model", "test-model"),
+                    Map.entry("yca.llm.maxIterations", "3"),
+                    Map.entry("yca.llm.explorationNudgeRounds", "2"),
+                    Map.entry("yca.llm.retriesMaxAttempts", "1"),
+                    Map.entry("yca.todos.continueOnUnfinished", "false")));
+        }
+    }
+
+    @Nested
+    @FusionSupport(modules = DoomLoopNudgeDoesNotRenewTheIterationWindowModule.class)
+    class DoomLoopNudgeDoesNotRenewTheIterationWindowTests {
+        @TempDir
+        static Path root;
+
+        @Test
+        void doomLoopNudgeDoesNotRenewTheIterationWindow() {
+            final var fixture = fixture(configuration);
+            fixture.extraTools.add(tool("bash", ToolCategory.BASH, false, ToolResult.ok("stable command output")));
+            final var args = Map.<String, Object>of("command", "touch generated.txt");
+            assertNull(fixture.run(batch(call("bash", args)), batch(call("bash", args)), read(1, 10), answer()));
+            assertEquals(1, fixture.notices("doom-loop refusal"));
+            fixture.assertCappedAt(3);
+        }
+    }
+
+    public static class DoomLoopNudgeDoesNotRenewTheIterationWindowModule extends ConfigurationTestModule {
+        public DoomLoopNudgeDoesNotRenewTheIterationWindowModule() {
+            super(Map.ofEntries(
+                    Map.entry("yca.storageHome", DoomLoopNudgeDoesNotRenewTheIterationWindowTests.root.toString()),
+                    Map.entry(
+                            "yca.home",
+                            DoomLoopNudgeDoesNotRenewTheIterationWindowTests.root
+                                    .resolve("home")
+                                    .toString()),
+                    Map.entry("yca.mode", "build"),
+                    Map.entry("yca.permissions.mode", "yolo"),
+                    Map.entry("yca.provider.providers.length", "1"),
+                    Map.entry("yca.provider.providers.0.id", "default"),
+                    Map.entry("yca.provider.providers.0.baseUrl", "http://localhost:1/v1/chat/completions"),
+                    Map.entry("yca.provider.providers.0.apiKey", "test-key"),
+                    Map.entry("yca.provider.providers.0.model", "test-model"),
+                    Map.entry("yca.provider.providers.0.models.length", "1"),
+                    Map.entry("yca.provider.providers.0.models.0.model", "test-model"),
+                    Map.entry("yca.llm.maxIterations", "3"),
+                    Map.entry("yca.llm.explorationNudgeRounds", "0"),
+                    Map.entry("yca.llm.retriesMaxAttempts", "1"),
+                    Map.entry("yca.todos.continueOnUnfinished", "false"),
+                    Map.entry("yca.tools.repeatSuccessThreshold", "1")));
+        }
+    }
+
+    @Nested
+    @FusionSupport(modules = TextEndRoundGateDoesNotRenewTheIterationWindowModule.class)
+    class TextEndRoundGateDoesNotRenewTheIterationWindowTests {
+        @TempDir
+        static Path root;
+
+        @Test
+        void textEndRoundGateDoesNotRenewTheIterationWindow() {
+            final var fixture = fixture(configuration);
+            fixture.todos.items = List.of(new TodoItem("finish the work", "in_progress"));
+            assertNull(fixture.run(
+                    read(1, 10),
+                    Message.assistant("still working", null),
+                    Message.assistant("not finished yet", null),
+                    answer()));
+            assertEquals(2, fixture.notices("continuing the round automatically"));
+            fixture.assertCappedAt(3);
+        }
+    }
+
+    public static class TextEndRoundGateDoesNotRenewTheIterationWindowModule extends ConfigurationTestModule {
+        public TextEndRoundGateDoesNotRenewTheIterationWindowModule() {
+            super(Map.ofEntries(
+                    Map.entry("yca.storageHome", TextEndRoundGateDoesNotRenewTheIterationWindowTests.root.toString()),
+                    Map.entry(
+                            "yca.home",
+                            TextEndRoundGateDoesNotRenewTheIterationWindowTests.root
+                                    .resolve("home")
+                                    .toString()),
+                    Map.entry("yca.mode", "build"),
+                    Map.entry("yca.permissions.mode", "yolo"),
+                    Map.entry("yca.provider.providers.length", "1"),
+                    Map.entry("yca.provider.providers.0.id", "default"),
+                    Map.entry("yca.provider.providers.0.baseUrl", "http://localhost:1/v1/chat/completions"),
+                    Map.entry("yca.provider.providers.0.apiKey", "test-key"),
+                    Map.entry("yca.provider.providers.0.model", "test-model"),
+                    Map.entry("yca.provider.providers.0.models.length", "1"),
+                    Map.entry("yca.provider.providers.0.models.0.model", "test-model"),
+                    Map.entry("yca.llm.maxIterations", "3"),
+                    Map.entry("yca.llm.explorationNudgeRounds", "0"),
+                    Map.entry("yca.llm.retriesMaxAttempts", "1"),
+                    Map.entry("yca.todos.continueOnUnfinished", "false"),
+                    Map.entry("yca.provider.providers.0.models.0.behavior.turnContinuesOnTextEnd", "true")));
+        }
+    }
+
+    @Nested
+    @FusionSupport(modules = UnboundedWindowStillAllowsAnAnswerAfterBothNudgesModule.class)
+    class UnboundedWindowStillAllowsAnAnswerAfterBothNudgesTests {
+        @TempDir
+        static Path root;
+
+        @Test
+        void unboundedWindowStillAllowsAnAnswerAfterBothNudges() {
+            final var fixture = fixture(configuration);
+            assertEquals("done", fixture.run(read(1, 30), read(2, 10), read(100, 10), read(101, 5), answer()));
+            assertEquals(1, fixture.notices("exploration nudge"));
+            assertEquals(1, fixture.notices("exploration-plateau nudge"));
+            assertEquals(5, fixture.requests.size());
+            fixture.assertNoErrors();
+        }
+    }
+
+    public static class UnboundedWindowStillAllowsAnAnswerAfterBothNudgesModule extends ConfigurationTestModule {
+        public UnboundedWindowStillAllowsAnAnswerAfterBothNudgesModule() {
+            super(Map.ofEntries(
+                    Map.entry(
+                            "yca.storageHome", UnboundedWindowStillAllowsAnAnswerAfterBothNudgesTests.root.toString()),
+                    Map.entry(
+                            "yca.home",
+                            UnboundedWindowStillAllowsAnAnswerAfterBothNudgesTests.root
+                                    .resolve("home")
+                                    .toString()),
+                    Map.entry("yca.mode", "build"),
+                    Map.entry("yca.permissions.mode", "yolo"),
+                    Map.entry("yca.provider.providers.length", "1"),
+                    Map.entry("yca.provider.providers.0.id", "default"),
+                    Map.entry("yca.provider.providers.0.baseUrl", "http://localhost:1/v1/chat/completions"),
+                    Map.entry("yca.provider.providers.0.apiKey", "test-key"),
+                    Map.entry("yca.provider.providers.0.model", "test-model"),
+                    Map.entry("yca.provider.providers.0.models.length", "1"),
+                    Map.entry("yca.provider.providers.0.models.0.model", "test-model"),
+                    Map.entry("yca.llm.maxIterations", "-1"),
+                    Map.entry("yca.llm.explorationNudgeRounds", "1"),
+                    Map.entry("yca.llm.retriesMaxAttempts", "1"),
+                    Map.entry("yca.todos.continueOnUnfinished", "false"),
+                    Map.entry("yca.llm.plateauRounds", "-1")));
+        }
+    }
+
+    @Nested
+    @FusionSupport(modules = TodoAutoContinuationStillStartsAFreshWindowAtTheCapModule.class)
+    class TodoAutoContinuationStillStartsAFreshWindowAtTheCapTests {
+        @TempDir
+        static Path root;
+
+        @Test
+        void todoAutoContinuationStillStartsAFreshWindowAtTheCap() {
+            final var fixture = fixture(configuration);
+            fixture.todos.items = List.of(new TodoItem("finish the work", "in_progress"));
+            fixture.extraTools.add(new EmbeddedTool() {
+                @Override
+                public String name() {
+                    return "close_todos";
+                }
+
+                @Override
+                public String description(final Path workdir) {
+                    return "complete the work";
+                }
+
+                @Override
+                public ToolCategory category() {
+                    return ToolCategory.EDIT;
+                }
+
+                @Override
+                public Map<String, Object> schema() {
+                    return Map.of("type", "object");
+                }
+
+                @Override
+                public ToolResult execute(final Map<String, Object> args, final ToolContext context) {
+                    fixture.todos.items = List.of(new TodoItem("finish the work", "completed"));
+                    return ToolResult.ok("todo completed");
+                }
+            });
+            assertEquals(
+                    "done", fixture.run(read(1, 10), read(11, 10), batch(call("close_todos", Map.of())), answer()));
+            assertEquals(4, fixture.requests.size());
+            assertEquals(1, fixture.notices("continuing automatically"));
+            fixture.assertNoErrors();
+        }
+    }
+
+    public static class TodoAutoContinuationStillStartsAFreshWindowAtTheCapModule extends ConfigurationTestModule {
+        public TodoAutoContinuationStillStartsAFreshWindowAtTheCapModule() {
+            super(Map.ofEntries(
+                    Map.entry(
+                            "yca.storageHome",
+                            TodoAutoContinuationStillStartsAFreshWindowAtTheCapTests.root.toString()),
+                    Map.entry(
+                            "yca.home",
+                            TodoAutoContinuationStillStartsAFreshWindowAtTheCapTests.root
+                                    .resolve("home")
+                                    .toString()),
+                    Map.entry("yca.mode", "build"),
+                    Map.entry("yca.permissions.mode", "yolo"),
+                    Map.entry("yca.provider.providers.length", "1"),
+                    Map.entry("yca.provider.providers.0.id", "default"),
+                    Map.entry("yca.provider.providers.0.baseUrl", "http://localhost:1/v1/chat/completions"),
+                    Map.entry("yca.provider.providers.0.apiKey", "test-key"),
+                    Map.entry("yca.provider.providers.0.model", "test-model"),
+                    Map.entry("yca.provider.providers.0.models.length", "1"),
+                    Map.entry("yca.provider.providers.0.models.0.model", "test-model"),
+                    Map.entry("yca.llm.maxIterations", "2"),
+                    Map.entry("yca.llm.explorationNudgeRounds", "0"),
+                    Map.entry("yca.llm.retriesMaxAttempts", "1"),
+                    Map.entry("yca.todos.continueOnUnfinished", "true"),
+                    Map.entry("yca.todos.maxContinues", "1")));
+        }
+    }
+
+    private static CodingAgentConfiguration withStorageHomeHome(
+            final CodingAgentConfiguration baseline, final String storageHome, final String home) {
+        return new CodingAgentConfiguration(
+                storageHome,
+                home,
+                baseline.workingDir(),
+                baseline.projectDir(),
+                baseline.provider(),
+                baseline.model(),
+                baseline.llm(),
+                baseline.compaction(),
+                baseline.pruning(),
+                baseline.compression(),
+                baseline.memory(),
+                baseline.todos(),
+                baseline.optimize(),
+                baseline.permissions(),
+                baseline.sandbox(),
+                baseline.mcp(),
+                baseline.mavenRepositoryKnowledge(),
+                baseline.structuralCodeGraph(),
+                baseline.sessions(),
+                baseline.skills(),
+                baseline.agents(),
+                baseline.mode(),
+                baseline.httpClient(),
+                baseline.tools(),
+                baseline.subagents(),
+                baseline.schedulerThreads(),
+                baseline.metrics(),
+                baseline.maxLineLength(),
+                baseline.resumeAliases(),
+                baseline.slashcommands(),
+                baseline.prompt(),
+                baseline.labels(),
+                baseline.logging(),
+                baseline.hooks(),
+                baseline.notifications(),
+                baseline.secrets());
     }
 }

@@ -20,8 +20,11 @@ import static org.junit.jupiter.api.Assertions.*;
 import io.yupiik.ai.acp.protocol.*;
 import io.yupiik.fusion.framework.api.event.Emitter;
 import io.yupiik.fusion.json.JsonMapper;
+import io.yupiik.fusion.testing.Fusion;
+import io.yupiik.fusion.testing.FusionSupport;
 import io.yupiik.ia.agent.core.agent.AgentEvent;
 import io.yupiik.ia.agent.core.configuration.AgentMode;
+import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.PermissionMode;
 import io.yupiik.ia.agent.core.events.EventContext;
 import io.yupiik.ia.agent.core.events.ModelSwitchedEvent;
@@ -46,7 +49,14 @@ import org.junit.jupiter.api.io.TempDir;
 
 /** In-process protocol regressions: futures and latches control every slow collaborator. */
 @Timeout(5)
+@FusionSupport(modules = OptionConfigurationTestModule.class)
 class SessionConfigProtocolTest {
+    @Fusion
+    private CodingAgentConfiguration configuration;
+
+    @Fusion
+    private AcpCommand.Conf commandOptions;
+
     @TempDir
     private static Path eventWorkdir;
 
@@ -321,7 +331,7 @@ class SessionConfigProtocolTest {
 
     private record Turn(ChatSettings settings, CompletableFuture<Boolean> done) {}
 
-    private static final class Fixture implements AutoCloseable {
+    private final class Fixture implements AutoCloseable {
         private final JsonMapper mapper = CodecsTest.acpMapper();
         private final Map<String, CompletableFuture<ModelsResponse>> sources = new ConcurrentHashMap<>();
         private final BlockingQueue<String> lookups = new LinkedBlockingQueue<>();
@@ -353,7 +363,7 @@ class SessionConfigProtocolTest {
         private int sessionId;
 
         private Fixture() throws Exception {
-            support = new OptionTestSupport(mapper, settings -> {
+            support = new OptionTestSupport(configuration, commandOptions, mapper, settings -> {
                 final var source = new CompletableFuture<ModelsResponse>();
                 sources.put(settings.providerId(), source);
                 lookups.add(settings.providerId());

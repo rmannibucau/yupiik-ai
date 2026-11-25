@@ -13,6 +13,11 @@ Remote servers can use stdio or streamable HTTP.
 Their tools share one registry with the built-in `yca` server, so the agent calls local and remote tools through the same interface.
 The TUI sidebar shows xref:health.adoc[server health].
 
+WARNING: Configured and client-supplied MCP servers are trusted by default, not confined by the built-in session sandbox.
+No extra `sandbox.trustedIntegrations` entry is needed for MCP calls; ordinary tool permissions still apply.
+Server startup, discovery and server-side filesystem, process and network operations are outside that boundary, so enable only servers you trust.
+See xref:../sandboxing/overview.adoc#_capability_approval_and_integration_limits[integration limits] before connecting a server.
+
 If a subprocess dies or an HTTP connection becomes stale, use `/mcp status` to inspect the servers.
 Use `/mcp reset [server]` to reconnect one server, or omit the name to reconnect all servers without restarting the session.
 Both commands are available in the CLI and TUI.

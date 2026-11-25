@@ -19,18 +19,19 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import io.yupiik.fusion.framework.api.ConfiguringContainer;
 import io.yupiik.fusion.framework.handlebars.HandlebarsCompiler;
 import io.yupiik.fusion.framework.handlebars.helper.HelperContext;
 import io.yupiik.fusion.framework.handlebars.spi.Template;
+import io.yupiik.fusion.testing.Fusion;
+import io.yupiik.fusion.testing.FusionSupport;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
-import io.yupiik.ia.agent.core.configuration.ConfigurationLoader;
+import io.yupiik.ia.agent.core.configuration.ConfigurationTestModule;
 import io.yupiik.ia.agent.core.security.MavenSecretService;
 import io.yupiik.ia.agent.core.test.TestJvm;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.HashMap;
 import java.util.Map;
-import java.util.Optional;
 import java.util.function.Function;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -42,6 +43,7 @@ import org.junit.jupiter.api.io.TempDir;
  * missing password or a Maven 3 legacy {@code {base64}} value. Uses a fake {@code .m2} in a temp dir
  * with a plaintext-file master source so the test is independent of the process environment.
  */
+@FusionSupport(modules = MavenServerPasswordTemplateHelperTest.MavenModule.class)
 class MavenServerPasswordTemplateHelperTest {
 
     private static final String MASTER = "YCA_HELPER_MASTER_SECRET";
@@ -57,7 +59,10 @@ class MavenServerPasswordTemplateHelperTest {
             "{[name=master,cipher=AES/GCM/NoPadding,version=4.0]MDEyMzQ1Njc4OTo7ICEiIyQlJicoKSorLC0uL3wGicWimiArTLNFI2W3zICctKr13Oq7RQTgB8zlUzRZm/EehIWxTODOhg==}";
 
     @TempDir
-    Path tmp;
+    static Path tmp;
+
+    @Fusion
+    CodingAgentConfiguration configuration;
 
     @Test
     void decryptsMaven4CiphertextAndPlainPassword() throws Exception {
@@ -70,7 +75,7 @@ class MavenServerPasswordTemplateHelperTest {
                 </server>
                 """);
 
-        final var helper = helper(m2);
+        final var helper = helper();
         // the ciphered server is deciphered in memory
         assertEquals(SERVER_PASSWORD, render(helper, "{{mavenServerPassword \"central\"}}"));
         // the clear-text server is returned as-is
@@ -96,14 +101,18 @@ class MavenServerPasswordTemplateHelperTest {
 
     public static final class SystemPropertyPeer {
         public static void main(final String[] args) throws Exception {
-            final var m2 = new FakeM2(Path.of(args[0]));
-            final var helper = new MavenServerPasswordTemplateHelperTest().helper(m2);
-            // a resolved ${sys.NAME} placeholder expands to the system property value
-            assertEquals(SERVER_PASSWORD, render(helper, "{{mavenServerPassword \"prop\"}}"));
-            // an unresolved ${sys.NAME} placeholder resolves to an empty value and fails the render
-            final var e =
-                    assertThrows(RuntimeException.class, () -> render(helper, "{{mavenServerPassword \"central\"}}"));
-            assertTrue(e.getMessage().contains("central"), e.getMessage());
+            try (final var container = ConfiguringContainer.of()
+                            .register(new MavenModule(Path.of(args[0])))
+                            .start();
+                    final var instance = container.lookup(MavenServerPasswordTemplateHelper.class)) {
+                final var helper = instance.instance();
+                // a resolved ${sys.NAME} placeholder expands to the system property value
+                assertEquals(SERVER_PASSWORD, render(helper, "{{mavenServerPassword \"prop\"}}"));
+                // an unresolved ${sys.NAME} placeholder resolves to an empty value and fails the render
+                final var e = assertThrows(
+                        RuntimeException.class, () -> render(helper, "{{mavenServerPassword \"central\"}}"));
+                assertTrue(e.getMessage().contains("central"), e.getMessage());
+            }
         }
     }
 
@@ -116,14 +125,14 @@ class MavenServerPasswordTemplateHelperTest {
         }
         final var m2 = new FakeM2(tmp);
         m2.writeSettings(MASTER, "${env.YCA_TEST_MAVEN_SERVER_PASSWORD}", "");
-        assertEquals(value, render(helper(m2), "{{mavenServerPassword \"central\"}}"));
+        assertEquals(value, render(helper(), "{{mavenServerPassword \"central\"}}"));
     }
 
     @Test
     void missingServerFailsTheRender() throws Exception {
         final var m2 = new FakeM2(tmp);
         m2.writeSettings(MASTER, SERVER_PASSWORD, "");
-        final var helper = helper(m2);
+        final var helper = helper();
         final var e = assertThrows(RuntimeException.class, () -> render(helper, "{{mavenServerPassword \"absent\"}}"));
         assertTrue(e.getMessage().contains("absent"), e.getMessage());
     }
@@ -132,7 +141,7 @@ class MavenServerPasswordTemplateHelperTest {
     void legacyCiphertextFailsWithReEncryptHint() throws Exception {
         final var m2 = new FakeM2(tmp);
         m2.writeSettings(MASTER, "{BteqUEnqHecHM7MZfnj9FwLcYbdInWxou1C929Txa0A=}", "");
-        final var helper = helper(m2);
+        final var helper = helper();
         final var e = assertThrows(RuntimeException.class, () -> render(helper, "{{mavenServerPassword \"central\"}}"));
         assertTrue(e.getMessage().contains("mvnenc"), e.getMessage());
     }
@@ -153,18 +162,27 @@ class MavenServerPasswordTemplateHelperTest {
                   </configurations>
                 </settingsSecurity>
                 """);
-        final var helper = helper(m2);
+        final var helper = helper();
         final var e = assertThrows(RuntimeException.class, () -> render(helper, "{{mavenServerPassword \"central\"}}"));
         assertTrue(e.getMessage().contains("master secret"), e.getMessage());
     }
 
-    private MavenServerPasswordTemplateHelper helper(final FakeM2 m2) {
-        final var entries = new HashMap<String, String>();
-        entries.put("yca.secrets.maven.settings", m2.settings().toString());
-        entries.put("yca.secrets.maven.masterSecret", m2.security().toString());
-        final var configuration =
-                ConfigurationLoader.load(CodingAgentConfiguration.class, key -> Optional.ofNullable(entries.get(key)));
+    private MavenServerPasswordTemplateHelper helper() {
         return new MavenServerPasswordTemplateHelper(configuration, new MavenSecretService());
+    }
+
+    public static class MavenModule extends ConfigurationTestModule {
+        public MavenModule() {
+            this(tmp);
+        }
+
+        private MavenModule(final Path directory) {
+            super(Map.of(
+                    "yca.secrets.maven.settings",
+                            directory.resolve(".m2/settings.xml").toString(),
+                    "yca.secrets.maven.masterSecret",
+                            directory.resolve(".m2/settings-security4.xml").toString()));
+        }
     }
 
     private static String render(final MavenServerPasswordTemplateHelper helper, final String source) {

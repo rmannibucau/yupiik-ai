@@ -29,8 +29,10 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import io.yupiik.fusion.httpclient.core.ExtendedHttpClient;
 import io.yupiik.fusion.httpclient.core.ExtendedHttpClientConfiguration;
 import io.yupiik.fusion.json.JsonMapper;
+import io.yupiik.fusion.testing.Fusion;
+import io.yupiik.fusion.testing.FusionSupport;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
-import io.yupiik.ia.agent.core.configuration.ConfigurationLoader;
+import io.yupiik.ia.agent.core.configuration.ConfigurationTestModule;
 import io.yupiik.ia.agent.test.TestJsonMapper;
 import io.yupiik.llm.client.codex.CodexOAuthConfig;
 import io.yupiik.llm.client.codex.model.CodexTokenStore;
@@ -54,6 +56,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.UUID;
 import java.util.concurrent.AbstractExecutorService;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
@@ -69,6 +72,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import javax.net.ssl.SSLSession;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.api.io.TempDir;
@@ -78,13 +82,18 @@ import org.junit.jupiter.api.parallel.ResourceLock;
 @ExtendWith(TestJsonMapper.class)
 class CodexLoginAttemptTest {
     @TempDir
-    Path storage;
+    static Path root;
+
+    private Path storage;
+    private CodingAgentConfiguration configuration;
 
     private HttpClient delegate;
     private FakeHttpClient http;
 
     @BeforeEach
-    void setUp() {
+    void setUp(@Fusion final CodingAgentConfiguration configuration) {
+        this.configuration = configuration;
+        storage = Path.of(configuration.resolveStorageHome());
         delegate = HttpClient.newHttpClient();
         http = new FakeHttpClient(delegate);
     }
@@ -99,173 +108,209 @@ class CodexLoginAttemptTest {
         }
     }
 
-    @Test
-    void deviceSuccessHasStructuredChallengeAndExactlyOnceCompletion(final JsonMapper mapper) throws Exception {
-        final var service = service(mapper);
-        final var callbacks = new Callbacks();
-        final var attempt = service.newAttempt(request(true, false), callbacks);
-        final var completions = new AtomicInteger();
-        final var releases = new AtomicInteger();
-        final var completed = attempt.completion().thenAccept(r -> completions.incrementAndGet());
-        final var released = attempt.drained().thenRun(releases::incrementAndGet);
-        try (final var executor = Executors.newVirtualThreadPerTaskExecutor()) {
-            attempt.start(executor);
-            final var result = await(attempt.completion());
-            await(completed);
-            await(released);
-            assertEquals(new CodexLoginService.LoginResult(SUCCEEDED, true), result);
-            assertEquals(SUCCEEDED, attempt.state());
-            assertEquals(
-                    List.of(CodexLoginService.LoginStatus.AUTHORIZING, CodexLoginService.LoginStatus.SAVING),
-                    callbacks.statuses);
-            assertEquals(
-                    new CodexLoginService.DeviceChallenge(CodexOAuthConfig.DEFAULT.verificationUrl(), "USER-CODE"),
-                    callbacks.challenge.get());
-            assertNull(callbacks.browser.get());
-            assertEquals("access-secret", service.load("test").accessToken());
-            assertEquals(CodexOAuthConfig.DEFAULT.issuer(), service.load("test").issuer());
-            assertFalse(attempt.cancel(), "a committed login is not rolled back by late cancellation");
-            attempt.close();
-            attempt.close();
-            assertEquals(1, completions.get());
-            assertEquals(1, releases.get());
-            assertEquals("still usable", executor.submit(() -> "still usable").get(5, TimeUnit.SECONDS));
-            assertOnlyCredentialFile();
+    @Nested
+    @FusionSupport(modules = LoginModule.class)
+    class DeviceSuccessHasStructuredChallengeAndExactlyOnceCompletion {
+        @Test
+        void deviceSuccessHasStructuredChallengeAndExactlyOnceCompletion(final JsonMapper mapper) throws Exception {
+            final var service = service(mapper);
+            final var callbacks = new Callbacks();
+            final var attempt = service.newAttempt(request(true, false), callbacks);
+            final var completions = new AtomicInteger();
+            final var releases = new AtomicInteger();
+            final var completed = attempt.completion().thenAccept(r -> completions.incrementAndGet());
+            final var released = attempt.drained().thenRun(releases::incrementAndGet);
+            try (final var executor = Executors.newVirtualThreadPerTaskExecutor()) {
+                attempt.start(executor);
+                final var result = await(attempt.completion());
+                await(completed);
+                await(released);
+                assertEquals(new CodexLoginService.LoginResult(SUCCEEDED, true), result);
+                assertEquals(SUCCEEDED, attempt.state());
+                assertEquals(
+                        List.of(CodexLoginService.LoginStatus.AUTHORIZING, CodexLoginService.LoginStatus.SAVING),
+                        callbacks.statuses);
+                assertEquals(
+                        new CodexLoginService.DeviceChallenge(CodexOAuthConfig.DEFAULT.verificationUrl(), "USER-CODE"),
+                        callbacks.challenge.get());
+                assertNull(callbacks.browser.get());
+                assertEquals("access-secret", service.load("test").accessToken());
+                assertEquals(
+                        CodexOAuthConfig.DEFAULT.issuer(), service.load("test").issuer());
+                assertFalse(attempt.cancel(), "a committed login is not rolled back by late cancellation");
+                attempt.close();
+                attempt.close();
+                assertEquals(1, completions.get());
+                assertEquals(1, releases.get());
+                assertEquals(
+                        "still usable", executor.submit(() -> "still usable").get(5, TimeUnit.SECONDS));
+                assertOnlyCredentialFile();
+            }
         }
     }
 
-    @Test
-    void enterpriseSuccessCommitsOnlyFullyEnrolledStore(final JsonMapper mapper) throws Exception {
-        final var service = service(mapper);
-        final var callbacks = new Callbacks();
-        try (final var executor = Executors.newVirtualThreadPerTaskExecutor()) {
-            final var attempt =
-                    service.newAttempt(request(true, true), callbacks).start(executor);
-            assertEquals(SUCCEEDED, await(attempt.completion()).state());
-            await(attempt.drained());
-            final var saved = service.load("test");
-            assertNotNull(saved.agentIdentity());
-            assertEquals("runtime", saved.agentIdentity().agentRuntimeId());
-            assertEquals("task", saved.agentIdentity().taskId());
-            assertNotNull(saved.agentIdentity().agentPrivateKeyPkcs8Base64());
-            assertEquals(
-                    List.of(
-                            CodexLoginService.LoginStatus.AUTHORIZING,
-                            CodexLoginService.LoginStatus.ENROLLING,
-                            CodexLoginService.LoginStatus.SAVING),
-                    callbacks.statuses);
-            assertOnlyCredentialFile();
+    @Nested
+    @FusionSupport(modules = LoginModule.class)
+    class EnterpriseSuccessCommitsOnlyFullyEnrolledStore {
+        @Test
+        void enterpriseSuccessCommitsOnlyFullyEnrolledStore(final JsonMapper mapper) throws Exception {
+            final var service = service(mapper);
+            final var callbacks = new Callbacks();
+            try (final var executor = Executors.newVirtualThreadPerTaskExecutor()) {
+                final var attempt =
+                        service.newAttempt(request(true, true), callbacks).start(executor);
+                assertEquals(SUCCEEDED, await(attempt.completion()).state());
+                await(attempt.drained());
+                final var saved = service.load("test");
+                assertNotNull(saved.agentIdentity());
+                assertEquals("runtime", saved.agentIdentity().agentRuntimeId());
+                assertEquals("task", saved.agentIdentity().taskId());
+                assertNotNull(saved.agentIdentity().agentPrivateKeyPkcs8Base64());
+                assertEquals(
+                        List.of(
+                                CodexLoginService.LoginStatus.AUTHORIZING,
+                                CodexLoginService.LoginStatus.ENROLLING,
+                                CodexLoginService.LoginStatus.SAVING),
+                        callbacks.statuses);
+                assertOnlyCredentialFile();
+            }
         }
     }
 
-    @Test
-    void providerFailureDoesNotEchoSecretsOrPublishCredentials(final JsonMapper mapper) throws Exception {
-        http.responder = request ->
-                new Response(request, 401, "{\"password\":\"password-secret\",\"access_token\":\"access-secret\"}");
-        final var service = service(mapper);
-        final var callbacks = new Callbacks();
-        try (final var executor = Executors.newVirtualThreadPerTaskExecutor()) {
-            final var attempt =
-                    service.newAttempt(request(true, false), callbacks).start(executor);
-            final var result = await(attempt.completion());
-            await(attempt.drained());
-            assertEquals(new CodexLoginService.LoginResult(FAILED, false), result);
-            assertFalse(result.toString().contains("secret"));
-            assertFalse(result.toString().contains("password"));
-            assertEquals(List.of(CodexLoginService.LoginStatus.AUTHORIZING), callbacks.statuses);
-            assertNull(callbacks.challenge.get());
-            assertNull(service.load("test"));
-            assertFalse(attempt.cancel());
-            attempt.close();
+    @Nested
+    @FusionSupport(modules = LoginModule.class)
+    class ProviderFailureDoesNotEchoSecretsOrPublishCredentials {
+        @Test
+        void providerFailureDoesNotEchoSecretsOrPublishCredentials(final JsonMapper mapper) throws Exception {
+            http.responder = request ->
+                    new Response(request, 401, "{\"password\":\"password-secret\",\"access_token\":\"access-secret\"}");
+            final var service = service(mapper);
+            final var callbacks = new Callbacks();
+            try (final var executor = Executors.newVirtualThreadPerTaskExecutor()) {
+                final var attempt =
+                        service.newAttempt(request(true, false), callbacks).start(executor);
+                final var result = await(attempt.completion());
+                await(attempt.drained());
+                assertEquals(new CodexLoginService.LoginResult(FAILED, false), result);
+                assertFalse(result.toString().contains("secret"));
+                assertFalse(result.toString().contains("password"));
+                assertEquals(List.of(CodexLoginService.LoginStatus.AUTHORIZING), callbacks.statuses);
+                assertNull(callbacks.challenge.get());
+                assertNull(service.load("test"));
+                assertFalse(attempt.cancel());
+                attempt.close();
+            }
         }
     }
 
-    @Test
-    void callbackFailureAndRejectedStartupAreSafeTerminalFailures(final JsonMapper mapper) throws Exception {
-        final var service = service(mapper);
-        try (final var executor = Executors.newVirtualThreadPerTaskExecutor()) {
-            final var attempt = service.newAttempt(request(true, false), new CodexLoginService.LoginListener() {
-                        @Override
-                        public void status(final CodexLoginService.LoginStatus status) {
-                            throw new IllegalStateException("password-secret");
-                        }
-                    })
-                    .start(executor);
-            assertEquals(new CodexLoginService.LoginResult(FAILED, false), await(attempt.completion()));
-            await(attempt.drained());
-        }
-        try (final var executor = new QueuedExecutor()) {
-            executor.shutdown();
-            final var attempt = service.newAttempt(request(true, false), null).start(executor);
-            assertEquals(new CodexLoginService.LoginResult(FAILED, false), await(attempt.completion()));
-            await(attempt.drained());
-        }
-        assertEquals(0, http.requests.size());
-        assertNull(service.load("test"));
-    }
-
-    @Test
-    void cancelledBeforeStartAndWhileQueuedCannotStartOAuth(final JsonMapper mapper) throws Exception {
-        final var service = service(mapper);
-        final var callbacks = new Callbacks();
-        try (final var executor = new QueuedExecutor()) {
-            final var before = service.newAttempt(request(true, false), callbacks);
-            assertTrue(before.cancel());
-            before.start(executor);
-            assertEquals(0, executor.queue.size());
-            assertEquals(CANCELLED, await(before.completion()).state());
-            await(before.drained());
-
-            final var queued =
-                    service.newAttempt(request(true, false), callbacks).start(executor);
-            assertEquals(CodexLoginService.LoginState.QUEUED, queued.state());
-            assertTrue(queued.cancel());
-            assertFalse(queued.cancel());
-            assertEquals(CANCELLED, await(queued.completion()).state());
-            await(queued.drained());
-            executor.runNext();
-            queued.close();
-            assertTrue(callbacks.statuses.isEmpty());
+    @Nested
+    @FusionSupport(modules = LoginModule.class)
+    class CallbackFailureAndRejectedStartupAreSafeTerminalFailures {
+        @Test
+        void callbackFailureAndRejectedStartupAreSafeTerminalFailures(final JsonMapper mapper) throws Exception {
+            final var service = service(mapper);
+            try (final var executor = Executors.newVirtualThreadPerTaskExecutor()) {
+                final var attempt = service.newAttempt(request(true, false), new CodexLoginService.LoginListener() {
+                            @Override
+                            public void status(final CodexLoginService.LoginStatus status) {
+                                throw new IllegalStateException("password-secret");
+                            }
+                        })
+                        .start(executor);
+                assertEquals(new CodexLoginService.LoginResult(FAILED, false), await(attempt.completion()));
+                await(attempt.drained());
+            }
+            try (final var executor = new QueuedExecutor()) {
+                executor.shutdown();
+                final var attempt =
+                        service.newAttempt(request(true, false), null).start(executor);
+                assertEquals(new CodexLoginService.LoginResult(FAILED, false), await(attempt.completion()));
+                await(attempt.drained());
+            }
             assertEquals(0, http.requests.size());
             assertNull(service.load("test"));
         }
     }
 
-    @Test
-    void devicePollingCancellationInterruptsRealWorker(final JsonMapper mapper) throws Exception {
-        final var block = new Block(false);
-        http.responder = request -> {
-            if (request.uri().getPath().endsWith("/deviceauth/token")) {
-                block.waitForRelease();
-            }
-            return success(request);
-        };
-        final var service = service(mapper);
-        try (final var executor = Executors.newVirtualThreadPerTaskExecutor()) {
-            final var attempt = service.newAttempt(request(true, false), null).start(executor);
-            try {
-                await(block.entered);
-                assertTrue(attempt.cancel());
-                await(block.interrupted);
-                assertEquals(CANCELLED, await(attempt.completion()).state());
-                await(attempt.drained());
+    @Nested
+    @FusionSupport(modules = LoginModule.class)
+    class CancelledBeforeStartAndWhileQueuedCannotStartOAuth {
+        @Test
+        void cancelledBeforeStartAndWhileQueuedCannotStartOAuth(final JsonMapper mapper) throws Exception {
+            final var service = service(mapper);
+            final var callbacks = new Callbacks();
+            try (final var executor = new QueuedExecutor()) {
+                final var before = service.newAttempt(request(true, false), callbacks);
+                assertTrue(before.cancel());
+                before.start(executor);
+                assertEquals(0, executor.queue.size());
+                assertEquals(CANCELLED, await(before.completion()).state());
+                await(before.drained());
+
+                final var queued =
+                        service.newAttempt(request(true, false), callbacks).start(executor);
+                assertEquals(CodexLoginService.LoginState.QUEUED, queued.state());
+                assertTrue(queued.cancel());
+                assertFalse(queued.cancel());
+                assertEquals(CANCELLED, await(queued.completion()).state());
+                await(queued.drained());
+                executor.runNext();
+                queued.close();
+                assertTrue(callbacks.statuses.isEmpty());
+                assertEquals(0, http.requests.size());
                 assertNull(service.load("test"));
-                assertEquals(0, callsEndingWith("/oauth/token"));
-            } finally {
-                attempt.cancel();
-                block.release.countDown();
             }
         }
     }
 
-    @Test
-    void blockedRuntimeEnrollmentCannotProceedToTaskOrCommitAfterCancel(final JsonMapper mapper) throws Exception {
-        cancelBlockedEnrollment(mapper, false);
+    @Nested
+    @FusionSupport(modules = LoginModule.class)
+    class DevicePollingCancellationInterruptsRealWorker {
+        @Test
+        void devicePollingCancellationInterruptsRealWorker(final JsonMapper mapper) throws Exception {
+            final var block = new Block(false);
+            http.responder = request -> {
+                if (request.uri().getPath().endsWith("/deviceauth/token")) {
+                    block.waitForRelease();
+                }
+                return success(request);
+            };
+            final var service = service(mapper);
+            try (final var executor = Executors.newVirtualThreadPerTaskExecutor()) {
+                final var attempt =
+                        service.newAttempt(request(true, false), null).start(executor);
+                try {
+                    await(block.entered);
+                    assertTrue(attempt.cancel());
+                    await(block.interrupted);
+                    assertEquals(CANCELLED, await(attempt.completion()).state());
+                    await(attempt.drained());
+                    assertNull(service.load("test"));
+                    assertEquals(0, callsEndingWith("/oauth/token"));
+                } finally {
+                    attempt.cancel();
+                    block.release.countDown();
+                }
+            }
+        }
     }
 
-    @Test
-    void blockedTaskEnrollmentDoesNotPretendCancelledFutureIsDrained(final JsonMapper mapper) throws Exception {
-        cancelBlockedEnrollment(mapper, true);
+    @Nested
+    @FusionSupport(modules = LoginModule.class)
+    class BlockedRuntimeEnrollmentCannotProceedToTaskOrCommitAfterCancel {
+        @Test
+        void blockedRuntimeEnrollmentCannotProceedToTaskOrCommitAfterCancel(final JsonMapper mapper) throws Exception {
+            cancelBlockedEnrollment(mapper, false);
+        }
+    }
+
+    @Nested
+    @FusionSupport(modules = LoginModule.class)
+    class BlockedTaskEnrollmentDoesNotPretendCancelledFutureIsDrained {
+        @Test
+        void blockedTaskEnrollmentDoesNotPretendCancelledFutureIsDrained(final JsonMapper mapper) throws Exception {
+            cancelBlockedEnrollment(mapper, true);
+        }
     }
 
     private void cancelBlockedEnrollment(final JsonMapper mapper, final boolean task) throws Exception {
@@ -313,272 +358,320 @@ class CodexLoginAttemptTest {
         }
     }
 
-    @Test
-    void cancelDuringFinalSerializationPreventsLateCredentialReplacement(final JsonMapper mapper) throws Exception {
-        final var block = new Block(true);
-        final var previousService = service(mapper);
-        previousService.save("test", new CodexTokenStore("previous", "refresh", "account", 1L, null));
-        final var service = service(interceptSerialization(mapper, block::waitForRelease));
-        try (final var executor = Executors.newVirtualThreadPerTaskExecutor()) {
-            final var attempt = service.newAttempt(request(true, false), null).start(executor);
-            try {
-                await(block.entered);
-                assertTrue(attempt.cancel());
-                await(block.interrupted);
-                assertEquals(CANCELLED, await(attempt.completion()).state());
-                assertFalse(attempt.drained().toCompletableFuture().isDone());
-                block.release.countDown();
-                await(attempt.drained());
-                assertEquals("previous", previousService.load("test").accessToken());
-                assertOnlyCredentialFile();
-            } finally {
-                attempt.cancel();
-                block.release.countDown();
-            }
-        }
-    }
-
-    @Test
-    void concurrentAttemptsAndServicesUseIndependentStagingFiles(final JsonMapper mapper) throws Exception {
-        final var bothSerializing = new CountDownLatch(2);
-        final var release = new CountDownLatch(1);
-        final var blockingMapper = interceptSerialization(mapper, () -> {
-            bothSerializing.countDown();
-            await(release);
-        });
-        final var token = new AtomicInteger();
-        http.responder = request -> request.uri().getPath().endsWith("/oauth/token")
-                ? new Response(request, 200, "{\"access_token\":\"access-" + token.incrementAndGet() + "\"}")
-                : success(request);
-        final var service = service(blockingMapper);
-        final var otherService = service(blockingMapper);
-        try (final var executor = Executors.newVirtualThreadPerTaskExecutor()) {
-            final var first = service.newAttempt(request(true, false), null).start(executor);
-            final var second =
-                    otherService.newAttempt(request(true, false), null).start(executor);
-            try {
-                await(bothSerializing);
-                try (final var files = Files.list(storage.resolve("providers/test"))) {
-                    assertEquals(
-                            2, files.filter(p -> p.toString().endsWith(".tmp")).count());
+    @Nested
+    @FusionSupport(modules = LoginModule.class)
+    class CancelDuringFinalSerializationPreventsLateCredentialReplacement {
+        @Test
+        void cancelDuringFinalSerializationPreventsLateCredentialReplacement(final JsonMapper mapper) throws Exception {
+            final var block = new Block(true);
+            final var previousService = service(mapper);
+            previousService.save("test", new CodexTokenStore("previous", "refresh", "account", 1L, null));
+            final var service = service(interceptSerialization(mapper, block::waitForRelease));
+            try (final var executor = Executors.newVirtualThreadPerTaskExecutor()) {
+                final var attempt =
+                        service.newAttempt(request(true, false), null).start(executor);
+                try {
+                    await(block.entered);
+                    assertTrue(attempt.cancel());
+                    await(block.interrupted);
+                    assertEquals(CANCELLED, await(attempt.completion()).state());
+                    assertFalse(attempt.drained().toCompletableFuture().isDone());
+                    block.release.countDown();
+                    await(attempt.drained());
+                    assertEquals("previous", previousService.load("test").accessToken());
+                    assertOnlyCredentialFile();
+                } finally {
+                    attempt.cancel();
+                    block.release.countDown();
                 }
-                release.countDown();
-                assertEquals(SUCCEEDED, await(first.completion()).state());
-                assertEquals(SUCCEEDED, await(second.completion()).state());
-                await(first.drained());
-                await(second.drained());
-                assertTrue(List.of("access-1", "access-2")
-                        .contains(service(mapper).load("test").accessToken()));
-                assertOnlyCredentialFile();
-            } finally {
-                first.cancel();
-                second.cancel();
-                release.countDown();
             }
         }
     }
 
-    @Test
-    void cancellingOneConcurrentAttemptDoesNotCancelAnother(final JsonMapper mapper) throws Exception {
-        final var block = new Block(true);
-        final var blockedService = service(interceptSerialization(mapper, block::waitForRelease));
-        final var otherService = service(mapper);
-        try (final var executor = Executors.newVirtualThreadPerTaskExecutor()) {
-            final var first =
-                    blockedService.newAttempt(request(true, false), null).start(executor);
-            try {
-                await(block.entered);
+    @Nested
+    @FusionSupport(modules = LoginModule.class)
+    class ConcurrentAttemptsAndServicesUseIndependentStagingFiles {
+        @Test
+        void concurrentAttemptsAndServicesUseIndependentStagingFiles(final JsonMapper mapper) throws Exception {
+            final var bothSerializing = new CountDownLatch(2);
+            final var release = new CountDownLatch(1);
+            final var blockingMapper = interceptSerialization(mapper, () -> {
+                bothSerializing.countDown();
+                await(release);
+            });
+            final var token = new AtomicInteger();
+            http.responder = request -> request.uri().getPath().endsWith("/oauth/token")
+                    ? new Response(request, 200, "{\"access_token\":\"access-" + token.incrementAndGet() + "\"}")
+                    : success(request);
+            final var service = service(blockingMapper);
+            final var otherService = service(blockingMapper);
+            try (final var executor = Executors.newVirtualThreadPerTaskExecutor()) {
+                final var first = service.newAttempt(request(true, false), null).start(executor);
                 final var second =
                         otherService.newAttempt(request(true, false), null).start(executor);
-                assertEquals(SUCCEEDED, await(second.completion()).state());
-                await(second.drained());
-                final var committed = Files.readAllBytes(storage.resolve("providers/test/codex.auth.json"));
-                assertTrue(first.cancel());
-                await(block.interrupted);
-                block.release.countDown();
-                await(first.drained());
-                assertEquals(CANCELLED, await(first.completion()).state());
-                assertEquals(
-                        new String(committed, StandardCharsets.UTF_8),
-                        Files.readString(storage.resolve("providers/test/codex.auth.json")));
-                assertOnlyCredentialFile();
-            } finally {
-                first.cancel();
-                block.release.countDown();
-            }
-        }
-    }
-
-    @Test
-    @ResourceLock("codex-oauth-default-callback-port")
-    void browserCancellationReleasesLoopbackListener(final JsonMapper mapper) throws Exception {
-        final var authorizeUrl = new CompletableFuture<String>();
-        try (final var executor = Executors.newVirtualThreadPerTaskExecutor()) {
-            final var attempt = service(mapper)
-                    .newAttempt(request(false, false), new CodexLoginService.LoginListener() {
-                        @Override
-                        public void browser(final String url) {
-                            authorizeUrl.complete(url);
-                        }
-                    })
-                    .start(executor);
-            try {
-                final var redirect = URI.create(query(await(authorizeUrl)).get("redirect_uri"));
-                assertTrue(attempt.cancel());
-                assertEquals(CANCELLED, await(attempt.completion()).state());
-                await(attempt.drained());
-                try (final var socket = new ServerSocket()) {
-                    socket.setReuseAddress(true);
-                    socket.bind(new InetSocketAddress("127.0.0.1", redirect.getPort()));
+                try {
+                    await(bothSerializing);
+                    try (final var files = Files.list(storage.resolve("providers/test"))) {
+                        assertEquals(
+                                2,
+                                files.filter(p -> p.toString().endsWith(".tmp")).count());
+                    }
+                    release.countDown();
+                    assertEquals(SUCCEEDED, await(first.completion()).state());
+                    assertEquals(SUCCEEDED, await(second.completion()).state());
+                    await(first.drained());
+                    await(second.drained());
+                    assertTrue(List.of("access-1", "access-2")
+                            .contains(service(mapper).load("test").accessToken()));
+                    assertOnlyCredentialFile();
+                } finally {
+                    first.cancel();
+                    second.cancel();
+                    release.countDown();
                 }
-                assertEquals(0, http.requests.size());
-                assertNull(service(mapper).load("test"));
-            } finally {
-                attempt.cancel();
             }
         }
     }
 
-    @Test
-    @ResourceLock("codex-oauth-default-callback-port")
-    void browserExchangeRunsOnOwnedWorkerAndDrainWaitsForIt(final JsonMapper mapper) throws Exception {
-        final var block = new Block(true);
-        final var callbackUrl = new CompletableFuture<String>();
-        final var worker = new AtomicReference<Thread>();
-        final var transportWorker = new AtomicReference<Thread>();
-        http.responder = request -> {
-            transportWorker.set(Thread.currentThread());
-            block.waitForRelease();
-            return success(request);
-        };
-        try (final var executor = Executors.newVirtualThreadPerTaskExecutor();
-                final var callbackClient = HttpClient.newHttpClient()) {
-            final var attempt = service(mapper)
-                    .newAttempt(request(false, false), new CodexLoginService.LoginListener() {
-                        @Override
-                        public void browser(final String url) {
-                            worker.set(Thread.currentThread());
-                            callbackUrl.complete(url);
-                        }
-                    })
-                    .start(executor);
-            try {
-                final var params = query(await(callbackUrl));
-                final var redirect = params.get("redirect_uri") + "?state=" + params.get("state") + "&code=fake-code";
-                // This is loopback only; issuer/SDK requests are intercepted by FakeHttpClient.
-                final var callback = callbackClient.sendAsync(
-                        HttpRequest.newBuilder(URI.create(redirect)).GET().build(),
-                        HttpResponse.BodyHandlers.discarding());
-                await(block.entered);
-                assertSame(worker.get(), transportWorker.get());
-                assertTrue(attempt.cancel());
-                await(block.interrupted);
-                assertFalse(attempt.drained().toCompletableFuture().isDone());
-                block.release.countDown();
-                await(attempt.drained());
-                assertEquals(CANCELLED, await(attempt.completion()).state());
-                assertEquals(1, callsEndingWith("/oauth/token"), "no optional API key exchange after cancellation");
-                await(callback.handle((response, error) -> null));
-                assertNull(service(mapper).load("test"));
-            } finally {
-                attempt.cancel();
-                block.release.countDown();
+    @Nested
+    @FusionSupport(modules = LoginModule.class)
+    class CancellingOneConcurrentAttemptDoesNotCancelAnother {
+        @Test
+        void cancellingOneConcurrentAttemptDoesNotCancelAnother(final JsonMapper mapper) throws Exception {
+            final var block = new Block(true);
+            final var blockedService = service(interceptSerialization(mapper, block::waitForRelease));
+            final var otherService = service(mapper);
+            try (final var executor = Executors.newVirtualThreadPerTaskExecutor()) {
+                final var first =
+                        blockedService.newAttempt(request(true, false), null).start(executor);
+                try {
+                    await(block.entered);
+                    final var second =
+                            otherService.newAttempt(request(true, false), null).start(executor);
+                    assertEquals(SUCCEEDED, await(second.completion()).state());
+                    await(second.drained());
+                    final var committed = Files.readAllBytes(storage.resolve("providers/test/codex.auth.json"));
+                    assertTrue(first.cancel());
+                    await(block.interrupted);
+                    block.release.countDown();
+                    await(first.drained());
+                    assertEquals(CANCELLED, await(first.completion()).state());
+                    assertEquals(
+                            new String(committed, StandardCharsets.UTF_8),
+                            Files.readString(storage.resolve("providers/test/codex.auth.json")));
+                    assertOnlyCredentialFile();
+                } finally {
+                    first.cancel();
+                    block.release.countDown();
+                }
             }
         }
     }
 
-    @Test
-    @ResourceLock("codex-oauth-default-callback-port")
-    void cancellationDuringOptionalApiKeyExchangeCannotSave(final JsonMapper mapper) throws Exception {
-        final var block = new Block(true);
-        final var authorizeUrl = new CompletableFuture<String>();
-        final var exchanges = new AtomicInteger();
-        http.responder = request -> {
-            if (exchanges.incrementAndGet() == 1) {
-                return new Response(request, 200, "{\"access_token\":\"access-secret\",\"id_token\":\"id-secret\"}");
+    @Nested
+    @FusionSupport(modules = LoginModule.class)
+    class BrowserCancellationReleasesLoopbackListener {
+        @Test
+        @ResourceLock("codex-oauth-default-callback-port")
+        void browserCancellationReleasesLoopbackListener(final JsonMapper mapper) throws Exception {
+            final var authorizeUrl = new CompletableFuture<String>();
+            try (final var executor = Executors.newVirtualThreadPerTaskExecutor()) {
+                final var attempt = service(mapper)
+                        .newAttempt(request(false, false), new CodexLoginService.LoginListener() {
+                            @Override
+                            public void browser(final String url) {
+                                authorizeUrl.complete(url);
+                            }
+                        })
+                        .start(executor);
+                try {
+                    final var redirect = URI.create(query(await(authorizeUrl)).get("redirect_uri"));
+                    assertTrue(attempt.cancel());
+                    assertEquals(CANCELLED, await(attempt.completion()).state());
+                    await(attempt.drained());
+                    try (final var socket = new ServerSocket()) {
+                        socket.setReuseAddress(true);
+                        socket.bind(new InetSocketAddress("127.0.0.1", redirect.getPort()));
+                    }
+                    assertEquals(0, http.requests.size());
+                    assertNull(service(mapper).load("test"));
+                } finally {
+                    attempt.cancel();
+                }
             }
-            block.waitForRelease();
-            return new Response(request, 200, "{\"access_token\":\"api-key-secret\"}");
-        };
-        final var service = service(mapper);
-        try (final var executor = Executors.newVirtualThreadPerTaskExecutor();
-                final var callbackClient = HttpClient.newHttpClient()) {
-            final var attempt = service.newAttempt(request(false, false), new CodexLoginService.LoginListener() {
-                        @Override
-                        public void browser(final String url) {
-                            authorizeUrl.complete(url);
-                        }
-                    })
-                    .start(executor);
-            try {
-                final var params = query(await(authorizeUrl));
-                final var redirect = params.get("redirect_uri") + "?state=" + params.get("state") + "&code=fake-code";
-                final var callback = callbackClient.sendAsync(
-                        HttpRequest.newBuilder(URI.create(redirect)).GET().build(),
-                        HttpResponse.BodyHandlers.discarding());
-                await(block.entered);
-                assertEquals(200, await(callback).statusCode());
-                assertTrue(attempt.cancel());
-                await(block.interrupted);
-                assertEquals(CANCELLED, await(attempt.completion()).state());
-                assertFalse(attempt.drained().toCompletableFuture().isDone());
-                block.release.countDown();
+        }
+    }
+
+    @Nested
+    @FusionSupport(modules = LoginModule.class)
+    class BrowserExchangeRunsOnOwnedWorkerAndDrainWaitsForIt {
+        @Test
+        @ResourceLock("codex-oauth-default-callback-port")
+        void browserExchangeRunsOnOwnedWorkerAndDrainWaitsForIt(final JsonMapper mapper) throws Exception {
+            final var block = new Block(true);
+            final var callbackUrl = new CompletableFuture<String>();
+            final var worker = new AtomicReference<Thread>();
+            final var transportWorker = new AtomicReference<Thread>();
+            http.responder = request -> {
+                transportWorker.set(Thread.currentThread());
+                block.waitForRelease();
+                return success(request);
+            };
+            try (final var executor = Executors.newVirtualThreadPerTaskExecutor();
+                    final var callbackClient = HttpClient.newHttpClient()) {
+                final var attempt = service(mapper)
+                        .newAttempt(request(false, false), new CodexLoginService.LoginListener() {
+                            @Override
+                            public void browser(final String url) {
+                                worker.set(Thread.currentThread());
+                                callbackUrl.complete(url);
+                            }
+                        })
+                        .start(executor);
+                try {
+                    final var params = query(await(callbackUrl));
+                    final var redirect =
+                            params.get("redirect_uri") + "?state=" + params.get("state") + "&code=fake-code";
+                    // This is loopback only; issuer/SDK requests are intercepted by FakeHttpClient.
+                    final var callback = callbackClient.sendAsync(
+                            HttpRequest.newBuilder(URI.create(redirect)).GET().build(),
+                            HttpResponse.BodyHandlers.discarding());
+                    await(block.entered);
+                    assertSame(worker.get(), transportWorker.get());
+                    assertTrue(attempt.cancel());
+                    await(block.interrupted);
+                    assertFalse(attempt.drained().toCompletableFuture().isDone());
+                    block.release.countDown();
+                    await(attempt.drained());
+                    assertEquals(CANCELLED, await(attempt.completion()).state());
+                    assertEquals(1, callsEndingWith("/oauth/token"), "no optional API key exchange after cancellation");
+                    await(callback.handle((response, error) -> null));
+                    assertNull(service(mapper).load("test"));
+                } finally {
+                    attempt.cancel();
+                    block.release.countDown();
+                }
+            }
+        }
+    }
+
+    @Nested
+    @FusionSupport(modules = LoginModule.class)
+    class CancellationDuringOptionalApiKeyExchangeCannotSave {
+        @Test
+        @ResourceLock("codex-oauth-default-callback-port")
+        void cancellationDuringOptionalApiKeyExchangeCannotSave(final JsonMapper mapper) throws Exception {
+            final var block = new Block(true);
+            final var authorizeUrl = new CompletableFuture<String>();
+            final var exchanges = new AtomicInteger();
+            http.responder = request -> {
+                if (exchanges.incrementAndGet() == 1) {
+                    return new Response(
+                            request, 200, "{\"access_token\":\"access-secret\",\"id_token\":\"id-secret\"}");
+                }
+                block.waitForRelease();
+                return new Response(request, 200, "{\"access_token\":\"api-key-secret\"}");
+            };
+            final var service = service(mapper);
+            try (final var executor = Executors.newVirtualThreadPerTaskExecutor();
+                    final var callbackClient = HttpClient.newHttpClient()) {
+                final var attempt = service.newAttempt(request(false, false), new CodexLoginService.LoginListener() {
+                            @Override
+                            public void browser(final String url) {
+                                authorizeUrl.complete(url);
+                            }
+                        })
+                        .start(executor);
+                try {
+                    final var params = query(await(authorizeUrl));
+                    final var redirect =
+                            params.get("redirect_uri") + "?state=" + params.get("state") + "&code=fake-code";
+                    final var callback = callbackClient.sendAsync(
+                            HttpRequest.newBuilder(URI.create(redirect)).GET().build(),
+                            HttpResponse.BodyHandlers.discarding());
+                    await(block.entered);
+                    assertEquals(200, await(callback).statusCode());
+                    assertTrue(attempt.cancel());
+                    await(block.interrupted);
+                    assertEquals(CANCELLED, await(attempt.completion()).state());
+                    assertFalse(attempt.drained().toCompletableFuture().isDone());
+                    block.release.countDown();
+                    await(attempt.drained());
+                    assertNull(service.load("test"));
+                    assertEquals(2, exchanges.get());
+                } finally {
+                    attempt.cancel();
+                    block.release.countDown();
+                }
+            }
+        }
+    }
+
+    @Nested
+    @FusionSupport(modules = LoginModule.class)
+    class SerializationFailureReleasesStagingFileWithoutEcho {
+        @Test
+        void serializationFailureReleasesStagingFileWithoutEcho(final JsonMapper mapper) throws Exception {
+            final var service = service(interceptSerialization(mapper, () -> {
+                throw new IllegalStateException("password-secret");
+            }));
+            try (final var executor = Executors.newVirtualThreadPerTaskExecutor()) {
+                final var attempt =
+                        service.newAttempt(request(true, false), null).start(executor);
+                assertEquals(new CodexLoginService.LoginResult(FAILED, false), await(attempt.completion()));
                 await(attempt.drained());
                 assertNull(service.load("test"));
-                assertEquals(2, exchanges.get());
-            } finally {
-                attempt.cancel();
-                block.release.countDown();
+                try (final var files = Files.list(storage.resolve("providers/test"))) {
+                    assertEquals(0, files.count());
+                }
             }
         }
     }
 
-    @Test
-    void serializationFailureReleasesStagingFileWithoutEcho(final JsonMapper mapper) throws Exception {
-        final var service = service(interceptSerialization(mapper, () -> {
-            throw new IllegalStateException("password-secret");
-        }));
-        try (final var executor = Executors.newVirtualThreadPerTaskExecutor()) {
-            final var attempt = service.newAttempt(request(true, false), null).start(executor);
-            assertEquals(new CodexLoginService.LoginResult(FAILED, false), await(attempt.completion()));
-            await(attempt.drained());
+    @Nested
+    @FusionSupport(modules = LoginModule.class)
+    class LegacyCancellationProbeIsCheckedAfterOAuthBeforeSaving {
+        @Test
+        void legacyCancellationProbeIsCheckedAfterOAuthBeforeSaving(final JsonMapper mapper) {
+            final var cancelled = new AtomicBoolean();
+            http.responder = request -> {
+                final var response = success(request);
+                if (request.uri().getPath().endsWith("/oauth/token")) {
+                    cancelled.set(true);
+                }
+                return response;
+            };
+            final var service = service(mapper);
+            assertThrows(CancellationException.class, () -> service.signIn("test", true, null, b -> cancelled.get()));
             assertNull(service.load("test"));
-            try (final var files = Files.list(storage.resolve("providers/test"))) {
-                assertEquals(0, files.count());
-            }
         }
     }
 
-    @Test
-    void legacyCancellationProbeIsCheckedAfterOAuthBeforeSaving(final JsonMapper mapper) {
-        final var cancelled = new AtomicBoolean();
-        http.responder = request -> {
-            final var response = success(request);
-            if (request.uri().getPath().endsWith("/oauth/token")) {
-                cancelled.set(true);
+    @Nested
+    @FusionSupport(modules = LoginModule.class)
+    class ProviderPathCannotEscapeOwnedStore {
+        @Test
+        void providerPathCannotEscapeOwnedStore(final JsonMapper mapper) {
+            for (final var provider :
+                    List.of("..", "../outside", "/tmp/outside", "nested/provider", "nested\\provider")) {
+                assertThrows(
+                        IllegalArgumentException.class,
+                        () -> service(mapper)
+                                .newAttempt(new CodexLoginService.LoginRequest(provider, true, false, null), null));
             }
-            return response;
-        };
-        final var service = service(mapper);
-        assertThrows(CancellationException.class, () -> service.signIn("test", true, null, b -> cancelled.get()));
-        assertNull(service.load("test"));
-    }
-
-    @Test
-    void providerPathCannotEscapeOwnedStore(final JsonMapper mapper) {
-        for (final var provider : List.of("..", "../outside", "/tmp/outside", "nested/provider", "nested\\provider")) {
-            assertThrows(
-                    IllegalArgumentException.class,
-                    () -> service(mapper)
-                            .newAttempt(new CodexLoginService.LoginRequest(provider, true, false, null), null));
         }
     }
 
     private CodexLoginService service(final JsonMapper mapper) {
-        final var cfg = ConfigurationLoader.load(
-                CodingAgentConfiguration.class,
-                k -> Optional.ofNullable("yca.storageHome".equals(k) ? storage.toString() : null));
-        return new CodexLoginService(mapper, http, cfg);
+        return new CodexLoginService(mapper, http, configuration);
+    }
+
+    public static class LoginModule extends ConfigurationTestModule {
+        public LoginModule() {
+            super(Map.of(
+                    "yca.storageHome",
+                    root.resolve(UUID.randomUUID().toString()).toString()));
+        }
     }
 
     private CodexLoginService.LoginRequest request(final boolean device, final boolean enterprise) {

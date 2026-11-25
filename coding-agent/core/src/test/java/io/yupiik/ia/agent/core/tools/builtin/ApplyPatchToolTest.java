@@ -20,15 +20,28 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import io.yupiik.ia.agent.core.configuration.TestConfigs;
+import io.yupiik.fusion.testing.Fusion;
+import io.yupiik.fusion.testing.FusionSupport;
+import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
+import io.yupiik.ia.agent.core.configuration.ConfigurationTestModule;
+import io.yupiik.ia.agent.core.sandbox.DisabledSandbox;
 import io.yupiik.ia.agent.core.tools.ToolContext;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Map;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+@FusionSupport(modules = ConfigurationTestModule.class)
 class ApplyPatchToolTest {
+    private CodingAgentConfiguration configuration;
+
+    @BeforeEach
+    void configuration(@Fusion final CodingAgentConfiguration configuration) {
+        this.configuration = configuration;
+    }
+
     @TempDir
     private static Path testWorkdir;
 
@@ -36,9 +49,7 @@ class ApplyPatchToolTest {
     Path dir;
 
     private ApplyPatchTool tool() {
-        return new ApplyPatchTool(TestConfigs.codingAgent(Map.of(
-                "yca.storageHome", dir.toString(),
-                "yca.projectDir", dir.toString())));
+        return new ApplyPatchTool(configuration);
     }
 
     @Test
@@ -49,7 +60,7 @@ class ApplyPatchToolTest {
             final var prefix = i == 0 ? "cat <<'" + marker + "'" : "<<" + marker;
             final var name = "wrapped-" + i + ".txt";
             final var patch = prefix + "\n--- /dev/null\n+++ b/" + name + "\n@@\n+hello\n" + marker + "\n";
-            final var result = tool.execute(Map.of("patch", patch), ToolContext.empty(dir));
+            final var result = tool.execute(Map.of("patch", patch), ToolContext.empty(dir, new DisabledSandbox(dir)));
             assertTrue(result.success(), result.output());
             assertEquals("hello\n", Files.readString(dir.resolve(name)));
         }
@@ -73,7 +84,7 @@ class ApplyPatchToolTest {
                 +line two changed
                  line three
                 """;
-        final var result = tool().execute(Map.of("patch", patch), ToolContext.empty(dir));
+        final var result = tool().execute(Map.of("patch", patch), ToolContext.empty(dir, new DisabledSandbox(dir)));
         assertTrue(result.success(), () -> result.output());
         assertEquals("line one\nline two changed\nline three\n", Files.readString(file));
     }
@@ -87,7 +98,7 @@ class ApplyPatchToolTest {
                 +hello
                 +world
                 """;
-        final var result = tool().execute(Map.of("patch", patch), ToolContext.empty(dir));
+        final var result = tool().execute(Map.of("patch", patch), ToolContext.empty(dir, new DisabledSandbox(dir)));
         assertTrue(result.success(), () -> result.output());
         assertTrue(result.output().contains("Created"));
         assertEquals("hello\nworld\n", Files.readString(dir.resolve("created.txt")));
@@ -103,7 +114,7 @@ class ApplyPatchToolTest {
                 @@
                 -bye
                 """;
-        final var result = tool().execute(Map.of("patch", patch), ToolContext.empty(dir));
+        final var result = tool().execute(Map.of("patch", patch), ToolContext.empty(dir, new DisabledSandbox(dir)));
         assertTrue(result.success(), () -> result.output());
         assertTrue(result.output().contains("Deleted"));
         assertFalse(Files.exists(file));
@@ -121,7 +132,7 @@ class ApplyPatchToolTest {
                 -no
                 +yes
                 """;
-        final var result = tool().execute(Map.of("patch", patch), ToolContext.empty(dir));
+        final var result = tool().execute(Map.of("patch", patch), ToolContext.empty(dir, new DisabledSandbox(dir)));
         assertFalse(result.success());
         assertEquals("different\n", Files.readString(file));
     }
@@ -135,7 +146,7 @@ class ApplyPatchToolTest {
                 -x
                 +y
                 """;
-        final var result = tool().execute(Map.of("patch", patch), ToolContext.empty(dir));
+        final var result = tool().execute(Map.of("patch", patch), ToolContext.empty(dir, new DisabledSandbox(dir)));
         assertFalse(result.success());
     }
 
@@ -158,7 +169,7 @@ class ApplyPatchToolTest {
                 -line 11
                 +changed
                 """;
-        final var result = tool().execute(Map.of("patch", patch), ToolContext.empty(dir));
+        final var result = tool().execute(Map.of("patch", patch), ToolContext.empty(dir, new DisabledSandbox(dir)));
         assertFalse(result.success(), () -> result.output());
         assertEquals(sb.toString(), Files.readString(file));
     }
@@ -180,7 +191,7 @@ class ApplyPatchToolTest {
                 -line 14
                 +changed
                 """;
-        final var result = tool().execute(Map.of("patch", patch), ToolContext.empty(dir));
+        final var result = tool().execute(Map.of("patch", patch), ToolContext.empty(dir, new DisabledSandbox(dir)));
         assertTrue(result.success(), () -> result.output());
         final var updated = Files.readString(file);
         assertTrue(updated.contains("line 12\nline 13\nchanged\nline 15\n"), updated);
@@ -201,7 +212,7 @@ class ApplyPatchToolTest {
                 +B
                  c
                 """;
-        final var result = tool().execute(Map.of("patch", patch), ToolContext.empty(dir));
+        final var result = tool().execute(Map.of("patch", patch), ToolContext.empty(dir, new DisabledSandbox(dir)));
         assertFalse(result.success(), () -> result.output());
         assertEquals("a\nb\nc\na\nb\nc\n", Files.readString(file));
     }
@@ -218,7 +229,7 @@ class ApplyPatchToolTest {
                 -a
                 +A
                 """;
-        final var result = tool().execute(Map.of("patch", patch), ToolContext.empty(dir));
+        final var result = tool().execute(Map.of("patch", patch), ToolContext.empty(dir, new DisabledSandbox(dir)));
         assertTrue(result.success(), () -> result.output());
         assertEquals("A\nb\nc\n", Files.readString(file));
     }
@@ -237,7 +248,7 @@ class ApplyPatchToolTest {
                 -d
                 +D
                 """;
-        final var result = tool().execute(Map.of("patch", patch), ToolContext.empty(dir));
+        final var result = tool().execute(Map.of("patch", patch), ToolContext.empty(dir, new DisabledSandbox(dir)));
         assertTrue(result.success(), () -> result.output());
         assertEquals("a\nB\nc\nD\ne\n", Files.readString(file));
     }
@@ -254,7 +265,7 @@ class ApplyPatchToolTest {
                 -c
                 +C
                 """;
-        final var result = tool().execute(Map.of("patch", patch), ToolContext.empty(dir));
+        final var result = tool().execute(Map.of("patch", patch), ToolContext.empty(dir, new DisabledSandbox(dir)));
         assertFalse(result.success(), () -> result.output());
         assertTrue(result.output().contains("file header"), () -> result.output());
     }
@@ -268,7 +279,7 @@ class ApplyPatchToolTest {
                 +B
                 +c2
                 """;
-        final var result = tool().execute(Map.of("patch", patch), ToolContext.empty(dir));
+        final var result = tool().execute(Map.of("patch", patch), ToolContext.empty(dir, new DisabledSandbox(dir)));
         assertFalse(result.success(), () -> result.output());
         assertTrue(result.output().contains("file header"), () -> result.output());
     }
@@ -286,7 +297,7 @@ class ApplyPatchToolTest {
                 -line two
                 +line two changed
                 """;
-        final var result = tool().execute(Map.of("patch", patch), ToolContext.empty(dir));
+        final var result = tool().execute(Map.of("patch", patch), ToolContext.empty(dir, new DisabledSandbox(dir)));
         assertTrue(result.success(), () -> result.output());
         assertEquals("line one\nline two changed\n", Files.readString(file));
     }
@@ -304,7 +315,7 @@ class ApplyPatchToolTest {
                 -beta
                 +beta changed
                 """;
-        final var result = tool().execute(Map.of("patch", patch), ToolContext.empty(dir));
+        final var result = tool().execute(Map.of("patch", patch), ToolContext.empty(dir, new DisabledSandbox(dir)));
         assertTrue(result.success(), () -> result.output());
         assertEquals("alpha \nbeta changed\n", Files.readString(file));
     }
@@ -320,7 +331,7 @@ class ApplyPatchToolTest {
                 @@
                  say 'hi'
                 """;
-        final var result = tool().execute(Map.of("patch", patch), ToolContext.empty(dir));
+        final var result = tool().execute(Map.of("patch", patch), ToolContext.empty(dir, new DisabledSandbox(dir)));
         assertTrue(result.success(), () -> result.output());
         assertEquals("say \u2018hi\u2019\n", Files.readString(file));
     }
@@ -345,7 +356,7 @@ class ApplyPatchToolTest {
                 -no
                 +yes
                 """;
-        final var result = tool().execute(Map.of("patch", patch), ToolContext.empty(dir));
+        final var result = tool().execute(Map.of("patch", patch), ToolContext.empty(dir, new DisabledSandbox(dir)));
         assertFalse(result.success(), () -> result.output());
         assertEquals("a\n", Files.readString(a));
     }
@@ -370,7 +381,7 @@ class ApplyPatchToolTest {
                 -x
                 +y
                 """;
-        final var result = tool().execute(Map.of("patch", patch), ToolContext.empty(dir));
+        final var result = tool().execute(Map.of("patch", patch), ToolContext.empty(dir, new DisabledSandbox(dir)));
         assertFalse(result.success(), () -> result.output());
         assertEquals("keep\n", Files.readString(a)); // untouched because validation failed before any write
     }
@@ -388,7 +399,7 @@ class ApplyPatchToolTest {
                 +world
                 *** End Patch
                 """;
-        final var result = tool().execute(Map.of("patch", patch), ToolContext.empty(dir));
+        final var result = tool().execute(Map.of("patch", patch), ToolContext.empty(dir, new DisabledSandbox(dir)));
         assertTrue(result.success(), () -> result.output());
         assertTrue(result.output().contains("Created"));
         assertEquals("hello\nworld\n", Files.readString(dir.resolve("incoming.txt")));
@@ -403,7 +414,7 @@ class ApplyPatchToolTest {
                 *** Delete File: gone.txt
                 *** End Patch
                 """;
-        final var result = tool().execute(Map.of("patch", patch), ToolContext.empty(dir));
+        final var result = tool().execute(Map.of("patch", patch), ToolContext.empty(dir, new DisabledSandbox(dir)));
         assertTrue(result.success(), () -> result.output());
         assertTrue(result.output().contains("Deleted"));
         assertFalse(Files.exists(file));
@@ -423,7 +434,7 @@ class ApplyPatchToolTest {
                  line three
                 *** End Patch
                 """;
-        final var result = tool().execute(Map.of("patch", patch), ToolContext.empty(dir));
+        final var result = tool().execute(Map.of("patch", patch), ToolContext.empty(dir, new DisabledSandbox(dir)));
         assertTrue(result.success(), () -> result.output());
         assertEquals("line one\nline two changed\nline three\n", Files.readString(file));
     }
@@ -441,7 +452,7 @@ class ApplyPatchToolTest {
                 +new
                 *** End Patch
                 """;
-        final var result = tool().execute(Map.of("patch", patch), ToolContext.empty(dir));
+        final var result = tool().execute(Map.of("patch", patch), ToolContext.empty(dir, new DisabledSandbox(dir)));
         assertTrue(result.success(), () -> result.output());
         assertFalse(Files.exists(file));
         assertEquals("new\n", Files.readString(dir.resolve("newdir/new.txt")));
@@ -460,7 +471,7 @@ class ApplyPatchToolTest {
                 *** End of File
                 *** End Patch
                 """;
-        final var result = tool().execute(Map.of("patch", patch), ToolContext.empty(dir));
+        final var result = tool().execute(Map.of("patch", patch), ToolContext.empty(dir, new DisabledSandbox(dir)));
         assertTrue(result.success(), () -> result.output());
         assertEquals("a\nb\nC\n", Files.readString(file));
     }
@@ -479,7 +490,7 @@ class ApplyPatchToolTest {
                 +B
                 *** End Patch
                 """;
-        final var result = tool().execute(Map.of("patch", patch), ToolContext.empty(dir));
+        final var result = tool().execute(Map.of("patch", patch), ToolContext.empty(dir, new DisabledSandbox(dir)));
         assertTrue(result.success(), () -> result.output());
         assertEquals("a\nB\nc\na\nb\nc\n", Files.readString(file));
     }
@@ -498,7 +509,7 @@ class ApplyPatchToolTest {
                 +line two changed
                 *** End Patch
                 """;
-        final var result = tool().execute(Map.of("patch", patch), ToolContext.empty(dir));
+        final var result = tool().execute(Map.of("patch", patch), ToolContext.empty(dir, new DisabledSandbox(dir)));
         assertTrue(result.success(), () -> result.output());
         assertEquals("line one\nline two changed\n", Files.readString(file));
     }
@@ -517,7 +528,7 @@ class ApplyPatchToolTest {
                  gamma
                 *** End Patch
                 """;
-        final var result = tool().execute(Map.of("patch", patch), ToolContext.empty(dir));
+        final var result = tool().execute(Map.of("patch", patch), ToolContext.empty(dir, new DisabledSandbox(dir)));
         assertTrue(result.success(), () -> result.output());
         assertEquals("alpha\nBETA\ngamma\n", Files.readString(file));
     }
@@ -534,7 +545,7 @@ class ApplyPatchToolTest {
                 +beta
                 *** End Patch
                 """;
-        final var result = tool().execute(Map.of("patch", patch), ToolContext.empty(dir));
+        final var result = tool().execute(Map.of("patch", patch), ToolContext.empty(dir, new DisabledSandbox(dir)));
         assertFalse(result.success(), () -> result.output());
         assertEquals("alpha\n", Files.readString(file));
     }
@@ -545,7 +556,7 @@ class ApplyPatchToolTest {
         final var file = dir.resolve("nope.txt");
         Files.writeString(file, "keep\n");
         final var patch = "*** Update File: nope.txt\n@@\n-keep\n+lost\n*** End Patch\n";
-        final var result = tool().execute(Map.of("patch", patch), ToolContext.empty(dir));
+        final var result = tool().execute(Map.of("patch", patch), ToolContext.empty(dir, new DisabledSandbox(dir)));
         assertFalse(result.success(), () -> result.output());
         assertEquals("keep\n", Files.readString(file));
     }
@@ -566,7 +577,7 @@ class ApplyPatchToolTest {
                 -beta
                 +BETA
                 """;
-        final var result = tool().execute(Map.of("patch", patch), ToolContext.empty(dir));
+        final var result = tool().execute(Map.of("patch", patch), ToolContext.empty(dir, new DisabledSandbox(dir)));
         assertTrue(result.success(), () -> result.output());
         final var bytes = Files.readAllBytes(file);
         assertTrue(bytes.length >= 3, "missing BOM");
@@ -589,7 +600,7 @@ class ApplyPatchToolTest {
                 -beta
                 +BETA
                 """;
-        final var result = tool().execute(Map.of("patch", patch), ToolContext.empty(dir));
+        final var result = tool().execute(Map.of("patch", patch), ToolContext.empty(dir, new DisabledSandbox(dir)));
         assertTrue(result.success(), () -> result.output());
         final var updatedContent = Files.readString(file);
         assertTrue(updatedContent.endsWith("\n"), () -> updatedContent);
@@ -615,7 +626,7 @@ class ApplyPatchToolTest {
                 +line2
                 *** End Patch
                 """;
-        final var result = tool().execute(Map.of("patch", patch2), ToolContext.empty(dir));
+        final var result = tool().execute(Map.of("patch", patch2), ToolContext.empty(dir, new DisabledSandbox(dir)));
         assertTrue(result.success(), () -> result.output());
         assertEquals("line1\nline2\n", Files.readString(dir.resolve("odd.txt")));
     }

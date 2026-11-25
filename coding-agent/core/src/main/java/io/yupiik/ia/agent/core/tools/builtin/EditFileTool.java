@@ -73,6 +73,8 @@ public class EditFileTool implements EmbeddedTool {
             return ToolResult.error("path is required");
         }
         final var path = context.resolvePath(raw);
+        SandboxFiles.requireRead(context, path);
+        SandboxFiles.requireWrite(context, path);
         final var oldString = arg(args, "oldString");
         final var newString = arg(args, "newString");
         if (oldString == null || oldString.isEmpty()) {
@@ -107,6 +109,7 @@ public class EditFileTool implements EmbeddedTool {
                         + snippet(content) + ".");
             }
             final var updated = content.replace(oldString, newString);
+            SandboxFiles.requireWrite(context, path);
             Files.writeString(path, updated);
             final var capture = new FileMutationCapture();
             if (!content.equals(updated)) {

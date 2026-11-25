@@ -18,10 +18,14 @@ package io.yupiik.ia.agent.slack.service;
 import static io.yupiik.ia.agent.slack.support.SlackDomainFixture.task;
 import static org.junit.jupiter.api.Assertions.*;
 
+import io.yupiik.fusion.testing.Fusion;
+import io.yupiik.fusion.testing.FusionSupport;
 import io.yupiik.ia.agent.bot.runtime.admission.HostAdmission;
 import io.yupiik.ia.agent.bot.runtime.admission.HostAdmissionConfiguration;
+import io.yupiik.ia.agent.slack.configuration.SlackPrompts;
 import io.yupiik.ia.agent.slack.context.SlackContextStorage;
 import io.yupiik.ia.agent.slack.model.TaskStatus;
+import io.yupiik.ia.agent.slack.support.SlackConfigurationTestModule;
 import io.yupiik.ia.agent.slack.support.SlackDomainFixture;
 import java.io.IOException;
 import java.io.UncheckedIOException;
@@ -36,7 +40,11 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
+@FusionSupport(modules = SlackConfigurationTestModule.class)
 class SlackWorkerResultTest {
+    @Fusion
+    private SlackPrompts baselinePrompts;
+
     @TempDir
     Path root;
 
@@ -192,9 +200,10 @@ class SlackWorkerResultTest {
                 fixture.executor(root),
                 fixture.json,
                 fixture.store,
-                new SlackPromptRenderer(SlackDomainFixture.prompts(), fixture.json),
+                new SlackPromptRenderer(SlackDomainFixture.prompts(baselinePrompts), fixture.json),
                 sandbox,
-                new SlackFeedback(fixture.configuration, SlackDomainFixture.prompts(), fixture.store, fixture.api),
+                new SlackFeedback(
+                        fixture.configuration, SlackDomainFixture.prompts(baselinePrompts), fixture.store, fixture.api),
                 fixture.api,
                 new HostAdmission(new HostAdmissionConfiguration("", 1, "")),
                 fixture.contextConfiguration,

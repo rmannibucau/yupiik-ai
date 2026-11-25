@@ -27,12 +27,13 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import io.yupiik.fusion.framework.api.event.Emitter;
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.fusion.jsonrpc.impl.JsonRpcMethod;
+import io.yupiik.fusion.testing.Fusion;
+import io.yupiik.fusion.testing.FusionSupport;
 import io.yupiik.ia.agent.core.cli.slash.SlashCommandSpec;
 import io.yupiik.ia.agent.core.cli.slash.SlashGroup;
 import io.yupiik.ia.agent.core.codegraph.StructuralCodeGraph;
 import io.yupiik.ia.agent.core.codegraph.index.CodeGraphIndex;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
-import io.yupiik.ia.agent.core.configuration.CodingAgentConfigurations;
 import io.yupiik.ia.agent.core.configuration.ModelVariantConfiguration;
 import io.yupiik.ia.agent.core.context.BackoffSleeper;
 import io.yupiik.ia.agent.core.events.SessionStartedEvent;
@@ -58,6 +59,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Clock;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.Queue;
@@ -84,16 +86,30 @@ import org.junit.jupiter.params.provider.ValueSource;
  * Slash commands are never broadcast as user turns.
  */
 @ExtendWith(TestWebJsonMapper.class)
+@FusionSupport(modules = WebSessionManagerPromptTest.SessionModule.class)
 class WebSessionManagerPromptTest {
 
     @TempDir
-    Path storageHome;
+    static Path storageHome;
+
+    public static class SessionModule extends WebConfigurationTestModule {
+        public SessionModule() {
+            super(Map.of(
+                    "yca.storageHome", storageHome.toString(),
+                    "yca.home", storageHome.resolve("home").toString(),
+                    "yca.workingDir", storageHome.resolve("launch").toString(),
+                    "yca.projectDir", storageHome.resolve("server-project").toString()));
+        }
+    }
 
     private JsonMapper mapper;
     private WebSessionManager manager;
     private FakeSseBroker broker;
     private FakeTurnRunner turnRunner;
-    private CodingAgentConfiguration configuration;
+
+    @Fusion
+    CodingAgentConfiguration configuration;
+
     private SessionRuntimeFactory runtimeFactory;
     private SessionStore sessionStore;
     private final AtomicInteger defaultRootResolutions = new AtomicInteger();
@@ -105,18 +121,15 @@ class WebSessionManagerPromptTest {
         this.broker = new FakeSseBroker(mapper);
         this.turnRunner = new FakeTurnRunner();
 
-        configuration = CodingAgentConfigurations.builder()
-                .baseUrl("http://localhost:0")
-                .storageHome(storageHome.toString())
-                .custom(Map.of(
-                        "yca.home", storageHome.resolve("home").toString(),
-                        "yca.workingDir",
-                                Files.createDirectories(storageHome.resolve("launch"))
-                                        .toString(),
-                        "yca.projectDir",
-                                Files.createDirectories(storageHome.resolve("server-project"))
-                                        .toString()))
-                .build();
+        try (final var paths = Files.walk(storageHome)) {
+            for (final var path : paths.sorted(Comparator.reverseOrder()).toList()) {
+                if (!path.equals(storageHome)) {
+                    Files.delete(path);
+                }
+            }
+        }
+        Files.createDirectories(storageHome.resolve("launch"));
+        Files.createDirectories(storageHome.resolve("server-project"));
         sessionStore = new FileSessionStore(configuration, mapper, Clock.systemUTC());
         runtimeFactory =
                 new SessionRuntimeFactory(

@@ -24,6 +24,7 @@ import io.yupiik.ia.agent.core.permissions.PermissionService;
 import io.yupiik.ia.agent.core.question.UserFeedbackService;
 import io.yupiik.ia.agent.core.runtime.Cancellations;
 import io.yupiik.ia.agent.core.runtime.StatusReporter;
+import io.yupiik.ia.agent.core.sandbox.Sandbox;
 import io.yupiik.ia.agent.core.todo.TodoStore;
 import java.nio.file.Path;
 import java.util.Objects;
@@ -59,6 +60,7 @@ import java.util.function.BooleanSupplier;
  *                       determine availability.
  * @param toolRegistry   borrowed registry of the owning loop, including session tools; null only for standalone
  *                       contexts using the application's default registry. Never closed by delegated work.
+ * @param sandbox        required borrowed session boundary; descendants share approvals and revocations
  * @param subagentScope  immutable delegation ancestry and route ceiling; null for root or standalone contexts
  */
 public record ToolContext(
@@ -76,6 +78,7 @@ public record ToolContext(
         BooleanSupplier callCancelled,
         // required absolute normalized per-session working/project directory the tools resolve file paths against
         Path projectDir,
+        Sandbox sandbox,
         // the per-call tool ordinal (the TUI/UI card number) when a turn owns this call; -1 when the
         // context is not tied to a specific running tool call (standalone/btw invocations). Tools that
         // emit their own streaming fragments (e.g. BashTool's ToolStream) surface it so every fragment
@@ -104,6 +107,7 @@ public record ToolContext(
             final ChatSettings settings,
             final BooleanSupplier callCancelled,
             final Path projectDir,
+            final Sandbox sandbox,
             final long ordinal,
             final Set<String> allowedTools,
             final SubagentBudget subagentBudget,
@@ -122,6 +126,7 @@ public record ToolContext(
                 settings,
                 callCancelled,
                 projectDir,
+                sandbox,
                 ordinal,
                 allowedTools,
                 subagentBudget,
@@ -143,7 +148,8 @@ public record ToolContext(
             final BooleanSupplier cancelled,
             final ChatSettings settings,
             final BooleanSupplier callCancelled,
-            final Path projectDir) {
+            final Path projectDir,
+            final Sandbox sandbox) {
         this(
                 sessionId,
                 subagentId,
@@ -158,6 +164,7 @@ public record ToolContext(
                 settings,
                 callCancelled,
                 projectDir,
+                sandbox,
                 -1,
                 null,
                 null,
@@ -179,6 +186,7 @@ public record ToolContext(
             final ChatSettings settings,
             final BooleanSupplier callCancelled,
             final Path projectDir,
+            final Sandbox sandbox,
             final SubagentBudget subagentBudget) {
         this(
                 sessionId,
@@ -194,6 +202,7 @@ public record ToolContext(
                 settings,
                 callCancelled,
                 projectDir,
+                sandbox,
                 -1,
                 null,
                 subagentBudget,
@@ -202,6 +211,7 @@ public record ToolContext(
 
     public ToolContext {
         Objects.requireNonNull(projectDir, "workdir");
+        Objects.requireNonNull(sandbox, "sandbox");
         if (!projectDir.isAbsolute() || !projectDir.equals(projectDir.normalize())) {
             throw new IllegalArgumentException("workdir must be absolute and normalized: " + projectDir);
         }
@@ -217,7 +227,7 @@ public record ToolContext(
      * matching how a real session on a non-default project root forwards its {@code projectDir}
      * to every tool. Standalone tools exercise their per-session path resolution through this.
      */
-    public static ToolContext empty(final Path projectDir) {
+    public static ToolContext empty(final Path projectDir, final Sandbox sandbox) {
         return new ToolContext(
                 null,
                 null,
@@ -232,6 +242,7 @@ public record ToolContext(
                 null,
                 null,
                 projectDir,
+                sandbox,
                 -1,
                 null,
                 null,

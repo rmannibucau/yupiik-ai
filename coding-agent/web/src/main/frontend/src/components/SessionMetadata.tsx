@@ -8,6 +8,7 @@ export interface SessionMetadataProps {
   flavor?: string;
   provider?: string;
   permissionMode?: string;
+  sandboxEnabled?: boolean;
   modelCandidates?: string[];
   providerCandidates?: string[];
   onSetProject: (dir: string) => void;
@@ -17,10 +18,20 @@ export interface SessionMetadataProps {
 }
 
 export function SessionMetadata({
-  sessionId, project, gitBranch, model, flavor, provider, permissionMode,
+  sessionId, project, gitBranch, model, flavor, provider, permissionMode, sandboxEnabled,
   modelCandidates, providerCandidates, onSetProject, onSetModel, onSetProvider, onSetPermissions,
 }: SessionMetadataProps) {
   const id = useId();
+  const unattended = permissionMode === 'yolo' || permissionMode === 'full_yolo';
+  const permissionColor = permissionMode === 'full_yolo' || (permissionMode === 'yolo' && sandboxEnabled !== true)
+    ? 'var(--yca-yolo)'
+    : permissionMode === 'yolo'
+    ? 'var(--yca-warning)'
+    : permissionMode === 'auto_edit'
+    ? 'var(--yca-success)'
+    : permissionMode === 'ask'
+    ? 'var(--yca-plan)'
+    : 'var(--yca-muted)';
   const [dirDraft, setDirDraft] = useState(project ?? '');
   useEffect(() => {
     setDirDraft(project ?? '');
@@ -121,20 +132,16 @@ export function SessionMetadata({
             <option value="ask">ask</option>
             <option value="auto_edit">auto_edit</option>
             <option value="yolo">yolo</option>
+            <option value="full_yolo">full_yolo (not recommended)</option>
           </select>
           <span
             aria-hidden="true"
-            className="inline-block h-2 w-2 shrink-0 rounded-full"
+            className={unattended ? 'shrink-0 font-bold' : 'inline-block h-2 w-2 shrink-0 rounded-full'}
+            title={permissionMode === 'full_yolo' ? 'Sandbox bypassed - not recommended' : undefined}
             style={{
-              background: permissionMode === 'yolo'
-                ? 'var(--yca-yolo)'
-                : permissionMode === 'auto_edit'
-                ? 'var(--yca-success)'
-                : permissionMode === 'ask'
-                ? 'var(--yca-plan)'
-                : 'var(--yca-muted)',
+              ...(unattended ? { color: permissionColor } : { background: permissionColor }),
             }}
-          />
+          >{unattended ? '!' : null}</span>
         </dd>
       </div>
     </dl>

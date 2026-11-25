@@ -20,9 +20,11 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import io.yupiik.fusion.testing.Fusion;
+import io.yupiik.fusion.testing.FusionSupport;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
+import io.yupiik.ia.agent.core.configuration.ConfigurationTestModule;
 import io.yupiik.ia.agent.core.configuration.ProviderConfiguration;
-import io.yupiik.ia.agent.core.configuration.TestConfigs;
 import io.yupiik.ia.agent.core.llm.ApiFlavor;
 import io.yupiik.ia.agent.core.llm.Message;
 import io.yupiik.ia.agent.core.llm.ToolCall;
@@ -40,6 +42,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+@FusionSupport(modules = ConfigurationTestModule.class)
 class TurnNotificationReporterTest {
     @TempDir
     private static Path eventWorkdir;
@@ -215,10 +218,10 @@ class TurnNotificationReporterTest {
     }
 
     @Test
-    void emitTurnEndNotificationComposesTitleFromSessionSummary() {
+    void emitTurnEndNotificationComposesTitleFromSessionSummary(@Fusion final CodingAgentConfiguration configuration) {
         final var state = new TurnState();
         final var sent = new ArrayList<String>();
-        final var notification = new NotificationService(stubConfig(), null) {
+        final var notification = new NotificationService(configuration, null) {
             @Override
             public void onTurnEnd(
                     final String sessionId,
@@ -273,10 +276,6 @@ class TurnNotificationReporterTest {
                 eventWorkdir);
         reporter.emitTurnEndNotification("s1", List.of());
         // nothing to assert beyond no NPE
-    }
-
-    private static CodingAgentConfiguration stubConfig() {
-        return TestConfigs.codingAgent(Map.of("yca.storageHome", "/tmp"));
     }
 
     private static ProviderConfiguration provider() {

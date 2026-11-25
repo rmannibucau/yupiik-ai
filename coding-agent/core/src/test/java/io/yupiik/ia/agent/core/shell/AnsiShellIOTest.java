@@ -66,7 +66,11 @@ class AnsiShellIOTest {
         assertTrue(io.confirm("go?").toCompletableFuture().join());
         assertEquals(List.of("start", "end"), calls);
 
-        assertEquals(ApprovalGate.Result.ALLOW_ONCE, io.approvalGate().approve("title", "detail", "bash", Map.of()));
+        assertEquals(
+                ApprovalGate.Result.ALLOW_ONCE,
+                io.approvalGate()
+                        .approve(new ApprovalGate.Request(
+                                ApprovalGate.Origin.PERMISSION, "title", "detail", "bash", Map.of())));
         assertEquals(List.of("start", "end", "start", "end"), calls);
 
         assertThrows(
@@ -111,10 +115,22 @@ class AnsiShellIOTest {
                 new AnsiShellIO(scripted("y", "a", "", new PromptInterruptException()), new Symbols(true), () -> {});
         final var gate = io.approvalGate();
 
-        assertEquals(ApprovalGate.Result.ALLOW_ONCE, gate.approve("title", "detail", "bash", Map.of()));
-        assertEquals(ApprovalGate.Result.ALLOW_SESSION, gate.approve("title", "detail", "bash", Map.of()));
-        assertEquals(ApprovalGate.Result.DENY, gate.approve("title", "detail", "bash", Map.of()));
-        assertEquals(ApprovalGate.Result.DENY, gate.approve("title", "detail", "bash", Map.of()));
+        assertEquals(
+                ApprovalGate.Result.ALLOW_ONCE,
+                gate.approve(
+                        new ApprovalGate.Request(ApprovalGate.Origin.PERMISSION, "title", "detail", "bash", Map.of())));
+        assertEquals(
+                ApprovalGate.Result.ALLOW_SESSION,
+                gate.approve(
+                        new ApprovalGate.Request(ApprovalGate.Origin.PERMISSION, "title", "detail", "bash", Map.of())));
+        assertEquals(
+                ApprovalGate.Result.DENY,
+                gate.approve(
+                        new ApprovalGate.Request(ApprovalGate.Origin.PERMISSION, "title", "detail", "bash", Map.of())));
+        assertEquals(
+                ApprovalGate.Result.DENY,
+                gate.approve(
+                        new ApprovalGate.Request(ApprovalGate.Origin.PERMISSION, "title", "detail", "bash", Map.of())));
     }
 
     @Test

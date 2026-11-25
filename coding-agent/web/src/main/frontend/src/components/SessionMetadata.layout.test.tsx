@@ -30,6 +30,33 @@ function render() {
 }
 
 describe('sidebar metadata layout', () => {
+  it('dispatches full_yolo from the picker and updates the warning on sandbox state changes', () => {
+    const onSetPermissions = vi.fn();
+    const renderMode = (permissionMode: string, sandboxEnabled: boolean) => {
+      act(() => root.render(<SessionMetadata sessionId="s" permissionMode={permissionMode} sandboxEnabled={sandboxEnabled}
+        onSetProject={() => {}} onSetModel={() => {}} onSetProvider={() => {}} onSetPermissions={onSetPermissions} />));
+    };
+    renderMode('yolo', true);
+    const select = host.querySelector('select[title="Tool permission level for this session"]')! as HTMLSelectElement;
+    expect(select.nextElementSibling?.getAttribute('style')).toContain('color: var(--yca-warning)');
+    expect(select.nextElementSibling?.textContent).toBe('!');
+    renderMode('yolo', false);
+    expect(select.nextElementSibling?.getAttribute('style')).toContain('color: var(--yca-yolo)');
+    act(() => {
+      select.value = 'full_yolo';
+      select.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    expect(onSetPermissions).toHaveBeenCalledWith('full_yolo');
+    renderMode('full_yolo', true);
+    expect(select.value).toBe('full_yolo');
+    expect(select.nextElementSibling?.getAttribute('style')).toContain('color: var(--yca-yolo)');
+    expect(select.nextElementSibling?.textContent).toBe('!');
+    expect(select.selectedOptions[0].textContent).toContain('not recommended');
+    renderMode('ask', true);
+    expect(select.nextElementSibling?.textContent).toBe('');
+    expect(select.nextElementSibling?.getAttribute('style')).toContain('background: var(--yca-plan)');
+  });
+
   it('centers metadata labels and values and keeps the permission dot trailing', () => {
     render();
     expect(getComputedStyle(host.querySelector('.yca-metadata-row')!).alignItems).toBe('center');

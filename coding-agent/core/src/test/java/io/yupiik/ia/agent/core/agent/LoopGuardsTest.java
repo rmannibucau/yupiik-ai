@@ -18,7 +18,10 @@ package io.yupiik.ia.agent.core.agent;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import io.yupiik.fusion.testing.Fusion;
+import io.yupiik.fusion.testing.FusionSupport;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
+import io.yupiik.ia.agent.core.configuration.ConfigurationTestModule;
 import io.yupiik.ia.agent.core.configuration.InBandToolCallsMode;
 import io.yupiik.ia.agent.core.configuration.ModelTuningConfiguration;
 import io.yupiik.ia.agent.core.configuration.PlateauFeedbackMode;
@@ -26,7 +29,6 @@ import io.yupiik.ia.agent.core.configuration.ProviderConfiguration;
 import io.yupiik.ia.agent.core.configuration.ProviderModelConfiguration;
 import io.yupiik.ia.agent.core.configuration.ReasoningFormatMode;
 import io.yupiik.ia.agent.core.configuration.RepairToolCallArgumentsMode;
-import io.yupiik.ia.agent.core.configuration.TestConfigs;
 import io.yupiik.ia.agent.core.llm.ApiFlavor;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import java.util.List;
@@ -34,10 +36,10 @@ import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
 
+@FusionSupport(modules = LoopGuardsTest.TestModule.class)
 class LoopGuardsTest {
     @Test
-    void capBounding() {
-        final var config = providerDefaultConfig();
+    void capBounding(@Fusion final CodingAgentConfiguration config) {
         final var provider = new ProviderManager(config, null);
         final var cap = new AtomicReference<Integer>(7);
         final var guards = new LoopGuards(provider, config, cap::get);
@@ -51,8 +53,7 @@ class LoopGuardsTest {
     }
 
     @Test
-    void negativeOverrideMeansUnboundedOnlyWithoutCap() {
-        final var config = providerDefaultConfig();
+    void negativeOverrideMeansUnboundedOnlyWithoutCap(@Fusion final CodingAgentConfiguration config) {
         final var providerOverride = new ProviderManager(config, null) {
             @Override
             public int maxIterationsOverride(final ProviderConfiguration provider, final String model) {
@@ -67,8 +68,7 @@ class LoopGuardsTest {
     }
 
     @Test
-    void capWinsOverNegativeOverride() {
-        final var config = providerDefaultConfig();
+    void capWinsOverNegativeOverride(@Fusion final CodingAgentConfiguration config) {
         final var provider = new ProviderManager(config, null) {
             @Override
             public int maxIterationsOverride(final ProviderConfiguration provider, final String model) {
@@ -82,9 +82,8 @@ class LoopGuardsTest {
     }
 
     @Test
-    void cascadePrecedencePerModelThenProviderThenGlobal() {
-        final var config = providerDefaultConfig();
-        final var provider = providerManager(List.of(providerRecord()));
+    void cascadePrecedencePerModelThenProviderThenGlobal(@Fusion final CodingAgentConfiguration config) {
+        final var provider = providerManager(config, List.of(providerRecord()));
         final var guards = new LoopGuards(provider, config, () -> null);
         final var perModel = new ProviderManager.ResolvedModel(providerRecord(), "exact-red");
 
@@ -104,10 +103,10 @@ class LoopGuardsTest {
         assertEquals(2, guards.resolvedRepeatSuccessThreshold(fromTuning));
 
         // a provider with no tuning at all falls back to the global default
-        final var globalOnly = new ProviderManager(providerDefaultConfig(), null);
+        final var globalOnly = new ProviderManager(config, null);
         final var globalResolved =
                 new ProviderManager.ResolvedModel(globalOnly.providers().get(0), "gpt-9");
-        final var globalGuards = new LoopGuards(globalOnly, providerDefaultConfig(), () -> null);
+        final var globalGuards = new LoopGuards(globalOnly, config, () -> null);
         assertEquals(99, globalGuards.resolvedMaxIterations(globalResolved));
         assertEquals(4, globalGuards.resolvedPlateauRounds(globalResolved));
         assertEquals(6, globalGuards.resolvedModelExplorationNudgeRounds(globalResolved));
@@ -116,10 +115,9 @@ class LoopGuardsTest {
     }
 
     @Test
-    void zeroPerModelFacetFallsThrough() {
+    void zeroPerModelFacetFallsThrough(@Fusion final CodingAgentConfiguration config) {
         // a per-model/provider 0 must not silently zero the resolved value: it falls back down the
         // chain (negative keeps, 0 falls through) so only an explicit global 0 disables the guard
-        final var config = providerDefaultConfig();
         final var provider = new ProviderManager(config, null) {
             @Override
             public int plateauRounds(final ProviderConfiguration provider, final String model) {
@@ -132,8 +130,8 @@ class LoopGuardsTest {
     }
 
     @Test
-    void nullResolvedFallsBackToGlobal() {
-        final var guards = new LoopGuards(null, providerDefaultConfig(), () -> null);
+    void nullResolvedFallsBackToGlobal(@Fusion final CodingAgentConfiguration config) {
+        final var guards = new LoopGuards(null, config, () -> null);
         assertEquals(99, guards.resolvedMaxIterations(null));
         assertEquals(4, guards.resolvedPlateauRounds(null));
         assertEquals(6, guards.resolvedModelExplorationNudgeRounds(null));
@@ -150,18 +148,10 @@ class LoopGuardsTest {
         assertEquals(0, LoopGuards.plateauFeedbackNudgeAt(PlateauFeedbackMode.NUDGE_2, 2));
     }
 
-    private static CodingAgentConfiguration providerDefaultConfig() {
-        return TestConfigs.codingAgent(Map.of(
-                "yca.llm.maxIterations", "99",
-                "yca.llm.plateauRounds", "4",
-                "yca.llm.explorationNudgeRounds", "6",
-                "yca.llm.plateauFeedback", "none",
-                "yca.tools.repeatSuccessThreshold", "3"));
-    }
-
     /** A provider manager whose provider list is the hand-built records (real resolution logic). */
-    private static ProviderManager providerManager(final List<ProviderConfiguration> providers) {
-        return new ProviderManager(providerDefaultConfig(), null) {
+    private static ProviderManager providerManager(
+            final CodingAgentConfiguration config, final List<ProviderConfiguration> providers) {
+        return new ProviderManager(config, null) {
             @Override
             public List<ProviderConfiguration> providers() {
                 return providers;
@@ -231,5 +221,16 @@ class LoopGuardsTest {
                 null,
                 null,
                 null);
+    }
+
+    public static class TestModule extends ConfigurationTestModule {
+        public TestModule() {
+            super(Map.of(
+                    "yca.llm.maxIterations", "99",
+                    "yca.llm.plateauRounds", "4",
+                    "yca.llm.explorationNudgeRounds", "6",
+                    "yca.llm.plateauFeedback", "none",
+                    "yca.tools.repeatSuccessThreshold", "3"));
+        }
     }
 }

@@ -20,8 +20,10 @@ import static org.junit.jupiter.api.Assertions.*;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import io.yupiik.fusion.json.JsonMapper;
-import io.yupiik.ia.agent.core.configuration.ConfigurationLoader;
+import io.yupiik.fusion.testing.Fusion;
+import io.yupiik.fusion.testing.FusionSupport;
 import io.yupiik.ia.agent.github.client.GitHubClient;
+import io.yupiik.ia.agent.github.command.PollCommand;
 import io.yupiik.ia.agent.github.configuration.FixConfiguration;
 import io.yupiik.ia.agent.github.configuration.GithubBotConfiguration;
 import io.yupiik.ia.agent.github.configuration.PollOptions;
@@ -29,8 +31,10 @@ import io.yupiik.ia.agent.github.model.TaskKind;
 import io.yupiik.ia.agent.github.store.TaskStore;
 import io.yupiik.ia.agent.github.support.BotJsonMapper;
 import io.yupiik.ia.agent.github.support.BotTestConfiguration;
+import io.yupiik.ia.agent.github.support.GithubConfigurationTestModule;
 import io.yupiik.ia.agent.github.support.TaskFixtures;
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.net.InetSocketAddress;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
@@ -53,10 +57,24 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.IntStream;
+import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.api.parallel.Execution;
+import org.junit.jupiter.api.parallel.ExecutionMode;
 
+@Execution(ExecutionMode.SAME_THREAD) // The class owns one stable configuration and its fixture paths/transport.
+@FusionSupport(modules = ReviewSummaryPollerTest.Source.class)
 class ReviewSummaryPollerTest {
+    @Fusion
+    private GithubBotConfiguration injectedConfiguration;
+
+    @Fusion
+    private PollCommand.Options injectedOptions;
+
+    private static HttpServer apiServer;
+    private static ExecutorService apiThreads;
+
     private static final Instant NOW = Instant.parse("2026-11-11T12:00:00Z");
 
     @TempDir
@@ -715,7 +733,6 @@ class ReviewSummaryPollerTest {
     private final class Fixture implements AutoCloseable {
         private final JsonMapper json = BotJsonMapper.create(key -> Optional.empty());
         private final HttpServer server;
-        private final ExecutorService serverThreads = Executors.newVirtualThreadPerTaskExecutor();
         private final AtomicInteger activeReviews = new AtomicInteger();
         private final AtomicInteger maximumReviews = new AtomicInteger();
         private final AtomicBoolean overlapTimedOut = new AtomicBoolean();
@@ -740,10 +757,8 @@ class ReviewSummaryPollerTest {
         private String resolvedLogin = "human";
 
         private Fixture() throws IOException {
-            server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+            server = apiServer;
             server.createContext("/", this::respond);
-            server.setExecutor(serverThreads);
-            server.start();
             github = new GitHubClient(URI.create(api()), json, () -> "test", BotTestConfiguration.CLOCK);
         }
 
@@ -757,31 +772,32 @@ class ReviewSummaryPollerTest {
         }
 
         private Settings conf(final Map<String, Object> overrides) {
-            final var values = new LinkedHashMap<String, String>();
-            values.put("github.home", home.toString());
-            values.put("github.api", api());
-            values.put("github.login", "bot");
-            values.put("github.authorization.userIds", "42");
-            values.put("github.authorization.allowRepositoryWriters", "false");
-            values.put("github.repositories.explicit", "owner/repo");
-            values.put("poll.pageBudget", "1");
-            values.put("poll.reviews.enabled", "true");
-            overrides.forEach((key, value) -> values.put(
-                    switch (key) {
-                        case "userIds", "teams", "allowRepositoryWriters" -> "github.authorization." + key;
-                        case "since", "pageBudget", "parallelism" -> "poll." + key;
-                        case "pollReviews" -> "poll.reviews.enabled";
-                        default -> throw new IllegalArgumentException("Unsupported setting: " + key);
-                    },
-                    value.toString()));
+            final var baseline = injectedConfiguration;
+            final var authorization = baseline.authorization();
+            final var poll = injectedOptions.poll();
             return new Settings(
-                    ConfigurationLoader.load(
-                            io.yupiik.ia.agent.github.configuration.GithubBotConfiguration.class,
-                            key -> Optional.ofNullable(values.get(key))),
-                    ConfigurationLoader.load(
-                                    io.yupiik.ia.agent.github.command.PollCommand.Options.class,
-                                    key -> Optional.ofNullable(values.get(key)))
-                            .poll());
+                    new GithubBotConfiguration(
+                            home.toString(),
+                            api(),
+                            baseline.login(),
+                            baseline.requestIntervalMillis(),
+                            baseline.auth(),
+                            new GithubBotConfiguration.Authorization(
+                                    (String) overrides.getOrDefault("userIds", authorization.userIds()),
+                                    (String) overrides.getOrDefault("teams", authorization.teams()),
+                                    (boolean) overrides.getOrDefault(
+                                            "allowRepositoryWriters", authorization.allowRepositoryWriters()),
+                                    authorization.permissionsCacheTtlSeconds(),
+                                    authorization.permissionsCacheMaxEntries()),
+                            baseline.repositories()),
+                    new PollOptions(
+                            (String) overrides.getOrDefault("since", poll.since()),
+                            ((Number) overrides.getOrDefault("pageBudget", poll.pageBudget())).intValue(),
+                            new PollOptions.Reviews((boolean) overrides.getOrDefault(
+                                    "pollReviews", poll.reviews().enabled())),
+                            poll.discussions(),
+                            ((Number) overrides.getOrDefault("parallelism", poll.parallelism())).intValue(),
+                            poll.search()));
         }
 
         private void respond(final HttpExchange exchange) throws IOException {
@@ -929,9 +945,50 @@ class ReviewSummaryPollerTest {
         @Override
         public void close() {
             github.close();
-            server.stop(0);
-            serverThreads.close();
+            server.removeContext("/");
             json.close();
+        }
+    }
+
+    @AfterAll
+    static void stopApiServer() {
+        if (apiServer != null) {
+            apiServer.stop(0);
+        }
+        if (apiThreads != null) {
+            apiThreads.close();
+        }
+    }
+
+    public static class Source extends GithubConfigurationTestModule {
+        public Source() {
+            super(settings());
+        }
+
+        private static Map<String, String> settings() {
+            try {
+                apiServer = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+                apiThreads = Executors.newVirtualThreadPerTaskExecutor();
+                apiServer.setExecutor(apiThreads);
+                apiServer.start();
+            } catch (final IOException e) {
+                throw new UncheckedIOException(e);
+            }
+            return Map.of(
+                    "github.api",
+                    "http://127.0.0.1:" + apiServer.getAddress().getPort(),
+                    "github.login",
+                    "bot",
+                    "github.authorization.userIds",
+                    "42",
+                    "github.authorization.allowRepositoryWriters",
+                    "false",
+                    "github.repositories.explicit",
+                    "owner/repo",
+                    "poll.pageBudget",
+                    "1",
+                    "poll.reviews.enabled",
+                    "true");
         }
     }
 }

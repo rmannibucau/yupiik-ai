@@ -17,111 +17,336 @@ package io.yupiik.ia.agent.github.configuration;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-import io.yupiik.ia.agent.bot.runtime.configuration.ExecutorConfiguration;
-import io.yupiik.ia.agent.core.configuration.ConfigurationLoader;
-import java.util.HashMap;
-import java.util.List;
+import io.yupiik.fusion.framework.api.RuntimeContainer;
+import io.yupiik.fusion.testing.Fusion;
+import io.yupiik.fusion.testing.FusionSupport;
+import io.yupiik.ia.agent.github.support.GithubConfigurationTestModule;
 import java.util.Map;
-import java.util.Optional;
+import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 
 class GithubExecutorConfigurationTest {
-    @Test
-    void absentOptionalGatewaysStayAbsentAndKubernetesUsesUnprivilegedDefaults() {
-        final var executor = configuration(Map.of());
-        assertNull(executor.docker().egress());
-        assertNull(executor.docker().services());
-        assertEquals(10001L, executor.kubernetes().uid());
-        assertEquals(10001L, executor.kubernetes().gid());
-    }
-
-    @Test
-    void containerLogsRemainEnabledByDefaultAndCanBeExplicitlyDisabled() {
-        assertFalse(configuration(Map.of()).docker().disableContainerLogs());
-        assertFalse(configuration(Map.of("docker.disableContainerLogs", "false"))
-                .docker()
-                .disableContainerLogs());
-        assertTrue(configuration(Map.of("docker.disableContainerLogs", "true"))
-                .docker()
-                .disableContainerLogs());
-    }
-
-    @Test
-    void configuredEgressDefaultsToEnabled() {
-        final var egress = configuration(Map.of("docker.egress.image", "trusted-egress"))
-                .docker()
-                .egress();
-        assertNotNull(egress);
-        assertTrue(egress.enabled());
-    }
-
-    @Test
-    void servicesDependencyEgressDefaultsToEnabled() {
-        final var egress = configuration(services()).docker().services().dependencyEgress();
-        assertTrue(egress.enabled());
-        assertEquals("trusted-services", egress.image());
-        assertTrue(egress.allowedHosts().contains("repo.maven.apache.org"));
-    }
-
-    @Test
-    void explicitFalseIsNotReplacedByTheEgressDefault() {
-        final var egress = configuration(Map.of(
-                        "docker.egress.image", "trusted-egress",
-                        "docker.egress.enabled", "false"))
-                .docker()
-                .egress();
-        assertNotNull(egress);
-        assertFalse(egress.enabled());
-
-        final var values = new HashMap<>(services());
-        values.put("docker.services.dependencyEgress.enabled", "false");
-        assertFalse(configuration(values).docker().services().dependencyEgress().enabled());
-    }
-
-    @Test
-    void explicitRootIdentifiersAreNotReplacedByUnprivilegedDefaults() {
-        final var kubernetes = configuration(Map.of("kubernetes.uid", "0", "kubernetes.gid", "0"))
-                .kubernetes();
-        assertEquals(0L, kubernetes.uid());
-        assertEquals(0L, kubernetes.gid());
-    }
-
-    @Test
-    void malformedIdentifiersStillFailBinding() {
-        for (final var property : List.of("kubernetes.uid", "kubernetes.gid")) {
-            for (final var value : List.of("not-a-number", "9223372036854775808")) {
-                assertThrows(NumberFormatException.class, () -> configuration(Map.of(property, value)));
-            }
+    @Nested
+    @FusionSupport(modules = DefaultsModule.class)
+    class Defaults {
+        @Test
+        void bindsConfiguration(@Fusion final GithubExecutorConfiguration root) {
+            final var executor = root.shared();
+            assertNull(executor.docker().egress());
+            assertNull(executor.docker().services());
+            assertEquals(10001L, executor.kubernetes().uid());
+            assertEquals(10001L, executor.kubernetes().gid());
+            assertFalse(executor.docker().disableContainerLogs());
         }
     }
 
-    @Test
-    void malformedServicesStillFailValidation() {
-        assertThrows(
-                IllegalArgumentException.class,
-                () -> configuration(Map.of("docker.services.image", "trusted-services")));
-        for (final var target : List.of("https://10.0.0.1:8080", "http://provider.example:8080")) {
-            final var values = new HashMap<>(services());
-            values.put("docker.services.providerTarget", target);
-            assertThrows(IllegalArgumentException.class, () -> configuration(values));
+    public static class DefaultsModule extends GithubConfigurationTestModule {
+        public DefaultsModule() {
+            super(Map.of());
         }
-        final var conflicting = new HashMap<>(services());
-        conflicting.put("docker.egress.image", "trusted-egress");
-        assertThrows(IllegalArgumentException.class, () -> configuration(conflicting));
     }
 
-    private ExecutorConfiguration configuration(final Map<String, String> values) {
-        return ConfigurationLoader.load(
-                        GithubExecutorConfiguration.class,
-                        key -> Optional.ofNullable(values.get(key.substring("github.executor.".length()))))
-                .shared();
+    @Nested
+    @FusionSupport(modules = ContainerLogsEnabledModule.class)
+    class ContainerLogsEnabled {
+        @Test
+        void bindsConfiguration(@Fusion final GithubExecutorConfiguration root) {
+            final var executor = root.shared();
+            assertEquals(false, executor.docker().disableContainerLogs());
+        }
     }
 
-    private Map<String, String> services() {
-        return Map.of(
-                "docker.services.image", "trusted-services",
-                "docker.services.controlNetwork", "trusted-control",
-                "docker.services.keyStore", "/private/services.p12",
-                "docker.services.providerTarget", "http://10.0.0.1:8080/v1");
+    public static class ContainerLogsEnabledModule extends GithubConfigurationTestModule {
+        public ContainerLogsEnabledModule() {
+            super(Map.ofEntries(Map.entry("github.executor.docker.disableContainerLogs", "false")));
+        }
+    }
+
+    @Nested
+    @FusionSupport(modules = ContainerLogsDisabledModule.class)
+    class ContainerLogsDisabled {
+        @Test
+        void bindsConfiguration(@Fusion final GithubExecutorConfiguration root) {
+            final var executor = root.shared();
+            assertEquals(true, executor.docker().disableContainerLogs());
+        }
+    }
+
+    public static class ContainerLogsDisabledModule extends GithubConfigurationTestModule {
+        public ContainerLogsDisabledModule() {
+            super(Map.ofEntries(Map.entry("github.executor.docker.disableContainerLogs", "true")));
+        }
+    }
+
+    @Nested
+    @FusionSupport(modules = EgressDefaultModule.class)
+    class EgressDefault {
+        @Test
+        void bindsConfiguration(@Fusion final GithubExecutorConfiguration root) {
+            final var executor = root.shared();
+            assertNotNull(executor.docker().egress());
+            assertTrue(executor.docker().egress().enabled());
+        }
+    }
+
+    public static class EgressDefaultModule extends GithubConfigurationTestModule {
+        public EgressDefaultModule() {
+            super(Map.ofEntries(Map.entry("github.executor.docker.egress.image", "trusted-egress")));
+        }
+    }
+
+    @Nested
+    @FusionSupport(modules = ServicesEgressDefaultModule.class)
+    class ServicesEgressDefault {
+        @Test
+        void bindsConfiguration(@Fusion final GithubExecutorConfiguration root) {
+            final var executor = root.shared();
+            final var egress = executor.docker().services().dependencyEgress();
+            assertTrue(egress.enabled());
+            assertEquals("trusted-services", egress.image());
+            assertTrue(egress.allowedHosts().contains("repo.maven.apache.org"));
+        }
+    }
+
+    public static class ServicesEgressDefaultModule extends GithubConfigurationTestModule {
+        public ServicesEgressDefaultModule() {
+            super(Map.ofEntries(
+                    Map.entry("github.executor.docker.services.image", "trusted-services"),
+                    Map.entry("github.executor.docker.services.controlNetwork", "trusted-control"),
+                    Map.entry("github.executor.docker.services.keyStore", "/private/services.p12"),
+                    Map.entry("github.executor.docker.services.providerTarget", "http://10.0.0.1:8080/v1")));
+        }
+    }
+
+    @Nested
+    @FusionSupport(modules = EgressDisabledModule.class)
+    class EgressDisabled {
+        @Test
+        void bindsConfiguration(@Fusion final GithubExecutorConfiguration root) {
+            final var executor = root.shared();
+            assertNotNull(executor.docker().egress());
+            assertFalse(executor.docker().egress().enabled());
+        }
+    }
+
+    public static class EgressDisabledModule extends GithubConfigurationTestModule {
+        public EgressDisabledModule() {
+            super(Map.ofEntries(
+                    Map.entry("github.executor.docker.egress.image", "trusted-egress"),
+                    Map.entry("github.executor.docker.egress.enabled", "false")));
+        }
+    }
+
+    @Nested
+    @FusionSupport(modules = ServicesEgressDisabledModule.class)
+    class ServicesEgressDisabled {
+        @Test
+        void bindsConfiguration(@Fusion final GithubExecutorConfiguration root) {
+            final var executor = root.shared();
+            assertFalse(executor.docker().services().dependencyEgress().enabled());
+        }
+    }
+
+    public static class ServicesEgressDisabledModule extends GithubConfigurationTestModule {
+        public ServicesEgressDisabledModule() {
+            super(Map.ofEntries(
+                    Map.entry("github.executor.docker.services.image", "trusted-services"),
+                    Map.entry("github.executor.docker.services.controlNetwork", "trusted-control"),
+                    Map.entry("github.executor.docker.services.keyStore", "/private/services.p12"),
+                    Map.entry("github.executor.docker.services.providerTarget", "http://10.0.0.1:8080/v1"),
+                    Map.entry("github.executor.docker.services.dependencyEgress.enabled", "false")));
+        }
+    }
+
+    @Nested
+    @FusionSupport(modules = RootIdentifiersModule.class)
+    class RootIdentifiers {
+        @Test
+        void bindsConfiguration(@Fusion final GithubExecutorConfiguration root) {
+            final var executor = root.shared();
+            assertEquals(0L, executor.kubernetes().uid());
+            assertEquals(0L, executor.kubernetes().gid());
+        }
+    }
+
+    public static class RootIdentifiersModule extends GithubConfigurationTestModule {
+        public RootIdentifiersModule() {
+            super(Map.ofEntries(
+                    Map.entry("github.executor.kubernetes.uid", "0"),
+                    Map.entry("github.executor.kubernetes.gid", "0")));
+        }
+    }
+
+    @Nested
+    @FusionSupport(modules = NonNumericUidModule.class)
+    class NonNumericUid {
+        @Test
+        void bindsConfiguration(@Fusion final RuntimeContainer container) {
+            assertThrows(NumberFormatException.class, () -> {
+                try (final var ignored = container.lookup(GithubExecutorConfiguration.class)) {
+                    fail("Invalid configuration unexpectedly bound "
+                            + ignored.instance().getClass().getSimpleName());
+                }
+            });
+        }
+    }
+
+    public static class NonNumericUidModule extends GithubConfigurationTestModule {
+        public NonNumericUidModule() {
+            super(Map.ofEntries(Map.entry("github.executor.kubernetes.uid", "not-a-number")));
+        }
+    }
+
+    @Nested
+    @FusionSupport(modules = OverflowUidModule.class)
+    class OverflowUid {
+        @Test
+        void bindsConfiguration(@Fusion final RuntimeContainer container) {
+            assertThrows(NumberFormatException.class, () -> {
+                try (final var ignored = container.lookup(GithubExecutorConfiguration.class)) {
+                    fail("Invalid configuration unexpectedly bound "
+                            + ignored.instance().getClass().getSimpleName());
+                }
+            });
+        }
+    }
+
+    public static class OverflowUidModule extends GithubConfigurationTestModule {
+        public OverflowUidModule() {
+            super(Map.ofEntries(Map.entry("github.executor.kubernetes.uid", "9223372036854775808")));
+        }
+    }
+
+    @Nested
+    @FusionSupport(modules = NonNumericGidModule.class)
+    class NonNumericGid {
+        @Test
+        void bindsConfiguration(@Fusion final RuntimeContainer container) {
+            assertThrows(NumberFormatException.class, () -> {
+                try (final var ignored = container.lookup(GithubExecutorConfiguration.class)) {
+                    fail("Invalid configuration unexpectedly bound "
+                            + ignored.instance().getClass().getSimpleName());
+                }
+            });
+        }
+    }
+
+    public static class NonNumericGidModule extends GithubConfigurationTestModule {
+        public NonNumericGidModule() {
+            super(Map.ofEntries(Map.entry("github.executor.kubernetes.gid", "not-a-number")));
+        }
+    }
+
+    @Nested
+    @FusionSupport(modules = OverflowGidModule.class)
+    class OverflowGid {
+        @Test
+        void bindsConfiguration(@Fusion final RuntimeContainer container) {
+            assertThrows(NumberFormatException.class, () -> {
+                try (final var ignored = container.lookup(GithubExecutorConfiguration.class)) {
+                    fail("Invalid configuration unexpectedly bound "
+                            + ignored.instance().getClass().getSimpleName());
+                }
+            });
+        }
+    }
+
+    public static class OverflowGidModule extends GithubConfigurationTestModule {
+        public OverflowGidModule() {
+            super(Map.ofEntries(Map.entry("github.executor.kubernetes.gid", "9223372036854775808")));
+        }
+    }
+
+    @Nested
+    @FusionSupport(modules = IncompleteServicesModule.class)
+    class IncompleteServices {
+        @Test
+        void bindsConfiguration(@Fusion final RuntimeContainer container) {
+            assertThrows(IllegalArgumentException.class, () -> {
+                try (final var ignored = container.lookup(GithubExecutorConfiguration.class)) {
+                    fail("Invalid configuration unexpectedly bound "
+                            + ignored.instance().getClass().getSimpleName());
+                }
+            });
+        }
+    }
+
+    public static class IncompleteServicesModule extends GithubConfigurationTestModule {
+        public IncompleteServicesModule() {
+            super(Map.ofEntries(Map.entry("github.executor.docker.services.image", "trusted-services")));
+        }
+    }
+
+    @Nested
+    @FusionSupport(modules = InvalidProviderHttpsModule.class)
+    class InvalidProviderHttps {
+        @Test
+        void bindsConfiguration(@Fusion final RuntimeContainer container) {
+            assertThrows(IllegalArgumentException.class, () -> {
+                try (final var ignored = container.lookup(GithubExecutorConfiguration.class)) {
+                    fail("Invalid configuration unexpectedly bound "
+                            + ignored.instance().getClass().getSimpleName());
+                }
+            });
+        }
+    }
+
+    public static class InvalidProviderHttpsModule extends GithubConfigurationTestModule {
+        public InvalidProviderHttpsModule() {
+            super(Map.ofEntries(
+                    Map.entry("github.executor.docker.services.image", "trusted-services"),
+                    Map.entry("github.executor.docker.services.controlNetwork", "trusted-control"),
+                    Map.entry("github.executor.docker.services.keyStore", "/private/services.p12"),
+                    Map.entry("github.executor.docker.services.providerTarget", "https://10.0.0.1:8080")));
+        }
+    }
+
+    @Nested
+    @FusionSupport(modules = InvalidProviderHostnameModule.class)
+    class InvalidProviderHostname {
+        @Test
+        void bindsConfiguration(@Fusion final RuntimeContainer container) {
+            assertThrows(IllegalArgumentException.class, () -> {
+                try (final var ignored = container.lookup(GithubExecutorConfiguration.class)) {
+                    fail("Invalid configuration unexpectedly bound "
+                            + ignored.instance().getClass().getSimpleName());
+                }
+            });
+        }
+    }
+
+    public static class InvalidProviderHostnameModule extends GithubConfigurationTestModule {
+        public InvalidProviderHostnameModule() {
+            super(Map.ofEntries(
+                    Map.entry("github.executor.docker.services.image", "trusted-services"),
+                    Map.entry("github.executor.docker.services.controlNetwork", "trusted-control"),
+                    Map.entry("github.executor.docker.services.keyStore", "/private/services.p12"),
+                    Map.entry("github.executor.docker.services.providerTarget", "http://provider.example:8080")));
+        }
+    }
+
+    @Nested
+    @FusionSupport(modules = ConflictingGatewaysModule.class)
+    class ConflictingGateways {
+        @Test
+        void bindsConfiguration(@Fusion final RuntimeContainer container) {
+            assertThrows(IllegalArgumentException.class, () -> {
+                try (final var ignored = container.lookup(GithubExecutorConfiguration.class)) {
+                    fail("Invalid configuration unexpectedly bound "
+                            + ignored.instance().getClass().getSimpleName());
+                }
+            });
+        }
+    }
+
+    public static class ConflictingGatewaysModule extends GithubConfigurationTestModule {
+        public ConflictingGatewaysModule() {
+            super(Map.ofEntries(
+                    Map.entry("github.executor.docker.services.image", "trusted-services"),
+                    Map.entry("github.executor.docker.services.controlNetwork", "trusted-control"),
+                    Map.entry("github.executor.docker.services.keyStore", "/private/services.p12"),
+                    Map.entry("github.executor.docker.services.providerTarget", "http://10.0.0.1:8080/v1"),
+                    Map.entry("github.executor.docker.egress.image", "trusted-egress")));
+        }
     }
 }

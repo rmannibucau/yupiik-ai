@@ -18,4 +18,6 @@ The generated xref:../tools.adoc[Tools reference] lists every tool's description
 It is generated from the running binary.
 
 Availability depends on configuration, the active mode and the agent profile.
+Sandboxed sessions also require an adapted implementation or integration trust; some tools listed in the reference are blocked under sandbox enforcement.
+MCP servers are trusted by default, not confined; see xref:../sandboxing/overview.adoc#_capability_approval_and_integration_limits[integration limits].
 See xref:permissions.adoc[Permission modes] before enabling unattended tool execution.

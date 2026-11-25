@@ -19,15 +19,25 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import io.yupiik.fusion.testing.Fusion;
+import io.yupiik.fusion.testing.FusionSupport;
+import io.yupiik.ia.agent.core.configuration.ConfigurationTestModule;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+@FusionSupport(modules = ConfigurationTestModule.class)
 class MavenOutputProcessorTest {
-    private final MavenOutputProcessor processor = new MavenOutputProcessor();
+    private MavenOutputProcessor processor;
+
+    @BeforeEach
+    void init(@Fusion final MavenOutputProcessor processor) {
+        this.processor = processor;
+    }
 
     @Test
     void supportsMavenOnly() {

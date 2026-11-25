@@ -25,10 +25,17 @@ import com.sun.net.httpserver.HttpServer;
 import io.yupiik.fusion.httpclient.core.ExtendedHttpClient;
 import io.yupiik.fusion.httpclient.core.ExtendedHttpClientConfiguration;
 import io.yupiik.fusion.json.JsonMapper;
-import io.yupiik.ia.agent.core.configuration.TestConfigs;
+import io.yupiik.fusion.testing.Fusion;
+import io.yupiik.fusion.testing.FusionSupport;
+import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
+import io.yupiik.ia.agent.core.configuration.ConfigurationTestModule;
+import io.yupiik.ia.agent.core.configuration.ToolsConfiguration;
+import io.yupiik.ia.agent.core.configuration.WebSearchConfiguration;
 import io.yupiik.ia.agent.core.configuration.WebSearchProvider;
+import io.yupiik.ia.agent.core.configuration.WebSearchProviderConfiguration;
 import io.yupiik.ia.agent.core.mcp.McpManager;
 import io.yupiik.ia.agent.core.mcp.WebSearchManager;
+import io.yupiik.ia.agent.core.sandbox.DisabledSandbox;
 import io.yupiik.ia.agent.core.tools.ToolContext;
 import io.yupiik.ia.agent.core.tools.ToolRegistry;
 import io.yupiik.ia.agent.test.TestJsonMapper;
@@ -38,11 +45,11 @@ import java.net.InetSocketAddress;
 import java.net.http.HttpClient;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.api.io.TempDir;
@@ -51,9 +58,6 @@ import org.junit.jupiter.api.io.TempDir;
 class WebSearchToolTest {
 
     private static final String NO_RESULTS = "No search results found. Please try a different query.";
-
-    @TempDir
-    Path tempDir;
 
     private JsonMapper mapper;
     private HttpClient delegate;
@@ -77,122 +81,212 @@ class WebSearchToolTest {
         delegate = null;
     }
 
-    @Test
-    void formatsResultsWithPublishDate() throws Exception {
-        try (final var mock = Mock.start(mapper).payload(parallelPayload())) {
-            final var config = TestConfigs.codingAgent(singleProvider(WebSearchProvider.PARALLEL, mock.url()));
-            final var tool = new WebSearchTool(new WebSearchManager(mapper, config, client), config);
+    @Nested
+    @FusionSupport(modules = FormatsResultsWithPublishDateScenarioModule.class)
+    class FormatsResultsWithPublishDateScenario {
+        @TempDir
+        static Path tempDir;
+
+        @Test
+        void formatsResultsWithPublishDate(@Fusion final CodingAgentConfiguration config) throws Exception {
+            try (final var mock = Mock.start(mapper).payload(parallelPayload())) {
+                final var configured = singleProvider(config, WebSearchProvider.PARALLEL, mock.url());
+                final var tool =
+                        new WebSearchTool(new WebSearchManager(mapper, configured, client), configured, mapper);
+                final var result = tool.execute(
+                        Map.of("query", "apache maven build tool"),
+                        ToolContext.empty(config.resolveWorkingDir(), new DisabledSandbox(config.resolveWorkingDir())));
+                assertTrue(result.success(), result.output());
+                assertTrue(result.output().contains("- First (https://example.com/a, published 2026-06-30)"));
+                assertTrue(result.output().contains("\n  part one\n\n  part two"));
+                assertTrue(result.output().contains("- Second (https://example.com/b)"));
+            }
+        }
+    }
+
+    @Nested
+    @FusionSupport(modules = NoResultsMessageOnEmptyAnswerScenarioModule.class)
+    class NoResultsMessageOnEmptyAnswerScenario {
+        @TempDir
+        static Path tempDir;
+
+        @Test
+        void noResultsMessageOnEmptyAnswer(@Fusion final CodingAgentConfiguration config) throws Exception {
+            try (final var mock = Mock.start(mapper).payload("{\"search_id\":\"s1\",\"results\":[]}")) {
+                final var configured = singleProvider(config, WebSearchProvider.PARALLEL, mock.url());
+                final var tool =
+                        new WebSearchTool(new WebSearchManager(mapper, configured, client), configured, mapper);
+                final var result = tool.execute(
+                        Map.of("query", "apache maven build tool"),
+                        ToolContext.empty(config.resolveWorkingDir(), new DisabledSandbox(config.resolveWorkingDir())));
+                assertTrue(result.success(), result.output());
+                assertEquals(NO_RESULTS, result.output());
+            }
+        }
+    }
+
+    @Nested
+    @FusionSupport(modules = QueryIsRequiredScenarioModule.class)
+    class QueryIsRequiredScenario {
+        @TempDir
+        static Path tempDir;
+
+        @Test
+        void queryIsRequired(@Fusion final CodingAgentConfiguration config) {
+            final var tool = new WebSearchTool(new WebSearchManager(mapper, config, client), config, mapper);
             final var result = tool.execute(
-                    Map.of("query", "apache maven build tool"), ToolContext.empty(config.resolveWorkingDir()));
-            assertTrue(result.success());
-            assertTrue(result.output().contains("- First (https://example.com/a, published 2026-06-30)"));
-            assertTrue(result.output().contains("\n  part one\n\n  part two"));
-            assertTrue(result.output().contains("- Second (https://example.com/b)"));
+                    Map.of(),
+                    ToolContext.empty(config.resolveWorkingDir(), new DisabledSandbox(config.resolveWorkingDir())));
+            assertFalse(result.success());
+            assertEquals("query is required", result.output());
         }
     }
 
-    @Test
-    void noResultsMessageOnEmptyAnswer() throws Exception {
-        try (final var mock = Mock.start(mapper).payload("{\"search_id\":\"s1\",\"results\":[]}")) {
-            final var config = TestConfigs.codingAgent(singleProvider(WebSearchProvider.PARALLEL, mock.url()));
-            final var tool = new WebSearchTool(new WebSearchManager(mapper, config, client), config);
-            final var result = tool.execute(
-                    Map.of("query", "apache maven build tool"), ToolContext.empty(config.resolveWorkingDir()));
-            assertTrue(result.success());
-            assertEquals(NO_RESULTS, result.output());
+    @Nested
+    @FusionSupport(modules = ToolIsHiddenWhenNoProviderIsEnabledScenarioModule.class)
+    class ToolIsHiddenWhenNoProviderIsEnabledScenario {
+        @TempDir
+        static Path tempDir;
+
+        @Test
+        void toolIsHiddenWhenNoProviderIsEnabled(@Fusion final CodingAgentConfiguration config) {
+
+            final var tool = new WebSearchTool(new WebSearchManager(mapper, config, client), config, mapper);
+            assertFalse(tool.usable(config.resolveWorkingDir()));
+            final var mcpManager = new McpManager(config, mapper, List.of(tool), null, new ProcessService());
+            mcpManager.start();
+            final var registry = new ToolRegistry(mcpManager);
+            assertFalse(registry.describe(config.resolveWorkingDir()).contains("websearch"));
+            assertTrue(registry.toWireTools(config.resolveWorkingDir()).stream()
+                    .noneMatch(t -> "websearch".equals(t.function().name())));
+            final var executed = tool.execute(
+                    Map.of("query", "anything"),
+                    ToolContext.empty(config.resolveWorkingDir(), new DisabledSandbox(config.resolveWorkingDir())));
+            assertFalse(executed.success());
+            assertTrue(executed.output().contains("disabled"));
         }
     }
 
-    @Test
-    void queryIsRequired() {
-        final var config = TestConfigs.codingAgent(defaultConfig());
-        final var tool = new WebSearchTool(new WebSearchManager(mapper, config, client), config);
-        final var result = tool.execute(Map.of(), ToolContext.empty(config.resolveWorkingDir()));
-        assertFalse(result.success());
-        assertEquals("query is required", result.output());
-    }
+    @Nested
+    @FusionSupport(modules = ToolIsVisibleWithDefaultProvidersScenarioModule.class)
+    class ToolIsVisibleWithDefaultProvidersScenario {
+        @TempDir
+        static Path tempDir;
 
-    @Test
-    void toolIsHiddenWhenNoProviderIsEnabled() {
-        final var config = TestConfigs.codingAgent(
-                Map.of("yca.storageHome", tempDir.toString(), "yca.tools.websearch.providers.length", "0"));
-        final var tool = new WebSearchTool(new WebSearchManager(mapper, config, client), config);
-        assertFalse(tool.usable(config.resolveWorkingDir()));
-        final var mcpManager = new McpManager(config, mapper, List.of(tool), null, new ProcessService());
-        mcpManager.start();
-        final var registry = new ToolRegistry(mcpManager);
-        assertFalse(registry.describe(config.resolveWorkingDir()).contains("websearch"));
-        assertTrue(registry.toWireTools(config.resolveWorkingDir()).stream()
-                .noneMatch(t -> "websearch".equals(t.function().name())));
-        final var executed = tool.execute(Map.of("query", "anything"), ToolContext.empty(config.resolveWorkingDir()));
-        assertFalse(executed.success());
-        assertTrue(executed.output().contains("disabled"));
-    }
-
-    @Test
-    void toolIsVisibleWithDefaultProviders() {
-        final var config = TestConfigs.codingAgent(defaultConfig());
-        final var tool = new WebSearchTool(new WebSearchManager(mapper, config, client), config);
-        assertTrue(tool.usable(config.resolveWorkingDir()));
-        final var mcpManager = new McpManager(config, mapper, List.of(tool), null, new ProcessService());
-        mcpManager.start();
-        final var registry = new ToolRegistry(mcpManager);
-        assertTrue(registry.describe(config.resolveWorkingDir()).contains("websearch"));
-        assertTrue(registry.toWireTools(config.resolveWorkingDir()).stream()
-                .anyMatch(t -> "websearch".equals(t.function().name())));
-    }
-
-    @Test
-    void configDefaultsIncludeAllProviders() {
-        final var websearch = TestConfigs.codingAgent(defaultConfig()).tools().websearch();
-        assertEquals(4, websearch.providers().size());
-        for (final var provider : websearch.providers()) {
-            assertTrue(provider.enabled());
-            assertNull(provider.url());
-            assertNull(provider.apiKey());
+        @Test
+        void toolIsVisibleWithDefaultProviders(@Fusion final CodingAgentConfiguration config) {
+            final var tool = new WebSearchTool(new WebSearchManager(mapper, config, client), config, mapper);
+            assertTrue(tool.usable(config.resolveWorkingDir()));
+            final var mcpManager = new McpManager(config, mapper, List.of(tool), null, new ProcessService());
+            mcpManager.start();
+            final var registry = new ToolRegistry(mcpManager);
+            assertTrue(registry.describe(config.resolveWorkingDir()).contains("websearch"));
+            assertTrue(registry.toWireTools(config.resolveWorkingDir()).stream()
+                    .anyMatch(t -> "websearch".equals(t.function().name())));
         }
-        assertEquals(WebSearchProvider.EXA, websearch.providers().get(0).provider());
-        assertEquals(WebSearchProvider.PARALLEL, websearch.providers().get(1).provider());
-        assertEquals(WebSearchProvider.FIRECRAWL, websearch.providers().get(2).provider());
-        assertEquals(WebSearchProvider.TINYFISH, websearch.providers().get(3).provider());
-        assertEquals(8, websearch.numResults());
-        assertEquals(25, websearch.timeoutSeconds());
     }
 
-    @Test
-    void legacySingleProviderKeysAreInert() {
-        final var overrides = new HashMap<>(defaultConfig());
-        overrides.put("yca.tools.websearch.provider", "parallel");
-        overrides.put("yca.tools.websearch.apiKey", "legacy");
-        overrides.put("yca.tools.websearch.exaUrl", "https://legacy.example.com/mcp");
-        overrides.put("yca.tools.websearch.parallelUrl", "https://legacy2.example.com/mcp");
-        final var websearch = TestConfigs.codingAgent(overrides).tools().websearch();
-        assertEquals(4, websearch.providers().size());
-        assertEquals(WebSearchProvider.EXA, websearch.providers().get(0).provider());
-        assertNull(websearch.providers().get(0).url());
+    @Nested
+    @FusionSupport(modules = ConfigDefaultsIncludeAllProvidersScenarioModule.class)
+    class ConfigDefaultsIncludeAllProvidersScenario {
+        @TempDir
+        static Path tempDir;
+
+        @Test
+        void configDefaultsIncludeAllProviders(@Fusion final CodingAgentConfiguration config) {
+            final var websearch = config.tools().websearch();
+            assertEquals(4, websearch.providers().size());
+            for (final var provider : websearch.providers()) {
+                assertTrue(provider.enabled());
+                assertNull(provider.url());
+                assertNull(provider.apiKey());
+            }
+            assertEquals(WebSearchProvider.EXA, websearch.providers().get(0).provider());
+            assertEquals(
+                    WebSearchProvider.PARALLEL, websearch.providers().get(1).provider());
+            assertEquals(
+                    WebSearchProvider.FIRECRAWL, websearch.providers().get(2).provider());
+            assertEquals(
+                    WebSearchProvider.TINYFISH, websearch.providers().get(3).provider());
+            assertEquals(8, websearch.numResults());
+            assertEquals(25, websearch.timeoutSeconds());
+        }
     }
 
-    private Map<String, String> defaultConfig() {
-        return Map.of("yca.storageHome", tempDir.toString());
+    @Nested
+    @FusionSupport(modules = LegacySingleProviderKeysAreInertScenarioModule.class)
+    class LegacySingleProviderKeysAreInertScenario {
+        @TempDir
+        static Path tempDir;
+
+        @Test
+        void legacySingleProviderKeysAreInert(@Fusion final CodingAgentConfiguration config) {
+            final var websearch = config.tools().websearch();
+            assertEquals(4, websearch.providers().size());
+            assertEquals(WebSearchProvider.EXA, websearch.providers().get(0).provider());
+            assertNull(websearch.providers().get(0).url());
+        }
     }
 
-    private Map<String, String> singleProvider(final WebSearchProvider provider, final String url) {
-        return Map.of(
-                "yca.storageHome",
-                tempDir.toString(),
-                "yca.tools.websearch.providers.length",
-                "1",
-                "yca.tools.websearch.providers.0.provider",
-                provider.name(),
-                "yca.tools.websearch.providers.0.url",
-                url);
+    private CodingAgentConfiguration singleProvider(
+            final CodingAgentConfiguration baseline, final WebSearchProvider provider, final String url) {
+        final var tools = baseline.tools();
+        return new CodingAgentConfiguration(
+                baseline.storageHome(),
+                baseline.home(),
+                baseline.workingDir(),
+                baseline.projectDir(),
+                baseline.provider(),
+                baseline.model(),
+                baseline.llm(),
+                baseline.compaction(),
+                baseline.pruning(),
+                baseline.compression(),
+                baseline.memory(),
+                baseline.todos(),
+                baseline.optimize(),
+                baseline.permissions(),
+                baseline.sandbox(),
+                baseline.mcp(),
+                baseline.mavenRepositoryKnowledge(),
+                baseline.structuralCodeGraph(),
+                baseline.sessions(),
+                baseline.skills(),
+                baseline.agents(),
+                baseline.mode(),
+                baseline.httpClient(),
+                new ToolsConfiguration(
+                        tools.builtin(),
+                        tools.spawnSubagent(),
+                        new WebSearchConfiguration(
+                                List.of(new WebSearchProviderConfiguration(provider, true, url, null, List.of())),
+                                tools.websearch().numResults(),
+                                tools.websearch().timeoutSeconds()),
+                        tools.manageContext(),
+                        tools.parallelReadonly(),
+                        tools.maxOutputChars(),
+                        tools.repeatSuccessThreshold(),
+                        tools.alwaysSuggestMavenKnowledge(),
+                        tools.shell(),
+                        tools.bashOverrides()),
+                baseline.subagents(),
+                baseline.schedulerThreads(),
+                baseline.metrics(),
+                baseline.maxLineLength(),
+                baseline.resumeAliases(),
+                baseline.slashcommands(),
+                baseline.prompt(),
+                baseline.labels(),
+                baseline.logging(),
+                baseline.hooks(),
+                baseline.notifications(),
+                baseline.secrets());
     }
 
     private static String parallelPayload() {
-        return "{\"search_id\":\"s1\",\"results\":["
-                + "{\"url\":\"https://example.com/a\",\"title\":\"First\",\"publish_date\":\"2026-06-30\",\"excerpts\":[\"part one\",\"part two\"]},"
-                + "{\"url\":\"https://example.com/b\",\"title\":\"Second\",\"publish_date\":null,\"excerpts\":[]}"
-                + "]}";
+        return "{\"search_id\":\"s1\",\"results\":[{\"url\":\"https://example.com/a\",\"title\":\"First\",\"publish_date\":\"2026-06-30\",\"excerpts\":[\"part"
+                + " one\",\"part two\"]},"
+                + "{\"url\":\"https://example.com/b\",\"title\":\"Second\",\"publish_date\":null,\"excerpts\":[]}]}";
     }
 
     /** Minimal MCP endpoint: initialize + notifications succeed, tools/call returns a configurable text. */
@@ -259,6 +353,62 @@ class WebSearchToolTest {
         @Override
         public void close() {
             server.stop(0);
+        }
+    }
+
+    public static class FormatsResultsWithPublishDateScenarioModule extends ConfigurationTestModule {
+        public FormatsResultsWithPublishDateScenarioModule() {
+            super(Map.of("yca.storageHome", FormatsResultsWithPublishDateScenario.tempDir.toString()));
+        }
+    }
+
+    public static class NoResultsMessageOnEmptyAnswerScenarioModule extends ConfigurationTestModule {
+        public NoResultsMessageOnEmptyAnswerScenarioModule() {
+            super(Map.of("yca.storageHome", NoResultsMessageOnEmptyAnswerScenario.tempDir.toString()));
+        }
+    }
+
+    public static class QueryIsRequiredScenarioModule extends ConfigurationTestModule {
+        public QueryIsRequiredScenarioModule() {
+            super(Map.of("yca.storageHome", QueryIsRequiredScenario.tempDir.toString()));
+        }
+    }
+
+    public static class ToolIsHiddenWhenNoProviderIsEnabledScenarioModule extends ConfigurationTestModule {
+        public ToolIsHiddenWhenNoProviderIsEnabledScenarioModule() {
+            super(Map.of(
+                    "yca.storageHome",
+                    ToolIsHiddenWhenNoProviderIsEnabledScenario.tempDir.toString(),
+                    "yca.tools.websearch.providers.length",
+                    "0"));
+        }
+    }
+
+    public static class ToolIsVisibleWithDefaultProvidersScenarioModule extends ConfigurationTestModule {
+        public ToolIsVisibleWithDefaultProvidersScenarioModule() {
+            super(Map.of("yca.storageHome", ToolIsVisibleWithDefaultProvidersScenario.tempDir.toString()));
+        }
+    }
+
+    public static class ConfigDefaultsIncludeAllProvidersScenarioModule extends ConfigurationTestModule {
+        public ConfigDefaultsIncludeAllProvidersScenarioModule() {
+            super(Map.of("yca.storageHome", ConfigDefaultsIncludeAllProvidersScenario.tempDir.toString()));
+        }
+    }
+
+    public static class LegacySingleProviderKeysAreInertScenarioModule extends ConfigurationTestModule {
+        public LegacySingleProviderKeysAreInertScenarioModule() {
+            super(Map.of(
+                    "yca.storageHome",
+                    LegacySingleProviderKeysAreInertScenario.tempDir.toString(),
+                    "yca.tools.websearch.provider",
+                    "parallel",
+                    "yca.tools.websearch.apiKey",
+                    "legacy",
+                    "yca.tools.websearch.exaUrl",
+                    "https://legacy.example.com/mcp",
+                    "yca.tools.websearch.parallelUrl",
+                    "https://legacy2.example.com/mcp"));
         }
     }
 }

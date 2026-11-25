@@ -93,7 +93,9 @@ public class GlobTool implements EmbeddedTool {
         final var flatMatcher = pattern.startsWith("**/")
                 ? FileSystems.getDefault().getPathMatcher("glob:" + pattern.substring(3))
                 : null;
-        final var ignore = FileIgnore.of(FileIgnore.gitRoot(base), null);
+        SandboxFiles.requireRead(context, base);
+        // Ancestor discovery and .gitignore reads are not sandbox-aware.
+        final var ignore = context.sandbox().enabled() ? null : FileIgnore.of(FileIgnore.gitRoot(base), null);
         final var hidden = optBool(args, "hidden", false);
         final var limit = (int) Math.min(1000, Math.max(1, optInt(args, "limit", 100)));
         final var matches = new ArrayList<String>();
@@ -102,6 +104,9 @@ public class GlobTool implements EmbeddedTool {
             Files.walkFileTree(base, new SimpleFileVisitor<>() {
                 @Override
                 public FileVisitResult preVisitDirectory(final Path dir, final BasicFileAttributes attrs) {
+                    if (!SandboxFiles.readable(context, dir)) {
+                        return FileVisitResult.SKIP_SUBTREE;
+                    }
                     if (!dir.equals(base) && skip(dir, ignore, hidden)) {
                         return FileVisitResult.SKIP_SUBTREE;
                     }
@@ -110,7 +115,7 @@ public class GlobTool implements EmbeddedTool {
 
                 @Override
                 public FileVisitResult visitFile(final Path file, final BasicFileAttributes attrs) {
-                    if (skip(file, ignore, hidden)) {
+                    if (!SandboxFiles.readable(context, file) || skip(file, ignore, hidden)) {
                         return FileVisitResult.CONTINUE;
                     }
                     final var rel = base.relativize(file);
@@ -155,6 +160,6 @@ public class GlobTool implements EmbeddedTool {
                 return true;
             }
         }
-        return ignore.isIgnored(p.toAbsolutePath().normalize());
+        return ignore != null && ignore.isIgnored(p.toAbsolutePath().normalize());
     }
 }

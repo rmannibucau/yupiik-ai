@@ -17,102 +17,328 @@ package io.yupiik.ia.agent.github.configuration;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-import io.yupiik.ia.agent.core.configuration.ConfigurationLoader;
+import io.yupiik.fusion.framework.api.RuntimeContainer;
+import io.yupiik.fusion.testing.Fusion;
+import io.yupiik.fusion.testing.FusionSupport;
 import io.yupiik.ia.agent.github.command.WorkerCommand.Options;
+import io.yupiik.ia.agent.github.support.GithubConfigurationTestModule;
 import java.util.Map;
-import java.util.Optional;
+import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.params.ParameterizedTest;
-import org.junit.jupiter.params.provider.CsvSource;
 
 class WorkerOptionsTest {
-    @Test
-    void sourceDefaultsPreserveAnonymousExport() {
-        final var worker = options(Map.of());
-        assertEquals(WorkerOptions.SourceMode.export, worker.source().mode());
-        assertEquals("", worker.source().tokenEnv());
-        assertEquals(1000, worker.source().maxDepth());
-        assertEquals(536870912L, worker.source().maxBytes());
-        assertEquals(120, worker.source().commandTimeoutSeconds());
-        assertTrue(worker.agentCommenting());
-        assertFalse(worker.privateSource());
+    @Nested
+    @FusionSupport(modules = DefaultsModule.class)
+    class Defaults {
+        @Test
+        void bindsConfiguration(@Fusion final Options root) {
+            final var worker = root.worker();
+            assertEquals(WorkerOptions.SourceMode.export, worker.source().mode());
+            assertEquals("", worker.source().tokenEnv());
+            assertEquals(1000, worker.source().maxDepth());
+            assertEquals(536870912L, worker.source().maxBytes());
+            assertEquals(120, worker.source().commandTimeoutSeconds());
+            assertTrue(worker.agentCommenting());
+            assertFalse(worker.privateSource());
+        }
     }
 
-    @Test
-    void bindsGitSourceSettingsWithoutChangingPublicationDefaults() {
-        final var worker = options(Map.of(
-                "worker.source.mode", "git",
-                "worker.source.tokenEnv", "READ_ONLY_SOURCE_PAT",
-                "worker.source.maxDepth", "2000",
-                "worker.source.maxBytes", "1073741824",
-                "worker.source.commandTimeoutSeconds", "300"));
-        assertEquals(WorkerOptions.SourceMode.git, worker.source().mode());
-        assertEquals("READ_ONLY_SOURCE_PAT", worker.source().tokenEnv());
-        assertEquals(2000, worker.source().maxDepth());
-        assertEquals(1073741824L, worker.source().maxBytes());
-        assertEquals(300, worker.source().commandTimeoutSeconds());
-        assertTrue(worker.agentCommenting());
+    public static class DefaultsModule extends GithubConfigurationTestModule {
+        public DefaultsModule() {
+            super(Map.of());
+        }
     }
 
-    @Test
-    void exportRejectsSourceTokenEnvironmentRatherThanIgnoringIt() {
-        final var failure = assertThrows(
-                IllegalArgumentException.class,
-                () -> options(Map.of("worker.source.tokenEnv", "READ_ONLY_SOURCE_PAT")));
-        assertFalse(failure.getMessage().contains("READ_ONLY_SOURCE_PAT"));
+    @Nested
+    @FusionSupport(modules = GitSourceModule.class)
+    class GitSource {
+        @Test
+        void bindsConfiguration(@Fusion final Options root) {
+            final var worker = root.worker();
+            assertEquals(WorkerOptions.SourceMode.git, worker.source().mode());
+            assertEquals("READ_ONLY_SOURCE_PAT", worker.source().tokenEnv());
+            assertEquals(2000, worker.source().maxDepth());
+            assertEquals(1073741824L, worker.source().maxBytes());
+            assertEquals(300, worker.source().commandTimeoutSeconds());
+            assertTrue(worker.agentCommenting());
+        }
     }
 
-    @ParameterizedTest
-    @CsvSource({
-        "maxDepth, 0",
-        "maxDepth, -1",
-        "maxDepth, 100001",
-        "maxBytes, 1048575",
-        "maxBytes, 17179869185",
-        "commandTimeoutSeconds, 0",
-        "commandTimeoutSeconds, -1",
-        "commandTimeoutSeconds, 3601"
-    })
-    void rejectsInvalidSourceLimits(final String setting, final String value) {
-        assertThrows(IllegalArgumentException.class, () -> options(Map.of("worker.source." + setting, value)));
+    public static class GitSourceModule extends GithubConfigurationTestModule {
+        public GitSourceModule() {
+            super(Map.ofEntries(
+                    Map.entry("worker.source.mode", "git"),
+                    Map.entry("worker.source.tokenEnv", "READ_ONLY_SOURCE_PAT"),
+                    Map.entry("worker.source.maxDepth", "2000"),
+                    Map.entry("worker.source.maxBytes", "1073741824"),
+                    Map.entry("worker.source.commandTimeoutSeconds", "300")));
+        }
     }
 
-    @ParameterizedTest
-    @CsvSource({"1, 1048576, 1", "100000, 17179869184, 3600"})
-    void acceptsSourceLimitBoundaries(final int depth, final long bytes, final int timeout) {
-        final var source = options(Map.of(
-                        "worker.source.maxDepth", Integer.toString(depth),
-                        "worker.source.maxBytes", Long.toString(bytes),
-                        "worker.source.commandTimeoutSeconds", Integer.toString(timeout)))
-                .source();
-        assertEquals(depth, source.maxDepth());
-        assertEquals(bytes, source.maxBytes());
-        assertEquals(timeout, source.commandTimeoutSeconds());
+    @Nested
+    @FusionSupport(modules = ExportTokenModule.class)
+    class ExportToken {
+        @Test
+        void bindsConfiguration(@Fusion final RuntimeContainer container) {
+            final var failure = assertThrows(IllegalArgumentException.class, () -> {
+                try (final var ignored = container.lookup(Options.class)) {
+                    fail("Invalid configuration unexpectedly bound "
+                            + ignored.instance().getClass().getSimpleName());
+                }
+            });
+            assertFalse(failure.getMessage().contains("READ_ONLY_SOURCE_PAT"));
+        }
     }
 
-    @Test
-    void brokerIsExplicitAndDoesNotSilentlyChangePublicationPolicy() {
-        final var worker = options(Map.of("worker.source.mode", "broker"));
-        assertEquals(WorkerOptions.SourceMode.broker, worker.source().mode());
-        assertEquals("", worker.source().tokenEnv());
-        assertTrue(worker.agentCommenting()); // Worker must reject this combination, not silently change it.
-        assertEquals(options(Map.of()).source().maxBytes(), worker.source().maxBytes());
-        assertEquals(options(Map.of()).source().maxDepth(), worker.source().maxDepth());
+    public static class ExportTokenModule extends GithubConfigurationTestModule {
+        public ExportTokenModule() {
+            super(Map.ofEntries(Map.entry("worker.source.tokenEnv", "READ_ONLY_SOURCE_PAT")));
+        }
     }
 
-    @Test
-    void brokerRejectsDedicatedSourcePatEvenWithStrictPublication() {
-        final var failure = assertThrows(
-                IllegalArgumentException.class,
-                () -> options(Map.of(
-                        "worker.source.mode", "broker",
-                        "worker.agentCommenting", "false",
-                        "worker.source.tokenEnv", "PRIVATE_READ_PAT")));
-        assertFalse(failure.getMessage().contains("PRIVATE_READ_PAT"));
+    @Nested
+    @FusionSupport(modules = BrokerTokenModule.class)
+    class BrokerToken {
+        @Test
+        void bindsConfiguration(@Fusion final RuntimeContainer container) {
+            final var failure = assertThrows(IllegalArgumentException.class, () -> {
+                try (final var ignored = container.lookup(Options.class)) {
+                    fail("Invalid configuration unexpectedly bound "
+                            + ignored.instance().getClass().getSimpleName());
+                }
+            });
+            assertFalse(failure.getMessage().contains("PRIVATE_READ_PAT"));
+        }
     }
 
-    private WorkerOptions options(final Map<String, String> values) {
-        return ConfigurationLoader.load(Options.class, key -> Optional.ofNullable(values.get(key)))
-                .worker();
+    public static class BrokerTokenModule extends GithubConfigurationTestModule {
+        public BrokerTokenModule() {
+            super(Map.ofEntries(
+                    Map.entry("worker.source.mode", "broker"),
+                    Map.entry("worker.agentCommenting", "false"),
+                    Map.entry("worker.source.tokenEnv", "PRIVATE_READ_PAT")));
+        }
+    }
+
+    @Nested
+    @FusionSupport(modules = ZeroDepthModule.class)
+    class ZeroDepth {
+        @Test
+        void bindsConfiguration(@Fusion final RuntimeContainer container) {
+            assertThrows(IllegalArgumentException.class, () -> {
+                try (final var ignored = container.lookup(Options.class)) {
+                    fail("Invalid configuration unexpectedly bound "
+                            + ignored.instance().getClass().getSimpleName());
+                }
+            });
+        }
+    }
+
+    public static class ZeroDepthModule extends GithubConfigurationTestModule {
+        public ZeroDepthModule() {
+            super(Map.ofEntries(Map.entry("worker.source.maxDepth", "0")));
+        }
+    }
+
+    @Nested
+    @FusionSupport(modules = NegativeDepthModule.class)
+    class NegativeDepth {
+        @Test
+        void bindsConfiguration(@Fusion final RuntimeContainer container) {
+            assertThrows(IllegalArgumentException.class, () -> {
+                try (final var ignored = container.lookup(Options.class)) {
+                    fail("Invalid configuration unexpectedly bound "
+                            + ignored.instance().getClass().getSimpleName());
+                }
+            });
+        }
+    }
+
+    public static class NegativeDepthModule extends GithubConfigurationTestModule {
+        public NegativeDepthModule() {
+            super(Map.ofEntries(Map.entry("worker.source.maxDepth", "-1")));
+        }
+    }
+
+    @Nested
+    @FusionSupport(modules = ExcessiveDepthModule.class)
+    class ExcessiveDepth {
+        @Test
+        void bindsConfiguration(@Fusion final RuntimeContainer container) {
+            assertThrows(IllegalArgumentException.class, () -> {
+                try (final var ignored = container.lookup(Options.class)) {
+                    fail("Invalid configuration unexpectedly bound "
+                            + ignored.instance().getClass().getSimpleName());
+                }
+            });
+        }
+    }
+
+    public static class ExcessiveDepthModule extends GithubConfigurationTestModule {
+        public ExcessiveDepthModule() {
+            super(Map.ofEntries(Map.entry("worker.source.maxDepth", "100001")));
+        }
+    }
+
+    @Nested
+    @FusionSupport(modules = BelowMinimumBytesModule.class)
+    class BelowMinimumBytes {
+        @Test
+        void bindsConfiguration(@Fusion final RuntimeContainer container) {
+            assertThrows(IllegalArgumentException.class, () -> {
+                try (final var ignored = container.lookup(Options.class)) {
+                    fail("Invalid configuration unexpectedly bound "
+                            + ignored.instance().getClass().getSimpleName());
+                }
+            });
+        }
+    }
+
+    public static class BelowMinimumBytesModule extends GithubConfigurationTestModule {
+        public BelowMinimumBytesModule() {
+            super(Map.ofEntries(Map.entry("worker.source.maxBytes", "1048575")));
+        }
+    }
+
+    @Nested
+    @FusionSupport(modules = ExcessiveBytesModule.class)
+    class ExcessiveBytes {
+        @Test
+        void bindsConfiguration(@Fusion final RuntimeContainer container) {
+            assertThrows(IllegalArgumentException.class, () -> {
+                try (final var ignored = container.lookup(Options.class)) {
+                    fail("Invalid configuration unexpectedly bound "
+                            + ignored.instance().getClass().getSimpleName());
+                }
+            });
+        }
+    }
+
+    public static class ExcessiveBytesModule extends GithubConfigurationTestModule {
+        public ExcessiveBytesModule() {
+            super(Map.ofEntries(Map.entry("worker.source.maxBytes", "17179869185")));
+        }
+    }
+
+    @Nested
+    @FusionSupport(modules = ZeroTimeoutModule.class)
+    class ZeroTimeout {
+        @Test
+        void bindsConfiguration(@Fusion final RuntimeContainer container) {
+            assertThrows(IllegalArgumentException.class, () -> {
+                try (final var ignored = container.lookup(Options.class)) {
+                    fail("Invalid configuration unexpectedly bound "
+                            + ignored.instance().getClass().getSimpleName());
+                }
+            });
+        }
+    }
+
+    public static class ZeroTimeoutModule extends GithubConfigurationTestModule {
+        public ZeroTimeoutModule() {
+            super(Map.ofEntries(Map.entry("worker.source.commandTimeoutSeconds", "0")));
+        }
+    }
+
+    @Nested
+    @FusionSupport(modules = NegativeTimeoutModule.class)
+    class NegativeTimeout {
+        @Test
+        void bindsConfiguration(@Fusion final RuntimeContainer container) {
+            assertThrows(IllegalArgumentException.class, () -> {
+                try (final var ignored = container.lookup(Options.class)) {
+                    fail("Invalid configuration unexpectedly bound "
+                            + ignored.instance().getClass().getSimpleName());
+                }
+            });
+        }
+    }
+
+    public static class NegativeTimeoutModule extends GithubConfigurationTestModule {
+        public NegativeTimeoutModule() {
+            super(Map.ofEntries(Map.entry("worker.source.commandTimeoutSeconds", "-1")));
+        }
+    }
+
+    @Nested
+    @FusionSupport(modules = ExcessiveTimeoutModule.class)
+    class ExcessiveTimeout {
+        @Test
+        void bindsConfiguration(@Fusion final RuntimeContainer container) {
+            assertThrows(IllegalArgumentException.class, () -> {
+                try (final var ignored = container.lookup(Options.class)) {
+                    fail("Invalid configuration unexpectedly bound "
+                            + ignored.instance().getClass().getSimpleName());
+                }
+            });
+        }
+    }
+
+    public static class ExcessiveTimeoutModule extends GithubConfigurationTestModule {
+        public ExcessiveTimeoutModule() {
+            super(Map.ofEntries(Map.entry("worker.source.commandTimeoutSeconds", "3601")));
+        }
+    }
+
+    @Nested
+    @FusionSupport(modules = MinimumLimitsModule.class)
+    class MinimumLimits {
+        @Test
+        void bindsConfiguration(@Fusion final Options root) {
+            final var source = root.worker().source();
+            assertEquals(1, source.maxDepth());
+            assertEquals(1048576L, source.maxBytes());
+            assertEquals(1, source.commandTimeoutSeconds());
+        }
+    }
+
+    public static class MinimumLimitsModule extends GithubConfigurationTestModule {
+        public MinimumLimitsModule() {
+            super(Map.ofEntries(
+                    Map.entry("worker.source.maxDepth", "1"),
+                    Map.entry("worker.source.maxBytes", "1048576"),
+                    Map.entry("worker.source.commandTimeoutSeconds", "1")));
+        }
+    }
+
+    @Nested
+    @FusionSupport(modules = MaximumLimitsModule.class)
+    class MaximumLimits {
+        @Test
+        void bindsConfiguration(@Fusion final Options root) {
+            final var source = root.worker().source();
+            assertEquals(100000, source.maxDepth());
+            assertEquals(17179869184L, source.maxBytes());
+            assertEquals(3600, source.commandTimeoutSeconds());
+        }
+    }
+
+    public static class MaximumLimitsModule extends GithubConfigurationTestModule {
+        public MaximumLimitsModule() {
+            super(Map.ofEntries(
+                    Map.entry("worker.source.maxDepth", "100000"),
+                    Map.entry("worker.source.maxBytes", "17179869184"),
+                    Map.entry("worker.source.commandTimeoutSeconds", "3600")));
+        }
+    }
+
+    @Nested
+    @FusionSupport(modules = BrokerModule.class)
+    class Broker {
+        @Test
+        void bindsConfiguration(@Fusion final Options root) {
+            final var worker = root.worker();
+            assertEquals(WorkerOptions.SourceMode.broker, worker.source().mode());
+            assertEquals("", worker.source().tokenEnv());
+            assertTrue(worker.agentCommenting()); // The worker must reject this combination, not silently change it.
+            assertEquals(536870912L, worker.source().maxBytes());
+            assertEquals(1000, worker.source().maxDepth());
+        }
+    }
+
+    public static class BrokerModule extends GithubConfigurationTestModule {
+        public BrokerModule() {
+            super(Map.ofEntries(Map.entry("worker.source.mode", "broker")));
+        }
     }
 }

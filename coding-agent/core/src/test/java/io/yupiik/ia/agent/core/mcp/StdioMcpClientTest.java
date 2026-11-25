@@ -20,7 +20,6 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 
 import io.yupiik.ai.mcp.client.StdioMcpClient;
 import io.yupiik.fusion.json.JsonMapper;
-import io.yupiik.ia.agent.core.configuration.TestConfigs;
 import io.yupiik.ia.agent.test.TestJsonMapper;
 import io.yupiik.maven.knowledge.process.ProcessService;
 import java.io.IOException;
@@ -53,14 +52,10 @@ class StdioMcpClientTest {
     @Timeout(15)
     void timeoutsAreIsolatedAndNonpositiveValuesRetainLegacyGrace(
             final int seconds, @TempDir final Path tmp, final JsonMapper mapper) throws Exception {
-        final var longer = TestConfigs.codingAgent(Map.of("yca.mcp.callTimeoutSeconds", Integer.toString(seconds)));
-        final var shorter = TestConfigs.codingAgent(Map.of("yca.mcp.callTimeoutSeconds", "1"));
         final var longDir = Files.createDirectory(tmp.resolve("long"));
         final var shortDir = Files.createDirectory(tmp.resolve("short"));
-        try (final var longClient =
-                        adversary("delayed-call", longDir, mapper, longer.mcp().callTimeoutSeconds());
-                final var shortClient = adversary(
-                        "delayed-call", shortDir, mapper, shorter.mcp().callTimeoutSeconds())) {
+        try (final var longClient = adversary("delayed-call", longDir, mapper, seconds);
+                final var shortClient = adversary("delayed-call", shortDir, mapper, 1)) {
             longClient.initialize();
             shortClient.initialize();
             // Constructing a short-lived client must not change an existing client's deadline.

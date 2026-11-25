@@ -15,6 +15,11 @@
   </properties>
   <dependencies>
     <dependency>
+      <groupId>io.yupiik.fusion</groupId>
+      <artifactId>fusion-testing</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
       <groupId>io.yupiik.ai</groupId>
       <artifactId>bot-runtime</artifactId>
       <version>${project.version}</version>

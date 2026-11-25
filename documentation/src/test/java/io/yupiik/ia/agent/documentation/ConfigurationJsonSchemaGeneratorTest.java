@@ -28,26 +28,32 @@ import io.yupiik.fusion.framework.api.configuration.ConfigurationSource;
 import io.yupiik.fusion.framework.api.container.FusionBean;
 import io.yupiik.fusion.framework.api.container.FusionListener;
 import io.yupiik.fusion.framework.api.container.FusionModule;
+import io.yupiik.fusion.framework.api.container.bean.ProvidedInstanceBean;
+import io.yupiik.fusion.framework.api.scope.DefaultScoped;
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.fusion.json.configuration.JsonConfigurationSource;
+import io.yupiik.fusion.testing.Fusion;
+import io.yupiik.fusion.testing.FusionSupport;
 import io.yupiik.ia.agent.core.configuration.AgentMode;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
-import io.yupiik.ia.agent.core.configuration.ConfigurationLoader;
 import io.yupiik.ia.agent.core.llm.ApiFlavor;
 import java.io.StringReader;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Map;
-import java.util.Optional;
 import java.util.Set;
 import java.util.function.BiPredicate;
 import java.util.regex.Pattern;
+import java.util.stream.Stream;
 import javax.xml.parsers.DocumentBuilderFactory;
 import javax.xml.xpath.XPathFactory;
+import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 class ConfigurationJsonSchemaGeneratorTest {
+    private static final Pattern JSON_BLOCK = Pattern.compile("(?s)\\[source,json\\]\\s*----\\s*(.*?)\\s*----");
+
     @Test
     void schemaMatchesRuntimeConfigurationAndAuthoredExamples(@TempDir final Path temp) throws Exception {
         final var factory = DocumentBuilderFactory.newInstance();
@@ -66,18 +72,7 @@ class ConfigurationJsonSchemaGeneratorTest {
                         Map.of("output", "schema.json", "partialOutput", "copy.json", "excludedRoots", excludedRoots))
                 .run();
         try (final var container = ConfiguringContainer.of()
-                        .register(new FusionModule() {
-                            @Override
-                            public BiPredicate<RuntimeContainer, FusionBean<?>> beanFilter() {
-                                return (container, bean) -> !(bean.type() instanceof Class<?> type
-                                        && ConfigurationSource.class.isAssignableFrom(type));
-                            }
-
-                            @Override
-                            public BiPredicate<RuntimeContainer, FusionListener<?>> listenerFilter() {
-                                return (container, listener) -> false;
-                            }
-                        })
+                        .register(new SourceModule("{}"))
                         .start();
                 final var mapper = container.lookup(JsonMapper.class)) {
             final var schema = mapper.instance().fromString(Map.class, Files.readString(temp.resolve("schema.json")));
@@ -98,8 +93,7 @@ class ConfigurationJsonSchemaGeneratorTest {
                     .validate("{\"$inherit\":\"true\"}", InputFormat.JSON)
                     .isEmpty());
             final var page = Files.readString(Path.of("src/main/minisite/content/coding-agent/configuration.adoc"));
-            final var examples = Pattern.compile("(?s)\\[source,json\\]\\s*----\\s*(.*?)\\s*----")
-                    .matcher(page);
+            final var examples = JSON_BLOCK.matcher(page);
             int validated = 0;
             while (examples.find()) {
                 final var json = examples.group(1);
@@ -108,29 +102,24 @@ class ConfigurationJsonSchemaGeneratorTest {
                 }
                 final var errors = validator.validate(json, InputFormat.JSON);
                 assertTrue(errors.isEmpty(), () -> json + "\n" + errors);
-                final var source = new JsonConfigurationSource(new StringReader(json), key -> {
-                    final var shortKey = key.startsWith("yca.") ? key.substring(4) : key;
-                    return shortKey.replace('-', '.');
-                });
-                final var bound = ConfigurationLoader.load(
-                        CodingAgentConfiguration.class, key -> Optional.ofNullable(source.get(key)));
-                if (json.contains("command-auth")) {
-                    assertEquals(1, bound.provider().providers().size());
-                    final var configured = bound.provider().providers().getFirst();
-                    assertEquals("command-auth", configured.id());
-                    assertEquals(1, configured.dynamicHeaders().size());
-                    assertTrue(configured.dynamicHeaders().get("authorization").startsWith("Bearer {{exec"));
+                // Each discovered example owns its source and generated binding until all assertions finish.
+                try (final var scenario = ConfiguringContainer.of()
+                                .register(new SourceModule(json))
+                                .start();
+                        final var configuration = scenario.lookup(CodingAgentConfiguration.class)) {
+                    final var bound = configuration.instance();
+                    if (json.contains("command-auth")) {
+                        assertEquals(1, bound.provider().providers().size());
+                        final var configured = bound.provider().providers().getFirst();
+                        assertEquals("command-auth", configured.id());
+                        assertEquals(1, configured.dynamicHeaders().size());
+                        assertTrue(
+                                configured.dynamicHeaders().get("authorization").startsWith("Bearer {{exec"));
+                    }
                 }
                 validated++;
             }
             assertTrue(validated >= 5, "Validate the authored configuration examples, not isolated fixtures");
-            final var lowercase = new JsonConfigurationSource(
-                    new StringReader("{\"provider\":{\"api\":\"auto\"},\"mode\":\"plan\"}"),
-                    key -> key.startsWith("yca.") ? key.substring(4) : key);
-            final var bound = ConfigurationLoader.load(
-                    CodingAgentConfiguration.class, key -> Optional.ofNullable(lowercase.get(key)));
-            assertEquals(ApiFlavor.AUTO, bound.provider().api());
-            assertEquals(AgentMode.PLAN, bound.mode());
             final var defs = map(schema.get("$defs"));
             assertEquals(
                     0.2,
@@ -231,6 +220,66 @@ class ConfigurationJsonSchemaGeneratorTest {
             assertTrue(properties.containsKey("history"));
             final var theme = resolve(defs, map(properties.get("theme")));
             assertEquals("string", map(map(theme.get("properties")).get("name")).get("type"));
+        }
+    }
+
+    @Nested
+    @FusionSupport(modules = LowercaseSourceModule.class)
+    class Lowercase {
+        @Test
+        void bindsEnums(@Fusion final CodingAgentConfiguration bound) {
+            assertEquals(ApiFlavor.AUTO, bound.provider().api());
+            assertEquals(AgentMode.PLAN, bound.mode());
+        }
+    }
+
+    @Nested
+    @FusionSupport(modules = UppercaseSourceModule.class)
+    class Uppercase {
+        @Test
+        void bindsEnums(@Fusion final CodingAgentConfiguration bound) {
+            assertEquals(ApiFlavor.AUTO, bound.provider().api());
+            assertEquals(AgentMode.PLAN, bound.mode());
+        }
+    }
+
+    public static class LowercaseSourceModule extends SourceModule {
+        public LowercaseSourceModule() {
+            super("{\"provider\":{\"api\":\"auto\"},\"mode\":\"plan\"}");
+        }
+    }
+
+    public static class UppercaseSourceModule extends SourceModule {
+        public UppercaseSourceModule() {
+            super("{\"provider\":{\"api\":\"AUTO\"},\"mode\":\"PLAN\"}");
+        }
+    }
+
+    private static class SourceModule implements FusionModule {
+        private final ConfigurationSource source;
+
+        private SourceModule(final String json) {
+            source = new JsonConfigurationSource(new StringReader(json), key -> {
+                final var shortKey = key.startsWith("yca.") ? key.substring(4) : key;
+                return shortKey.replace('-', '.');
+            });
+        }
+
+        @Override
+        public Stream<FusionBean<?>> beans() {
+            return Stream.of(new ProvidedInstanceBean<>(DefaultScoped.class, ConfigurationSource.class, () -> source));
+        }
+
+        @Override
+        public BiPredicate<RuntimeContainer, FusionBean<?>> beanFilter() {
+            return (container, bean) -> !(bean.type() instanceof Class<?> type)
+                    || !ConfigurationSource.class.isAssignableFrom(type)
+                    || bean instanceof ProvidedInstanceBean<?>;
+        }
+
+        @Override
+        public BiPredicate<RuntimeContainer, FusionListener<?>> listenerFilter() {
+            return (container, listener) -> false;
         }
     }
 

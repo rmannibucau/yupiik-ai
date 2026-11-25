@@ -276,6 +276,9 @@ class ProjectWorkflowTest {
         }
         command.addAll(List.of(
                 "acp",
+                // Exercise project isolation and ACP tool approvals, not OS sandbox policy.
+                "--sandbox",
+                "false",
                 "--yca-storageHome",
                 tmp.resolve("storage").toString(),
                 "--yca-home",

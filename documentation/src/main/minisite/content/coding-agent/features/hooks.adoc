@@ -109,7 +109,7 @@ esac
 ----
 
 These are deliberately simple string checks, not shell parsing or a security boundary.
-Use xref:permissions.adoc[permission rules] and xref:sandboxes.adoc[external isolation] for broader controls.
+Use xref:permissions.adoc[permission rules] and xref:external-sandboxes.adoc[external isolation] for broader controls.
 An observation-only notifier can print nothing and exit `0`.
 
 == Events

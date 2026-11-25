@@ -150,7 +150,10 @@ import java.util.logging.SimpleFormatter;
 import java.util.regex.Pattern;
 
 @DefaultScoped
-@Command(name = "tui", description = "Interactive terminal UI session with the yca coding agent.")
+@Command(
+        name = "tui",
+        description =
+                "Interactive terminal UI session with the yca coding agent. All modes accept --sandbox true|false (yca.sandbox.enabled); sandbox policy is independent of tool permissions.")
 public class TuiCommand implements Runnable {
     private static final long DEFAULT_MAX_HISTORY_CHARACTERS = 10_000_000L;
     private static final String WELCOME = "# yca\n\nType a prompt and press Enter. `/help` lists the slash commands.";
@@ -1236,7 +1239,12 @@ public class TuiCommand implements Runnable {
     }
 
     private ApprovalGate gate(final TuiRunner tui, final UiState state, final long btwOrdinal) {
-        return (title, detail, toolName, args) -> {
+        return request -> {
+            final var title =
+                    (request.origin() == ApprovalGate.Origin.SANDBOX ? "Sandbox restriction: " : "Tool permission: ")
+                            + request.title();
+            final var detail = request.detail();
+            final var toolName = request.toolName();
             final var latch = new CountDownLatch(1);
             final var outcome = new AtomicReference<ApprovalGate.Result>();
             tui.runLater(() -> {
@@ -1248,7 +1256,7 @@ public class TuiCommand implements Runnable {
                 state.approvals.add(new Approval(title, detail, latch, outcome, btwOrdinal));
                 if (notifications != null) {
                     notifications.onApprovalRequired(
-                            state.sessionId, state.title, toolName, btwOrdinal == 0 ? "main" : "btw");
+                            state.sessionId, state.title, toolName, btwOrdinal == 0 ? "main" : "btw", request.origin());
                 }
             });
             try {
@@ -2743,7 +2751,8 @@ public class TuiCommand implements Runnable {
                         btwFeedback(runner, state, ordinal),
                         runtime.workdir(),
                         runtime.loop().effectiveToolRegistry(),
-                        runtime.loop().availableToolNames())
+                        runtime.loop().availableToolNames(),
+                        runtime.sandbox())
                 .whenComplete((answer, error) ->
                         runLater(state, () -> onBtwAnswer(state, ordinal, answer, error, cancelled)));
     }
@@ -4502,18 +4511,24 @@ public class TuiCommand implements Runnable {
         }
         text.add(Line.from(Span.styled("session ", label), Span.styled(ellipsize(state.sessionId, width - 8), value)));
         // the mode and permissions each get their own row: mode is always visible with
-        // the mode-colored value, permissions shows the approval mode (yolo -> red)
+        // the mode-colored value, permissions shows the approval mode and sandbox risk.
         final var permissions = state.session.runtime().permissions();
         text.add(Line.from(
                 Span.styled("mode ", label),
                 Span.styled(permissions.mode().name().toLowerCase(Locale.ROOT), Style.EMPTY.fg(modeColor()))));
         final var permissionMode = permissions.permissionMode().name().toLowerCase(Locale.ROOT);
-        final var yolo = permissions.permissionMode() == PermissionMode.YOLO;
+        final var fullYolo = permissions.permissionMode() == PermissionMode.FULL_YOLO;
+        final var unattended = fullYolo || permissions.permissionMode() == PermissionMode.YOLO;
+        final var permissionColor =
+                fullYolo || !state.session.runtime().sandbox().enabled() ? palette.yolo() : palette.warning();
         text.add(Line.from(
                 Span.styled("permissions ", label),
                 Span.styled(
-                        yolo ? "yolo ⚠" : permissionMode,
-                        yolo ? Style.EMPTY.fg(Color.hex(palette.yolo())).bold() : value)));
+                        unattended ? permissionMode + " ⚠" : permissionMode,
+                        unattended ? Style.EMPTY.fg(Color.hex(permissionColor)).bold() : value)));
+        if (fullYolo) {
+            text.add(Line.from(Span.styled("not recommended", Style.EMPTY.fg(Color.hex(palette.yolo())))));
+        }
         text.add(Line.from(Span.styled("servers ", label)));
         for (final var status : mcpManager.serverStatuses()) {
             final var dotColor =

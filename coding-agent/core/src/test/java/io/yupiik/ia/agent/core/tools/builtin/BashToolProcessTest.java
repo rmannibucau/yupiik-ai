@@ -21,8 +21,12 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.fusion.framework.api.event.Emitter;
-import io.yupiik.ia.agent.core.configuration.TestConfigs;
+import io.yupiik.fusion.testing.Fusion;
+import io.yupiik.fusion.testing.FusionSupport;
+import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
+import io.yupiik.ia.agent.core.configuration.ConfigurationTestModule;
 import io.yupiik.ia.agent.core.runtime.Cancellations;
+import io.yupiik.ia.agent.core.sandbox.DisabledSandbox;
 import io.yupiik.ia.agent.core.tools.ToolContext;
 import io.yupiik.maven.knowledge.process.ProcessService;
 import java.nio.file.Files;
@@ -30,6 +34,7 @@ import java.nio.file.Path;
 import java.time.Duration;
 import java.util.Map;
 import org.junit.jupiter.api.Assumptions;
+import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -86,7 +91,20 @@ class BashToolProcessTest {
         final var sentinel = tmp.resolve("pwd.txt");
         final var bash = new BashTool(NOOP, new ProcessService());
         final var ctx = new ToolContext(
-                null, null, null, null, null, null, null, null, null, Cancellations.NEVER, null, null, projectDir);
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                Cancellations.NEVER,
+                null,
+                null,
+                projectDir,
+                new DisabledSandbox(projectDir));
 
         final var result = bash.execute(Map.of("command", "pwd > " + sentinel), ctx);
         assertTrue(result.success(), "the command must run: " + result.output());
@@ -106,7 +124,20 @@ class BashToolProcessTest {
         final var sentinel = tmp.resolve("pwd.txt");
         final var bash = new BashTool(NOOP, new ProcessService());
         final var ctx = new ToolContext(
-                null, null, null, null, null, null, null, null, null, Cancellations.NEVER, null, null, projectDir);
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                Cancellations.NEVER,
+                null,
+                null,
+                projectDir,
+                new DisabledSandbox(projectDir));
 
         final var result = bash.execute(Map.of("command", "pwd > " + sentinel, "workdir", override.toString()), ctx);
         assertTrue(result.success(), "the command must run: " + result.output());
@@ -116,50 +147,67 @@ class BashToolProcessTest {
                 "an explicit workdir must override the session project dir");
     }
 
-    @Test
-    void relativeWorkdirIsResolvedPerSessionNotAgainstConfiguredRoot(@TempDir final Path tmp) throws Exception {
-        Assumptions.assumeTrue(!System.getProperty("os.name", "").toLowerCase().contains("win"));
-        final var configured =
-                Files.createDirectories(tmp.resolve("configured/nested")).getParent();
-        final var first = Files.createDirectories(tmp.resolve("first/nested")).getParent();
-        final var second = Files.createDirectories(tmp.resolve("second/nested")).getParent();
-        final var bash = new BashTool(
-                NOOP,
-                new ProcessService(),
-                TestConfigs.codingAgent(Map.of("yca.workingDir", configured.toString())),
-                null);
-        for (final var root : new Path[] {first, second, first}) {
-            final var result = bash.execute(
-                    Map.of("command", "pwd", "workdir", "./nested/../nested"), contextWithProjectDir(root.toString()));
-            assertTrue(result.success(), result.output());
-            assertTrue(result.output().contains(root.resolve("nested").toString()), result.output());
-            assertFalse(result.output().contains(configured.toString()), result.output());
+    @Nested
+    @FusionSupport(modules = RelativeWorkdirIsResolvedPerSessionNotAgainstConfiguredRootScenarioModule.class)
+    class RelativeWorkdirIsResolvedPerSessionNotAgainstConfiguredRootScenario {
+        @TempDir
+        static Path directory;
+
+        @Test
+        void relativeWorkdirIsResolvedPerSessionNotAgainstConfiguredRoot(
+                @Fusion final CodingAgentConfiguration configuration) throws Exception {
+            final var tmp = RelativeWorkdirIsResolvedPerSessionNotAgainstConfiguredRootScenario.directory;
+            Assumptions.assumeTrue(
+                    !System.getProperty("os.name", "").toLowerCase().contains("win"));
+            final var configured =
+                    Files.createDirectories(tmp.resolve("configured/nested")).getParent();
+            final var first =
+                    Files.createDirectories(tmp.resolve("first/nested")).getParent();
+            final var second =
+                    Files.createDirectories(tmp.resolve("second/nested")).getParent();
+            final var bash = new BashTool(NOOP, new ProcessService(), configuration, null);
+            for (final var root : new Path[] {first, second, first}) {
+                final var result = bash.execute(
+                        Map.of("command", "pwd", "workdir", "./nested/../nested"),
+                        contextWithProjectDir(root.toString()));
+                assertTrue(result.success(), result.output());
+                assertTrue(result.output().contains(root.resolve("nested").toString()), result.output());
+                assertFalse(result.output().contains(configured.toString()), result.output());
+            }
+            final var explicit = bash.execute(
+                    Map.of("command", "pwd", "workdir", "nested"),
+                    ToolContext.empty(configured, new DisabledSandbox(configured)));
+            assertTrue(explicit.success(), explicit.output());
+            assertTrue(explicit.output().contains(configured.resolve("nested").toString()), explicit.output());
         }
-        final var explicit = bash.execute(Map.of("command", "pwd", "workdir", "nested"), ToolContext.empty(configured));
-        assertTrue(explicit.success(), explicit.output());
-        assertTrue(explicit.output().contains(configured.resolve("nested").toString()), explicit.output());
     }
 
-    @Test
-    void missingRelativeExplicitWorkdirDoesNotFallBack(@TempDir final Path tmp) throws Exception {
-        Assumptions.assumeTrue(!System.getProperty("os.name", "").toLowerCase().contains("win"));
-        final var configured =
-                Files.createDirectories(tmp.resolve("configured/nested")).getParent();
-        final var project = Files.createDirectories(tmp.resolve("project"));
-        final var bash = new BashTool(
-                NOOP,
-                new ProcessService(),
-                TestConfigs.codingAgent(Map.of("yca.workingDir", configured.toString())),
-                null);
-        final var result =
-                bash.execute(Map.of("command", "pwd", "workdir", "nested"), contextWithProjectDir(project.toString()));
-        assertFalse(result.success(), result.output());
-        assertEquals("workdir '" + project.resolve("nested") + "' does not exist", result.output());
-        final var stale = bash.execute(
-                Map.of("command", "pwd", "workdir", "nested"),
-                contextWithProjectDir(tmp.resolve("gone").toString()));
-        assertFalse(stale.success(), stale.output());
-        assertEquals("workdir '" + tmp.resolve("gone/nested") + "' does not exist", stale.output());
+    @Nested
+    @FusionSupport(modules = MissingRelativeExplicitWorkdirDoesNotFallBackScenarioModule.class)
+    class MissingRelativeExplicitWorkdirDoesNotFallBackScenario {
+        @TempDir
+        static Path directory;
+
+        @Test
+        void missingRelativeExplicitWorkdirDoesNotFallBack(@Fusion final CodingAgentConfiguration configuration)
+                throws Exception {
+            final var tmp = MissingRelativeExplicitWorkdirDoesNotFallBackScenario.directory;
+            Assumptions.assumeTrue(
+                    !System.getProperty("os.name", "").toLowerCase().contains("win"));
+            final var configured =
+                    Files.createDirectories(tmp.resolve("configured/nested")).getParent();
+            final var project = Files.createDirectories(tmp.resolve("project"));
+            final var bash = new BashTool(NOOP, new ProcessService(), configuration, null);
+            final var result = bash.execute(
+                    Map.of("command", "pwd", "workdir", "nested"), contextWithProjectDir(project.toString()));
+            assertFalse(result.success(), result.output());
+            assertEquals("workdir '" + project.resolve("nested") + "' does not exist", result.output());
+            final var stale = bash.execute(
+                    Map.of("command", "pwd", "workdir", "nested"),
+                    contextWithProjectDir(tmp.resolve("gone").toString()));
+            assertFalse(stale.success(), stale.output());
+            assertEquals("workdir '" + tmp.resolve("gone/nested") + "' does not exist", stale.output());
+        }
     }
 
     @Test
@@ -174,28 +222,46 @@ class BashToolProcessTest {
                 "the error must name the missing path: " + result.output());
     }
 
-    @Test
-    void missingSessionDirectoryDoesNotFallBackToConfiguredRoot(@TempDir final Path tmp) throws Exception {
-        Assumptions.assumeTrue(!System.getProperty("os.name", "").toLowerCase().contains("win"));
-        final var configDir = Files.createDirectories(tmp.resolve("config"));
-        final var bash = new BashTool(
-                NOOP, new ProcessService(), TestConfigs.codingAgent(Map.of("yca.workingDir", configDir.toString())));
-        final var missingProject = tmp.resolve("gone");
-        final var result = bash.execute(Map.of("command", "pwd"), contextWithProjectDir(missingProject.toString()));
-        assertFalse(result.success(), result.output());
-        assertTrue(result.output().contains(missingProject.toString()), result.output());
+    @Nested
+    @FusionSupport(modules = MissingSessionDirectoryDoesNotFallBackToConfiguredRootScenarioModule.class)
+    class MissingSessionDirectoryDoesNotFallBackToConfiguredRootScenario {
+        @TempDir
+        static Path directory;
+
+        @Test
+        void missingSessionDirectoryDoesNotFallBackToConfiguredRoot(
+                @Fusion final CodingAgentConfiguration configuration) throws Exception {
+            final var tmp = MissingSessionDirectoryDoesNotFallBackToConfiguredRootScenario.directory;
+            Assumptions.assumeTrue(
+                    !System.getProperty("os.name", "").toLowerCase().contains("win"));
+            final var configDir = Files.createDirectories(tmp.resolve("config"));
+            final var bash = new BashTool(NOOP, new ProcessService(), configuration);
+            final var missingProject = tmp.resolve("gone");
+            final var result = bash.execute(Map.of("command", "pwd"), contextWithProjectDir(missingProject.toString()));
+            assertFalse(result.success(), result.output());
+            assertTrue(result.output().contains(missingProject.toString()), result.output());
+        }
     }
 
-    @Test
-    void missingSessionDirectoryDoesNotFallBackToProcessRoot(@TempDir final Path tmp) throws Exception {
-        Assumptions.assumeTrue(!System.getProperty("os.name", "").toLowerCase().contains("win"));
-        final var configDir = Files.createDirectories(tmp.resolve("config"));
-        final var bash = new BashTool(
-                NOOP, new ProcessService(), TestConfigs.codingAgent(Map.of("yca.workingDir", configDir.toString())));
-        final var missingProject = tmp.resolve("gone");
-        final var result = bash.execute(Map.of("command", "pwd"), contextWithProjectDir(missingProject.toString()));
-        assertFalse(result.success(), result.output());
-        assertTrue(result.output().contains(missingProject.toString()), result.output());
+    @Nested
+    @FusionSupport(modules = MissingSessionDirectoryDoesNotFallBackToProcessRootScenarioModule.class)
+    class MissingSessionDirectoryDoesNotFallBackToProcessRootScenario {
+        @TempDir
+        static Path directory;
+
+        @Test
+        void missingSessionDirectoryDoesNotFallBackToProcessRoot(@Fusion final CodingAgentConfiguration configuration)
+                throws Exception {
+            final var tmp = MissingSessionDirectoryDoesNotFallBackToProcessRootScenario.directory;
+            Assumptions.assumeTrue(
+                    !System.getProperty("os.name", "").toLowerCase().contains("win"));
+            final var configDir = Files.createDirectories(tmp.resolve("config"));
+            final var bash = new BashTool(NOOP, new ProcessService(), configuration);
+            final var missingProject = tmp.resolve("gone");
+            final var result = bash.execute(Map.of("command", "pwd"), contextWithProjectDir(missingProject.toString()));
+            assertFalse(result.success(), result.output());
+            assertTrue(result.output().contains(missingProject.toString()), result.output());
+        }
     }
 
     @Test
@@ -213,42 +279,74 @@ class BashToolProcessTest {
         assertTrue(result.output().contains("code=1"), "PIPESTATUS[0] must be 1 (false|true), got: " + result.output());
     }
 
-    @Test
-    void pinnedShStillRunsPosixCommands(@TempDir final Path tmp) throws Exception {
-        // Pinning to sh is honored: the configured escape hatch keeps strict-POSIX /bin/sh behavior.
-        Assumptions.assumeTrue(!System.getProperty("os.name", "").toLowerCase().contains("win"));
-        Assumptions.assumeTrue(Files.isExecutable(Path.of("/bin/sh")), "needs /bin/sh (POSIX)");
-        final var config = TestConfigs.codingAgent(Map.of("yca.tools.shell", "sh"));
-        final var bash = new BashTool(NOOP, new ProcessService(), config);
-        final var result = bash.execute(Map.of("command", "echo ok", "workdir", tmp.toString()), context());
-        assertTrue(result.success(), "a pinned-sh command must run: " + result.output());
-        assertTrue(result.output().contains("ok"), "echo output expected under pinned sh: " + result.output());
+    @Nested
+    @FusionSupport(modules = PinnedShStillRunsPosixCommandsScenarioModule.class)
+    class PinnedShStillRunsPosixCommandsScenario {
+        @TempDir
+        static Path directory;
+
+        @Test
+        void pinnedShStillRunsPosixCommands(@Fusion final CodingAgentConfiguration configuration) throws Exception {
+            final var tmp = PinnedShStillRunsPosixCommandsScenario.directory;
+            // Pinning to sh is honored: the configured escape hatch keeps strict-POSIX /bin/sh behavior.
+            Assumptions.assumeTrue(
+                    !System.getProperty("os.name", "").toLowerCase().contains("win"));
+            Assumptions.assumeTrue(Files.isExecutable(Path.of("/bin/sh")), "needs /bin/sh (POSIX)");
+            final var config = configuration;
+            final var bash = new BashTool(NOOP, new ProcessService(), config);
+            final var result = bash.execute(Map.of("command", "echo ok", "workdir", tmp.toString()), context());
+            assertTrue(result.success(), "a pinned-sh command must run: " + result.output());
+            assertTrue(result.output().contains("ok"), "echo output expected under pinned sh: " + result.output());
+        }
     }
 
-    @Test
-    void missingPinnedShellFallsBackToShWithANotice(@TempDir final Path tmp) throws Exception {
-        // An unavailable pinned shell cannot hard-fail the tool: it degrades to /bin/sh and reports the deviation
-        // so the model can see the command did not run under the requested shell.
-        Assumptions.assumeTrue(!System.getProperty("os.name", "").toLowerCase().contains("win"));
-        Assumptions.assumeTrue(Files.isExecutable(Path.of("/bin/sh")), "needs /bin/sh (POSIX)");
-        final var config = TestConfigs.codingAgent(Map.of("yca.tools.shell", "/nope/nope"));
-        final var bash = new BashTool(NOOP, new ProcessService(), config);
-        final var result = bash.execute(Map.of("command", "echo hi", "workdir", tmp.toString()), context());
-        assertTrue(result.success(), "the fallback command must still run: " + result.output());
-        assertTrue(result.output().contains("hi"), "fallback output expected: " + result.output());
-        assertTrue(
-                result.output().contains("not found") && result.output().contains("yca.tools.shell"),
-                "the missing-pin deviation must be reported: " + result.output());
+    @Nested
+    @FusionSupport(modules = MissingPinnedShellFallsBackToShWithANoticeScenarioModule.class)
+    class MissingPinnedShellFallsBackToShWithANoticeScenario {
+        @TempDir
+        static Path directory;
+
+        @Test
+        void missingPinnedShellFallsBackToShWithANotice(@Fusion final CodingAgentConfiguration configuration)
+                throws Exception {
+            final var tmp = MissingPinnedShellFallsBackToShWithANoticeScenario.directory;
+            // An unavailable pinned shell cannot hard-fail the tool: it degrades to /bin/sh and reports the deviation
+            // so the model can see the command did not run under the requested shell.
+            Assumptions.assumeTrue(
+                    !System.getProperty("os.name", "").toLowerCase().contains("win"));
+            Assumptions.assumeTrue(Files.isExecutable(Path.of("/bin/sh")), "needs /bin/sh (POSIX)");
+            final var config = configuration;
+            final var bash = new BashTool(NOOP, new ProcessService(), config);
+            final var result = bash.execute(Map.of("command", "echo hi", "workdir", tmp.toString()), context());
+            assertTrue(result.success(), "the fallback command must still run: " + result.output());
+            assertTrue(result.output().contains("hi"), "fallback output expected: " + result.output());
+            assertTrue(
+                    result.output().contains("not found") && result.output().contains("yca.tools.shell"),
+                    "the missing-pin deviation must be reported: " + result.output());
+        }
     }
 
     private static ToolContext contextWithProjectDir(final String projectDir) {
         final var dir = Path.of(projectDir).toAbsolutePath().normalize();
         return new ToolContext(
-                null, null, null, null, null, null, null, null, null, Cancellations.NEVER, null, null, dir);
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                Cancellations.NEVER,
+                null,
+                null,
+                dir,
+                new DisabledSandbox(dir));
     }
 
     private static ToolContext context() {
-        return ToolContext.empty(testWorkdir);
+        return ToolContext.empty(testWorkdir, new DisabledSandbox(testWorkdir));
     }
 
     private static Long awaitPid(final Path pidFile) throws Exception {
@@ -282,4 +380,59 @@ class BashToolProcessTest {
             // no-op
         }
     };
+
+    public static class RelativeWorkdirIsResolvedPerSessionNotAgainstConfiguredRootScenarioModule
+            extends ConfigurationTestModule {
+        public RelativeWorkdirIsResolvedPerSessionNotAgainstConfiguredRootScenarioModule() {
+            super(Map.of(
+                    "yca.workingDir",
+                    RelativeWorkdirIsResolvedPerSessionNotAgainstConfiguredRootScenario.directory
+                            .resolve("configured")
+                            .toString()));
+        }
+    }
+
+    public static class MissingRelativeExplicitWorkdirDoesNotFallBackScenarioModule extends ConfigurationTestModule {
+        public MissingRelativeExplicitWorkdirDoesNotFallBackScenarioModule() {
+            super(Map.of(
+                    "yca.workingDir",
+                    MissingRelativeExplicitWorkdirDoesNotFallBackScenario.directory
+                            .resolve("configured")
+                            .toString()));
+        }
+    }
+
+    public static class MissingSessionDirectoryDoesNotFallBackToConfiguredRootScenarioModule
+            extends ConfigurationTestModule {
+        public MissingSessionDirectoryDoesNotFallBackToConfiguredRootScenarioModule() {
+            super(Map.of(
+                    "yca.workingDir",
+                    MissingSessionDirectoryDoesNotFallBackToConfiguredRootScenario.directory
+                            .resolve("config")
+                            .toString()));
+        }
+    }
+
+    public static class MissingSessionDirectoryDoesNotFallBackToProcessRootScenarioModule
+            extends ConfigurationTestModule {
+        public MissingSessionDirectoryDoesNotFallBackToProcessRootScenarioModule() {
+            super(Map.of(
+                    "yca.workingDir",
+                    MissingSessionDirectoryDoesNotFallBackToProcessRootScenario.directory
+                            .resolve("config")
+                            .toString()));
+        }
+    }
+
+    public static class PinnedShStillRunsPosixCommandsScenarioModule extends ConfigurationTestModule {
+        public PinnedShStillRunsPosixCommandsScenarioModule() {
+            super(Map.of("yca.tools.shell", "sh"));
+        }
+    }
+
+    public static class MissingPinnedShellFallsBackToShWithANoticeScenarioModule extends ConfigurationTestModule {
+        public MissingPinnedShellFallsBackToShWithANoticeScenarioModule() {
+            super(Map.of("yca.tools.shell", "/nope/nope"));
+        }
+    }
 }

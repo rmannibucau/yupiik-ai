@@ -38,13 +38,17 @@ public final class NotificationPresentation {
 
     public static String details(final Notice notice) {
         return kind(notice) + "\n\n" + notice.title() + "\n\nSession: " + notice.session()
-                + "\nSource: " + notice.source() + "\nTime: " + Instant.ofEpochMilli(notice.timestamp())
+                + "\nSource: " + notice.source() + (notice.origin() == null ? "" : "\nOrigin: " + notice.origin())
+                + "\nTime: " + Instant.ofEpochMilli(notice.timestamp())
                 + "\n\nThis is an activity reminder. Dismissing it does not answer a YCA prompt.";
     }
 
     private static String kind(final Notice notice) {
         return switch (notice.type()) {
-            case "approval_required" -> "Approval requested";
+            case "approval_required" ->
+                "SANDBOX".equals(notice.origin())
+                        ? "Sandbox approval requested"
+                        : "PERMISSION".equals(notice.origin()) ? "Tool permission requested" : "Approval requested";
             case "input_required" -> "Input requested";
             default -> "Turn ended";
         };

@@ -43,6 +43,7 @@ import io.yupiik.ia.agent.core.llm.ToolCallPairingRepair;
 import io.yupiik.ia.agent.core.permissions.ApprovalGate;
 import io.yupiik.ia.agent.core.permissions.PermissionService;
 import io.yupiik.ia.agent.core.question.UserFeedbackService;
+import io.yupiik.ia.agent.core.sandbox.Sandbox;
 import io.yupiik.ia.agent.core.session.SessionStore;
 import io.yupiik.ia.agent.core.tools.EmbeddedTool;
 import io.yupiik.ia.agent.core.tools.ToolCategory;
@@ -203,8 +204,9 @@ public class BtwAnswerer {
             final UsageTracker usage,
             final BooleanSupplier cancelled,
             final ApprovalGate sessionGate,
-            final Path root) {
-        return ask(question, sessionId, usage, cancelled, sessionGate, null, null, root);
+            final Path root,
+            final Sandbox sandbox) {
+        return ask(question, sessionId, usage, cancelled, sessionGate, null, null, root, sandbox);
     }
 
     /** @param sessionSettings the requesting tab's selection; null means the process default provider/model */
@@ -215,8 +217,9 @@ public class BtwAnswerer {
             final BooleanSupplier cancelled,
             final ApprovalGate sessionGate,
             final ChatSettings sessionSettings,
-            final Path root) {
-        return ask(question, sessionId, usage, cancelled, sessionGate, sessionSettings, null, root);
+            final Path root,
+            final Sandbox sandbox) {
+        return ask(question, sessionId, usage, cancelled, sessionGate, sessionSettings, null, root, sandbox);
     }
 
     /**
@@ -234,8 +237,10 @@ public class BtwAnswerer {
             final ApprovalGate sessionGate,
             final ChatSettings sessionSettings,
             final SystemPromptBuilder systemPrompt,
-            final Path root) {
-        return ask(question, sessionId, usage, cancelled, sessionGate, sessionSettings, systemPrompt, null, root);
+            final Path root,
+            final Sandbox sandbox) {
+        return ask(
+                question, sessionId, usage, cancelled, sessionGate, sessionSettings, systemPrompt, null, root, sandbox);
     }
 
     /** Answers with a feedback service scoped to the owning side question. */
@@ -248,7 +253,8 @@ public class BtwAnswerer {
             final ChatSettings sessionSettings,
             final SystemPromptBuilder systemPrompt,
             final UserFeedbackService feedback,
-            final Path root) {
+            final Path root,
+            final Sandbox sandbox) {
         return ask(
                 question,
                 sessionId,
@@ -262,7 +268,8 @@ public class BtwAnswerer {
                 toolRegistry,
                 wireBtwTools(root, toolRegistry, null).stream()
                         .map(tool -> tool.function().name())
-                        .collect(Collectors.toUnmodifiableSet()));
+                        .collect(Collectors.toUnmodifiableSet()),
+                sandbox);
     }
 
     /**
@@ -283,8 +290,10 @@ public class BtwAnswerer {
             final UserFeedbackService feedback,
             final Path root,
             final ToolRegistry effectiveToolRegistry,
-            final Set<String> allowedTools) {
+            final Set<String> allowedTools,
+            final Sandbox sandbox) {
         Objects.requireNonNull(root, "workdir");
+        Objects.requireNonNull(sandbox, "sandbox");
         if (!root.isAbsolute() || !root.equals(root.normalize())) {
             throw new IllegalArgumentException("workdir must be absolute and normalized: " + root);
         }
@@ -303,7 +312,8 @@ public class BtwAnswerer {
                         feedback,
                         root,
                         effectiveToolRegistry,
-                        ceiling);
+                        ceiling,
+                        sandbox);
                 future.complete(answer);
             } catch (final IOException e) {
                 future.completeExceptionally(e);
@@ -325,7 +335,8 @@ public class BtwAnswerer {
             final ApprovalGate sessionGate,
             final ChatSettings sessionSettings,
             final SystemPromptBuilder systemPrompt,
-            final Path root)
+            final Path root,
+            final Sandbox sandbox)
             throws IOException, InterruptedException {
         return doAsk(
                 question,
@@ -338,7 +349,8 @@ public class BtwAnswerer {
                 null,
                 root,
                 toolRegistry,
-                null);
+                null,
+                sandbox);
     }
 
     private BtwAnswer doAsk(
@@ -352,11 +364,13 @@ public class BtwAnswerer {
             final UserFeedbackService feedback,
             final Path root,
             final ToolRegistry effectiveToolRegistry,
-            final Set<String> allowedTools)
+            final Set<String> allowedTools,
+            final Sandbox sandbox)
             throws IOException, InterruptedException {
         final var conf = configuration();
         // Snapshot once: neither later marker changes nor tool/model arguments may change this side request's root.
         Objects.requireNonNull(root, "workdir");
+        Objects.requireNonNull(sandbox, "sandbox");
         final var bounded = tail(sessionStore.load(sessionId), conf.maxHistoryMessages());
         // The persisted session has the agent loop's pairing repair applied per resume, but a /btw slice
         // can start mid-tool-round (orphan tool result at head, or an unpaired assistant tool_calls block
@@ -468,6 +482,7 @@ public class BtwAnswerer {
         permissions.setMode(AgentMode.PLAN);
         permissions.setPermissionMode(PermissionMode.ASK);
         permissions.setGate(sessionGate);
+        final var approvalSandbox = sandbox.approvalView(permissions);
         final var tools = effectiveToolRegistry == null
                 ? List.<Tool>of()
                 : effectiveToolRegistry.toWireTools(
@@ -559,7 +574,8 @@ public class BtwAnswerer {
                         feedback,
                         root,
                         effectiveToolRegistry,
-                        offeredTools);
+                        offeredTools,
+                        approvalSandbox);
                 messages.add(Message.tool(call.id(), outcome.output(), !outcome.success()));
             }
         }
@@ -578,7 +594,8 @@ public class BtwAnswerer {
             final UserFeedbackService feedback,
             final Path root,
             final ToolRegistry effectiveToolRegistry,
-            final Set<String> offeredTools) {
+            final Set<String> offeredTools,
+            final Sandbox sandbox) {
         final var function = call.function();
         final var name = function == null || function.name() == null ? "" : function.name();
         final var argsJson = function == null || function.arguments() == null ? "{}" : function.arguments();
@@ -636,6 +653,7 @@ public class BtwAnswerer {
                 target.settings(),
                 null,
                 root,
+                sandbox,
                 -1,
                 offeredTools,
                 null,

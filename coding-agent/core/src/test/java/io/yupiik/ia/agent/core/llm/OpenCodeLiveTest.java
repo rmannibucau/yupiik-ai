@@ -18,9 +18,12 @@ package io.yupiik.ia.agent.core.llm;
 import static org.junit.jupiter.api.Assertions.*;
 
 import io.yupiik.fusion.json.JsonMapper;
+import io.yupiik.fusion.testing.Fusion;
+import io.yupiik.fusion.testing.FusionSupport;
 import io.yupiik.ia.agent.core.agent.SystemPromptBuilder;
+import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
+import io.yupiik.ia.agent.core.configuration.ConfigurationTestModule;
 import io.yupiik.ia.agent.core.configuration.NativeProviderConfiguration;
-import io.yupiik.ia.agent.core.configuration.TestConfigs;
 import io.yupiik.ia.agent.core.wiring.HttpClientProducer;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import io.yupiik.ia.agent.test.TestJsonMapper;
@@ -36,24 +39,15 @@ import org.junit.jupiter.api.io.TempDir;
 
 /** Explicit opt-in only: never consumes free-tier requests in the normal test suite. */
 @ExtendWith(TestJsonMapper.class)
+@FusionSupport(modules = OpenCodeLiveTest.LiveModule.class)
 @EnabledIfSystemProperty(named = "yca.opencode.live", matches = "true")
 class OpenCodeLiveTest {
     @TempDir
-    Path directory;
+    static Path directory;
 
     @Test
-    void readToolRoundTripThroughCoreClient(final JsonMapper mapper) throws Exception {
-        final var cfg = TestConfigs.codingAgent(Map.ofEntries(
-                Map.entry("yca.storageHome", directory.toString()),
-                Map.entry("yca.home", directory.toString()),
-                Map.entry("yca.workingDir", directory.toString()),
-                Map.entry("yca.provider.api", "opencode-free"),
-                Map.entry("yca.provider.baseUrl", "https://opencode.ai/inference/openai/v1/chat/completions"),
-                Map.entry("yca.provider.model", System.getProperty("yca.opencode.model", "big-pickle")),
-                Map.entry("yca.provider.contextWindow", "128000"),
-                Map.entry("yca.provider.outputTokens", "64"),
-                Map.entry("yca.provider.timeoutSeconds", "45"),
-                Map.entry("yca.llm.retriesMaxAttempts", "1")));
+    void readToolRoundTripThroughCoreClient(final JsonMapper mapper, @Fusion final CodingAgentConfiguration cfg)
+            throws Exception {
         final var fixture = directory.resolve("probe.txt");
         Files.writeString(fixture, "YCA_OPENCODE_OK");
         final var tools = List.of(Tool.function(
@@ -90,6 +84,22 @@ class OpenCodeLiveTest {
             final var followup = client.chat(
                     new ChatCompletionRequest(null, messages, null, null, false, tools, "none", 64, null, Map.of()));
             assertTrue(String.valueOf(followup.message().content()).contains("YCA_OPENCODE_OK"));
+        }
+    }
+
+    public static class LiveModule extends ConfigurationTestModule {
+        public LiveModule() {
+            super(Map.ofEntries(
+                    Map.entry("yca.storageHome", directory.toString()),
+                    Map.entry("yca.home", directory.toString()),
+                    Map.entry("yca.workingDir", directory.toString()),
+                    Map.entry("yca.provider.api", "opencode-free"),
+                    Map.entry("yca.provider.baseUrl", "https://opencode.ai/inference/openai/v1/chat/completions"),
+                    Map.entry("yca.provider.model", System.getProperty("yca.opencode.model", "big-pickle")),
+                    Map.entry("yca.provider.contextWindow", "128000"),
+                    Map.entry("yca.provider.outputTokens", "64"),
+                    Map.entry("yca.provider.timeoutSeconds", "45"),
+                    Map.entry("yca.llm.retriesMaxAttempts", "1")));
         }
     }
 }

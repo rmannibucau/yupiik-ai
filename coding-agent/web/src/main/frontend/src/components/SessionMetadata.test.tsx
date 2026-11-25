@@ -114,18 +114,32 @@ describe('SessionMetadata', () => {
     expect(row(html, 'Working dir')).toContain('value=""');
     expect(options(row(html, 'Model'))).toEqual([]);
     expect(options(row(html, 'Provider'))).toEqual([]);
-    expect(options(row(html, 'Permissions'))).toEqual(['ask', 'auto_edit', 'yolo']);
+    expect(options(row(html, 'Permissions'))).toEqual(['ask', 'auto_edit', 'yolo', 'full_yolo']);
     expect(row(html, 'Permissions')).toContain('<option value="ask" selected="">');
     expect(row(html, 'Permissions')).toContain('background:var(--yca-muted)');
   });
 
   it.each([
-    ['ask', 'plan'], ['auto_edit', 'success'], ['yolo', 'yolo'],
+    ['ask', 'plan'], ['auto_edit', 'success'],
   ])('preserves the selected %s permission and its dot color', (permissionMode, color) => {
     const permissions = row(render({ permissionMode }), 'Permissions');
     expect(permissions).toContain(`<option value="${permissionMode}" selected="">`);
     expect(permissions).toContain(`background:var(--yca-${color})`);
     expect(permissions).toContain('aria-hidden="true"');
     expect(permissions).toMatch(/<dd class="yca-metadata-edit"><select[^>]*>.*<\/select><span aria-hidden="true"[^>]*><\/span><\/dd>$/);
+  });
+
+  it.each([
+    ['yolo', true, 'warning'], ['yolo', false, 'yolo'], ['yolo', undefined, 'yolo'],
+    ['full_yolo', true, 'yolo'], ['full_yolo', false, 'yolo'], ['full_yolo', undefined, 'yolo'],
+  ] as const)('warns for %s with sandbox enabled=%s', (permissionMode, sandboxEnabled, color) => {
+    const permissions = row(render({ permissionMode, sandboxEnabled }), 'Permissions');
+    expect(permissions).toContain(`<option value="${permissionMode}" selected="">`);
+    expect(permissions).toContain(`color:var(--yca-${color})`);
+    expect(permissions).toMatch(/<span aria-hidden="true"[^>]*>!<\/span>/);
+    expect(permissions).toContain('full_yolo (not recommended)');
+    if (permissionMode === 'full_yolo') {
+      expect(permissions).toContain('title="Sandbox bypassed - not recommended"');
+    }
   });
 });

@@ -20,47 +20,74 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 import com.sun.net.httpserver.HttpServer;
 import io.yupiik.fusion.json.JsonMapper;
+import io.yupiik.fusion.testing.Fusion;
+import io.yupiik.fusion.testing.FusionSupport;
 import io.yupiik.ia.agent.bot.runtime.configuration.ExecutorConfiguration;
-import io.yupiik.ia.agent.core.configuration.ConfigurationLoader;
 import io.yupiik.ia.agent.github.client.GitHubClient;
 import io.yupiik.ia.agent.github.command.WorkerCommand.Options;
+import io.yupiik.ia.agent.github.configuration.DependencyCacheConfiguration;
 import io.yupiik.ia.agent.github.configuration.GithubBotConfiguration;
 import io.yupiik.ia.agent.github.configuration.GithubExecutorConfiguration;
+import io.yupiik.ia.agent.github.configuration.PromptConfiguration;
+import io.yupiik.ia.agent.github.configuration.ReviewPresentationConfiguration;
 import io.yupiik.ia.agent.github.configuration.WorkerOptions;
 import io.yupiik.ia.agent.github.execution.cache.DependencyCache;
 import io.yupiik.ia.agent.github.model.TaskState;
 import io.yupiik.ia.agent.github.store.TaskStore;
 import io.yupiik.ia.agent.github.support.BotJsonMapper;
 import io.yupiik.ia.agent.github.support.BotTestConfiguration;
+import io.yupiik.ia.agent.github.support.GithubConfigurationTestModule;
 import io.yupiik.ia.agent.github.support.TaskFixtures;
 import io.yupiik.ia.agent.github.support.TestScript;
+import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.net.InetSocketAddress;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.attribute.PosixFilePermissions;
-import java.util.HashMap;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.CopyOnWriteArrayList;
+import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.api.parallel.Execution;
+import org.junit.jupiter.api.parallel.ExecutionMode;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
 /** Worker integration only: the fake CLI observes the same mounts and environment as the real agent. */
+@Execution(ExecutionMode.SAME_THREAD) // The class owns one stable configuration and its fixture paths/transport.
+@FusionSupport(modules = WorkerDependencyCacheTest.Source.class)
 class WorkerDependencyCacheTest {
+    @Fusion
+    private GithubBotConfiguration injectedConfiguration;
+
+    @Fusion
+    private GithubExecutorConfiguration injectedExecutor;
+
+    @Fusion
+    private Options injectedOptions;
+
+    @Fusion
+    private PromptConfiguration injectedPrompts;
+
+    @Fusion
+    private ReviewPresentationConfiguration injectedPresentation;
+
     private static final String SHA = "a".repeat(40);
     private static final String ARTIFACT = "caches/maven/repository/org/example/library/1.0/library-1.0.jar";
     private static final String SETTINGS =
             "<settings><localRepository>/attempt/storage/caches/maven/repository</localRepository></settings>\n";
 
     @TempDir
-    Path root;
+    static Path root;
 
     private Path home;
     private Path attempts;
@@ -71,6 +98,7 @@ class WorkerDependencyCacheTest {
     private GithubBotConfiguration conf;
     private ExecutorConfiguration execution;
     private GitHubClient github;
+    private static HttpServer apiServer;
     private HttpServer server;
     private String api;
     private volatile Map<String, Object> repository = Map.of("id", 12345);
@@ -83,6 +111,13 @@ class WorkerDependencyCacheTest {
         assumeTrue(
                 ((Number) Files.getAttribute(root, "unix:uid")).intValue() != 0,
                 "Docker backend requires a non-root dispatcher");
+        try (final var paths = Files.walk(root)) {
+            for (final var path : paths.sorted(Comparator.reverseOrder()).toList()) {
+                if (!path.equals(root)) {
+                    Files.delete(path);
+                }
+            }
+        }
         home = Files.createDirectory(root.resolve("state"));
         attempts = Files.createDirectory(root.resolve("attempts"));
         cacheRoot = root.resolve("dependencies");
@@ -90,7 +125,7 @@ class WorkerDependencyCacheTest {
         Files.writeString(home.resolve("agent-configuration.json"), "{}");
         json = BotJsonMapper.create(key -> Optional.empty());
         store = new TaskStore(BotTestConfiguration.home(home), json);
-        server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server = apiServer;
         server.createContext("/", exchange -> {
             final var path = exchange.getRequestURI().getPath();
             final var method = exchange.getRequestMethod();
@@ -119,32 +154,10 @@ class WorkerDependencyCacheTest {
             exchange.getResponseBody().write(bytes);
             exchange.close();
         });
-        server.start();
         api = "http://127.0.0.1:" + server.getAddress().getPort();
-        final var configuration = Map.of(
-                "github.home",
-                home.toString(),
-                "github.api",
-                api,
-                "github.login",
-                "bot",
-                "github.authorization.userIds",
-                "42");
-        conf = ConfigurationLoader.load(
-                GithubBotConfiguration.class, key -> Optional.ofNullable(configuration.get(key)));
+        conf = injectedConfiguration;
         github = new GitHubClient(URI.create(api), json, () -> "dispatcher-token", BotTestConfiguration.CLOCK);
-        final var backend = Map.of(
-                "github.executor.docker.executable",
-                executable.toString(),
-                "github.executor.docker.image",
-                "trusted-agent",
-                "github.executor.attemptRoot",
-                attempts.toString(),
-                "github.executor.timeoutSeconds",
-                "5");
-        execution = ConfigurationLoader.load(
-                        GithubExecutorConfiguration.class, key -> Optional.ofNullable(backend.get(key)))
-                .shared();
+        execution = injectedExecutor.shared();
     }
 
     @AfterEach
@@ -153,7 +166,7 @@ class WorkerDependencyCacheTest {
             github.close();
         }
         if (server != null) {
-            server.stop(0);
+            server.removeContext("/");
         }
         if (json != null) {
             json.close();
@@ -303,16 +316,27 @@ class WorkerDependencyCacheTest {
     @Test
     void publicationQuotaFailureDoesNotRetryOrFailSuccessfulAgent() throws Exception {
         // Enough room for the empty store, but not for publication staging/index reservations.
-        final var values = Map.of(
-                "worker.maxRetries", "2",
-                "worker.agentCommenting", "true",
-                "worker.dependencyCache.mode", "READ_WRITE",
-                "worker.dependencyCache.root", cacheRoot.toString(),
-                "worker.dependencyCache.presets", "MAVEN",
-                "worker.dependencyCache.maintenance.maxSizeBytes", "200000",
-                "worker.dependencyCache.limits.maxManifestBytes", "12288");
-        final var options = ConfigurationLoader.load(Options.class, key -> Optional.ofNullable(values.get(key)))
-                .worker();
+        final var configuredOptions = options("READ_WRITE", cacheRoot);
+        final var cache = configuredOptions.dependencyCache();
+        final var limits = cache.limits();
+        final var quota = new DependencyCacheConfiguration(
+                cache.mode(),
+                cache.root(),
+                cache.scope(),
+                cache.compatibility(),
+                cache.presets(),
+                cache.entries(),
+                cache.environment(),
+                cache.files(),
+                cache.gracefulTimeoutSeconds(),
+                new DependencyCacheConfiguration.Maintenance(cache.maintenance().resetAfterDays(), 200000),
+                new DependencyCacheConfiguration.Limits(
+                        limits.maxFiles(),
+                        limits.maxFileBytes(),
+                        12288,
+                        limits.operationTimeoutSeconds(),
+                        limits.maxConcurrentOperations()));
+        final var options = cacheOptions(configuredOptions, 2, quota);
         final var id = enqueue("quota-failure");
         agent(id, "success", "not-admitted");
         run(id, options);
@@ -348,18 +372,28 @@ class WorkerDependencyCacheTest {
     }
 
     private WorkerOptions options(final String mode, final Path cache) {
-        final var values = new HashMap<String, String>();
-        values.put("worker.maxRetries", "0");
-        values.put("worker.agentCommenting", "true");
-        values.put("worker.dependencyCache.mode", mode);
-        values.put("worker.dependencyCache.root", cache.toString());
-        values.put("worker.dependencyCache.presets", "MAVEN");
-        return ConfigurationLoader.load(Options.class, key -> Optional.ofNullable(values.get(key)))
-                .worker();
+        final var baseline = injectedOptions.worker();
+        final var policy = baseline.dependencyCache();
+        return cacheOptions(
+                baseline,
+                baseline.maxRetries(),
+                new DependencyCacheConfiguration(
+                        DependencyCacheConfiguration.Mode.valueOf(mode),
+                        cache.toString(),
+                        policy.scope(),
+                        policy.compatibility(),
+                        policy.presets(),
+                        policy.entries(),
+                        policy.environment(),
+                        policy.files(),
+                        policy.gracefulTimeoutSeconds(),
+                        policy.maintenance(),
+                        policy.limits()));
     }
 
     private void run(final String id, final WorkerOptions options) {
-        BotTestConfiguration.worker(conf, store, github, json, execution).run(id, options);
+        BotTestConfiguration.worker(injectedPrompts, injectedPresentation, conf, store, github, json, execution)
+                .run(id, options);
     }
 
     private String identity() {
@@ -456,5 +490,61 @@ class WorkerDependencyCacheTest {
                         "exit-failure".equals(outcome) ? 9 : 0);
         Files.writeString(executable, script.replace("#!/bin/sh\n", "#!/bin/sh\n" + TestScript.githubAgentState()));
         Files.setPosixFilePermissions(executable, PosixFilePermissions.fromString("rwx------"));
+    }
+
+    private static WorkerOptions cacheOptions(
+            final WorkerOptions baseline, final int retries, final DependencyCacheConfiguration policy) {
+        return new WorkerOptions(
+                retries,
+                baseline.parallelism(),
+                baseline.agentConfiguration(),
+                baseline.forkOwner(),
+                baseline.agentCommenting(),
+                baseline.provisionFork(),
+                baseline.cacheRoot(),
+                baseline.cacheGit(),
+                baseline.privateSource(),
+                baseline.source(),
+                policy);
+    }
+
+    @AfterAll
+    static void stopApiServer() {
+        if (apiServer != null) {
+            apiServer.stop(0);
+        }
+    }
+
+    public static class Source extends GithubConfigurationTestModule {
+        public Source() {
+            super(settings());
+        }
+
+        private static Map<String, String> settings() {
+            try {
+                apiServer = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+                apiServer.start();
+            } catch (final IOException e) {
+                throw new UncheckedIOException(e);
+            }
+            return Map.ofEntries(
+                    Map.entry(
+                            "github.api",
+                            "http://127.0.0.1:" + apiServer.getAddress().getPort()),
+                    Map.entry("github.home", root.resolve("state").toString()),
+                    Map.entry("github.login", "bot"),
+                    Map.entry("github.authorization.userIds", "42"),
+                    Map.entry(
+                            "github.executor.docker.executable",
+                            root.resolve("fake-docker").toString()),
+                    Map.entry("github.executor.docker.image", "trusted-agent"),
+                    Map.entry(
+                            "github.executor.attemptRoot",
+                            root.resolve("attempts").toString()),
+                    Map.entry("github.executor.timeoutSeconds", "5"),
+                    Map.entry("worker.maxRetries", "0"),
+                    Map.entry("worker.agentCommenting", "true"),
+                    Map.entry("worker.dependencyCache.presets", "MAVEN"));
+        }
     }
 }

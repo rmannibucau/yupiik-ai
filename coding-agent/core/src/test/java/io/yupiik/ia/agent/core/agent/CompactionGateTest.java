@@ -20,10 +20,13 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.fusion.framework.api.event.Emitter;
 import io.yupiik.fusion.json.JsonMapper;
+import io.yupiik.fusion.testing.Fusion;
+import io.yupiik.fusion.testing.FusionSupport;
 import io.yupiik.ia.agent.core.codegraph.StructuralCodeGraph;
 import io.yupiik.ia.agent.core.configuration.AgentConfiguration;
+import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
+import io.yupiik.ia.agent.core.configuration.ConfigurationTestModule;
 import io.yupiik.ia.agent.core.configuration.GateConfiguration;
-import io.yupiik.ia.agent.core.configuration.TestConfigs;
 import io.yupiik.ia.agent.core.context.BackoffSleeper;
 import io.yupiik.ia.agent.core.context.CompactionCoordinator;
 import io.yupiik.ia.agent.core.context.CompactionResult;
@@ -39,6 +42,7 @@ import io.yupiik.ia.agent.core.llm.Tool;
 import io.yupiik.ia.agent.core.llm.Usage;
 import io.yupiik.ia.agent.core.permissions.PermissionService;
 import io.yupiik.ia.agent.core.runtime.StatusReporter;
+import io.yupiik.ia.agent.core.sandbox.DisabledSandbox;
 import io.yupiik.ia.agent.core.session.SessionEntry;
 import io.yupiik.ia.agent.core.session.SessionStore;
 import io.yupiik.ia.agent.core.tools.ToolExecutionService;
@@ -52,6 +56,7 @@ import java.nio.file.Path;
 import java.time.Clock;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -59,6 +64,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
+import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -79,9 +85,6 @@ class CompactionGateTest {
 
     private static final int TRIGGER = 5_000;
     private static final int USABLE = 128_000;
-
-    @TempDir
-    Path storageHome;
 
     /**
      * Scripted tracker: {@link #effective} is a mutable value the test changes between gate passes
@@ -197,211 +200,227 @@ class CompactionGateTest {
         }
     }
 
-    @Test
-    void unproductiveRecoveryEscalatesImmediately(final JsonMapper mapper) throws Exception {
-        final var tracker = new ScriptedUsageTracker(15_000);
-        final var manager = new ScriptedContextManager(TRIGGER); // recovery and spill both NONE
-        final var events = new CopyOnWriteArrayList<AgentEvent>();
-        final var requests = new CopyOnWriteArrayList<List<Message>>();
-        try (final var executor = Executors.newVirtualThreadPerTaskExecutor()) {
-            final var loop = newLoop(mapper, newClient(requests), tracker, manager, events, executor, null);
-            loop.run("work", null, "s1", List.of(), () -> false);
+    @Nested
+    @FusionSupport(modules = ConfiguredModule.class)
+    class Configured {
+        @TempDir
+        static Path storageHome;
+
+        @Test
+        void unproductiveRecoveryEscalatesImmediately(
+                final JsonMapper mapper, @Fusion final CodingAgentConfiguration config) throws Exception {
+            final var tracker = new ScriptedUsageTracker(15_000);
+            final var manager = new ScriptedContextManager(TRIGGER); // recovery and spill both NONE
+            final var events = new CopyOnWriteArrayList<AgentEvent>();
+            final var requests = new CopyOnWriteArrayList<List<Message>>();
+            try (final var executor = Executors.newVirtualThreadPerTaskExecutor()) {
+                final var loop = newLoop(config, mapper, newClient(requests), tracker, manager, events, executor, null);
+                loop.run("work", null, "s1", List.of(), () -> false);
+            }
+            // the escalation ERROR event is exactly what the gate must emit when nothing can be reclaimed
+            final var errors = errorNotices(events);
+            assertEquals(1, errors.size(), "one escalation notice: " + events);
+            assertTrue(errors.get(0).startsWith("Compaction gate:"), errors.get(0));
+            assertEquals(1, manager.recoveryCalls);
+            assertEquals(1, manager.spillCalls, "NONE recovery falls through to the local spill");
         }
-        // the escalation ERROR event is exactly what the gate must emit when nothing can be reclaimed
-        final var errors = errorNotices(events);
-        assertEquals(1, errors.size(), "one escalation notice: " + events);
-        assertTrue(errors.get(0).startsWith("Compaction gate:"), errors.get(0));
-        assertEquals(1, manager.recoveryCalls);
-        assertEquals(1, manager.spillCalls, "NONE recovery falls through to the local spill");
-    }
 
-    @Test
-    void twoWeakPassesEscalateOnTheSecond(final JsonMapper mapper) throws Exception {
-        final var tracker = new ScriptedUsageTracker(15_000);
-        final var manager = new ScriptedContextManager(TRIGGER) {
-            @Override
-            public CompactionResult compactForRecovery(
-                    final List<Message> messages,
-                    final BooleanSupplier cancelled,
-                    final ChatSettings settings,
-                    final CompactionCoordinator.CompactionProgress progress) {
-                recoveryCalls++; // bumps the call count
-                // reclaim ~2% of the CURRENT effective base, keeping it above the trigger
-                final var before = tracker.effective;
-                tracker.setEffective(before - Math.max(1, (int) (before * 0.02)));
-                return new CompactionResult(List.copyOf(messages), CompactionResult.Mode.SUMMARY, "");
+        @Test
+        void twoWeakPassesEscalateOnTheSecond(final JsonMapper mapper, @Fusion final CodingAgentConfiguration config)
+                throws Exception {
+            final var tracker = new ScriptedUsageTracker(15_000);
+            final var manager = new ScriptedContextManager(TRIGGER) {
+                @Override
+                public CompactionResult compactForRecovery(
+                        final List<Message> messages,
+                        final BooleanSupplier cancelled,
+                        final ChatSettings settings,
+                        final CompactionCoordinator.CompactionProgress progress) {
+                    recoveryCalls++; // bumps the call count
+                    // reclaim ~2% of the CURRENT effective base, keeping it above the trigger
+                    final var before = tracker.effective;
+                    tracker.setEffective(before - Math.max(1, (int) (before * 0.02)));
+                    return new CompactionResult(List.copyOf(messages), CompactionResult.Mode.SUMMARY, "");
+                }
+            };
+            final var events = new CopyOnWriteArrayList<AgentEvent>();
+            final var requests = new CopyOnWriteArrayList<List<Message>>();
+            try (final var executor = Executors.newVirtualThreadPerTaskExecutor()) {
+                final var loop = newLoop(config, mapper, newClient(requests), tracker, manager, events, executor, null);
+                loop.run("work", null, "s1", List.of(), () -> false);
             }
-        };
-        final var events = new CopyOnWriteArrayList<AgentEvent>();
-        final var requests = new CopyOnWriteArrayList<List<Message>>();
-        try (final var executor = Executors.newVirtualThreadPerTaskExecutor()) {
-            final var loop = newLoop(mapper, newClient(requests), tracker, manager, events, executor, null);
-            loop.run("work", null, "s1", List.of(), () -> false);
+            final var errors = errorNotices(events);
+            assertEquals(1, errors.size(), "second weak pass escalates: " + events);
+            assertEquals(2, manager.recoveryCalls, "exactly two recovery passes before escalation");
+            assertTrue(errors.get(0).startsWith("Compaction gate:"), errors.get(0));
         }
-        final var errors = errorNotices(events);
-        assertEquals(1, errors.size(), "second weak pass escalates: " + events);
-        assertEquals(2, manager.recoveryCalls, "exactly two recovery passes before escalation");
-        assertTrue(errors.get(0).startsWith("Compaction gate:"), errors.get(0));
-    }
 
-    @Test
-    void llmFreeGateStillEscalatesWithoutAnyLlmCall(final JsonMapper mapper) throws Exception {
-        // under ignoreLlm the checkpoint compact is local-only; when even the local cascade cannot
-        // reclaim (scripted NONE), the gate must still escalate - and never call the LLM (the
-        // recovery here is the real local compact, exercised through the scripted manager).
-        final var tracker = new ScriptedUsageTracker(15_000);
-        final var manager = new ScriptedContextManager(TRIGGER) {
-            @Override
-            public boolean ignoreLlm(final ChatSettings settings) {
-                return true;
-            }
+        @Test
+        void llmFreeGateStillEscalatesWithoutAnyLlmCall(
+                final JsonMapper mapper, @Fusion final CodingAgentConfiguration config) throws Exception {
+            // under ignoreLlm the checkpoint compact is local-only; when even the local cascade cannot
+            // reclaim (scripted NONE), the gate must still escalate - and never call the LLM (the
+            // recovery here is the real local compact, exercised through the scripted manager).
+            final var tracker = new ScriptedUsageTracker(15_000);
+            final var manager = new ScriptedContextManager(TRIGGER) {
+                @Override
+                public boolean ignoreLlm(final ChatSettings settings) {
+                    return true;
+                }
 
-            @Override
-            public boolean compactNeeded(final List<Message> messages, final int extraToolTokens) {
-                // the checkpoint itself stays green (like a non-compactable context): the gate is the
-                // only path that runs, exactly like the existing gate tests
-                return false;
-            }
+                @Override
+                public boolean compactNeeded(final List<Message> messages, final int extraToolTokens) {
+                    // the checkpoint itself stays green (like a non-compactable context): the gate is the
+                    // only path that runs, exactly like the existing gate tests
+                    return false;
+                }
 
-            @Override
-            public CompactionResult compactForRecovery(
-                    final List<Message> messages,
-                    final BooleanSupplier cancelled,
-                    final ChatSettings settings,
-                    final CompactionCoordinator.CompactionProgress progress) {
-                recoveryCalls++;
-                return new CompactionResult(messages, CompactionResult.Mode.NONE, "");
-            }
+                @Override
+                public CompactionResult compactForRecovery(
+                        final List<Message> messages,
+                        final BooleanSupplier cancelled,
+                        final ChatSettings settings,
+                        final CompactionCoordinator.CompactionProgress progress) {
+                    recoveryCalls++;
+                    return new CompactionResult(messages, CompactionResult.Mode.NONE, "");
+                }
 
-            @Override
-            public CompactionResult localSpill(final List<Message> messages, final int targetTokens) {
-                spillCalls++;
-                return new CompactionResult(messages, CompactionResult.Mode.NONE, "");
+                @Override
+                public CompactionResult localSpill(final List<Message> messages, final int targetTokens) {
+                    spillCalls++;
+                    return new CompactionResult(messages, CompactionResult.Mode.NONE, "");
+                }
+            };
+            final var events = new CopyOnWriteArrayList<AgentEvent>();
+            final var requests = new CopyOnWriteArrayList<List<Message>>();
+            try (final var executor = Executors.newVirtualThreadPerTaskExecutor()) {
+                final var loop = newLoop(config, mapper, newClient(requests), tracker, manager, events, executor, null);
+                loop.run("work", null, "s1", List.of(), () -> false);
             }
-        };
-        final var events = new CopyOnWriteArrayList<AgentEvent>();
-        final var requests = new CopyOnWriteArrayList<List<Message>>();
-        try (final var executor = Executors.newVirtualThreadPerTaskExecutor()) {
-            final var loop = newLoop(mapper, newClient(requests), tracker, manager, events, executor, null);
-            loop.run("work", null, "s1", List.of(), () -> false);
+            final var errors = errorNotices(events);
+            assertEquals(1, errors.size(), "one escalation notice under llmFree: " + events);
+            assertTrue(errors.get(0).startsWith("Compaction gate:"), errors.get(0));
+            assertEquals(1, manager.recoveryCalls, "local-only recovery ran once");
+            assertEquals(1, manager.spillCalls, "local spill ran once after NONE recovery");
         }
-        final var errors = errorNotices(events);
-        assertEquals(1, errors.size(), "one escalation notice under llmFree: " + events);
-        assertTrue(errors.get(0).startsWith("Compaction gate:"), errors.get(0));
-        assertEquals(1, manager.recoveryCalls, "local-only recovery ran once");
-        assertEquals(1, manager.spillCalls, "local spill ran once after NONE recovery");
-    }
 
-    @Test
-    void strongReductionBelowTriggerExitsCleanlyWithoutEscalation(final JsonMapper mapper) throws Exception {
-        final var tracker = new ScriptedUsageTracker(6_000);
-        final var manager = new ScriptedContextManager(TRIGGER) {
-            @Override
-            public CompactionResult compactForRecovery(
-                    final List<Message> messages,
-                    final BooleanSupplier cancelled,
-                    final ChatSettings settings,
-                    final CompactionCoordinator.CompactionProgress progress) {
-                recoveryCalls++;
-                tracker.setEffective(TRIGGER - 1); // a single strong pass drops below the trigger
-                return new CompactionResult(List.copyOf(messages), CompactionResult.Mode.SUMMARY, "");
+        @Test
+        void strongReductionBelowTriggerExitsCleanlyWithoutEscalation(
+                final JsonMapper mapper, @Fusion final CodingAgentConfiguration config) throws Exception {
+            final var tracker = new ScriptedUsageTracker(6_000);
+            final var manager = new ScriptedContextManager(TRIGGER) {
+                @Override
+                public CompactionResult compactForRecovery(
+                        final List<Message> messages,
+                        final BooleanSupplier cancelled,
+                        final ChatSettings settings,
+                        final CompactionCoordinator.CompactionProgress progress) {
+                    recoveryCalls++;
+                    tracker.setEffective(TRIGGER - 1); // a single strong pass drops below the trigger
+                    return new CompactionResult(List.copyOf(messages), CompactionResult.Mode.SUMMARY, "");
+                }
+            };
+            final var events = new CopyOnWriteArrayList<AgentEvent>();
+            final var requests = new CopyOnWriteArrayList<List<Message>>();
+            try (final var executor = Executors.newVirtualThreadPerTaskExecutor()) {
+                final var loop = newLoop(config, mapper, newClient(requests), tracker, manager, events, executor, null);
+                loop.run("work", null, "s1", List.of(), () -> false);
             }
-        };
-        final var events = new CopyOnWriteArrayList<AgentEvent>();
-        final var requests = new CopyOnWriteArrayList<List<Message>>();
-        try (final var executor = Executors.newVirtualThreadPerTaskExecutor()) {
-            final var loop = newLoop(mapper, newClient(requests), tracker, manager, events, executor, null);
-            loop.run("work", null, "s1", List.of(), () -> false);
+            assertTrue(
+                    errorNotices(events).isEmpty(),
+                    "no escalation notice when recovery lands below trigger: " + events);
+            assertEquals(1, manager.recoveryCalls);
         }
-        assertTrue(errorNotices(events).isEmpty(), "no escalation notice when recovery lands below trigger: " + events);
-        assertEquals(1, manager.recoveryCalls);
-    }
 
-    @Test
-    void attemptBudgetExhaustionEscalates(final JsonMapper mapper) throws Exception {
-        final var tracker = new ScriptedUsageTracker(10_000);
-        // recovery always reclaims a strong slice (6%, above the 5% weak-pass bar) - never enough to
-        // drop below the trigger, so the gate runs out of ATTEMPTS (not weak passes) and escalates
-        final var manager = new ScriptedContextManager(TRIGGER, 3, -1) {
-            @Override
-            public CompactionResult compactForRecovery(
-                    final List<Message> messages,
-                    final BooleanSupplier cancelled,
-                    final ChatSettings settings,
-                    final CompactionCoordinator.CompactionProgress progress) {
-                recoveryCalls++;
-                final var before = tracker.effective;
-                tracker.setEffective(Math.max(TRIGGER + 1, before - Math.max(1, (int) (before * 0.06))));
-                return new CompactionResult(List.copyOf(messages), CompactionResult.Mode.SUMMARY, "");
+        @Test
+        void attemptBudgetExhaustionEscalates(final JsonMapper mapper, @Fusion final CodingAgentConfiguration config)
+                throws Exception {
+            final var tracker = new ScriptedUsageTracker(10_000);
+            // recovery always reclaims a strong slice (6%, above the 5% weak-pass bar) - never enough to
+            // drop below the trigger, so the gate runs out of ATTEMPTS (not weak passes) and escalates
+            final var manager = new ScriptedContextManager(TRIGGER, 3, -1) {
+                @Override
+                public CompactionResult compactForRecovery(
+                        final List<Message> messages,
+                        final BooleanSupplier cancelled,
+                        final ChatSettings settings,
+                        final CompactionCoordinator.CompactionProgress progress) {
+                    recoveryCalls++;
+                    final var before = tracker.effective;
+                    tracker.setEffective(Math.max(TRIGGER + 1, before - Math.max(1, (int) (before * 0.06))));
+                    return new CompactionResult(List.copyOf(messages), CompactionResult.Mode.SUMMARY, "");
+                }
+            };
+            final var events = new CopyOnWriteArrayList<AgentEvent>();
+            final var requests = new CopyOnWriteArrayList<List<Message>>();
+            try (final var executor = Executors.newVirtualThreadPerTaskExecutor()) {
+                final var loop = newLoop(config, mapper, newClient(requests), tracker, manager, events, executor, null);
+                loop.run("work", null, "s1", List.of(), () -> false);
             }
-        };
-        final var events = new CopyOnWriteArrayList<AgentEvent>();
-        final var requests = new CopyOnWriteArrayList<List<Message>>();
-        try (final var executor = Executors.newVirtualThreadPerTaskExecutor()) {
-            final var loop = newLoop(mapper, newClient(requests), tracker, manager, events, executor, null);
-            loop.run("work", null, "s1", List.of(), () -> false);
+            final var errors = errorNotices(events);
+            assertEquals(1, errors.size(), "attempt-budget exhaustion escalates: " + events);
+            assertEquals(3, manager.recoveryCalls, "exactly the budgeted attempts run before escalation");
+            assertTrue(errors.get(0).startsWith("Compaction gate:"), errors.get(0));
         }
-        final var errors = errorNotices(events);
-        assertEquals(1, errors.size(), "attempt-budget exhaustion escalates: " + events);
-        assertEquals(3, manager.recoveryCalls, "exactly the budgeted attempts run before escalation");
-        assertTrue(errors.get(0).startsWith("Compaction gate:"), errors.get(0));
-    }
 
-    @Test
-    void wallClockBudgetExhaustionEscalates(final JsonMapper mapper) throws Exception {
-        final var tracker = new ScriptedUsageTracker(10_000);
-        final var time = new VirtualNanos();
-        final var manager = new ScriptedContextManager(TRIGGER, -1, 500) {
-            @Override
-            public CompactionResult compactForRecovery(
-                    final List<Message> messages,
-                    final BooleanSupplier cancelled,
-                    final ChatSettings settings,
-                    final CompactionCoordinator.CompactionProgress progress) {
-                recoveryCalls++;
-                // advance the virtual clock past the 500ms budget on the first pass
-                time.advanceMillis(501);
-                final var before = tracker.effective;
-                tracker.setEffective(Math.max(TRIGGER + 1, before - Math.max(1, before / 100)));
-                return new CompactionResult(List.copyOf(messages), CompactionResult.Mode.SUMMARY, "");
+        @Test
+        void wallClockBudgetExhaustionEscalates(final JsonMapper mapper, @Fusion final CodingAgentConfiguration config)
+                throws Exception {
+            final var tracker = new ScriptedUsageTracker(10_000);
+            final var time = new VirtualNanos();
+            final var manager = new ScriptedContextManager(TRIGGER, -1, 500) {
+                @Override
+                public CompactionResult compactForRecovery(
+                        final List<Message> messages,
+                        final BooleanSupplier cancelled,
+                        final ChatSettings settings,
+                        final CompactionCoordinator.CompactionProgress progress) {
+                    recoveryCalls++;
+                    // advance the virtual clock past the 500ms budget on the first pass
+                    time.advanceMillis(501);
+                    final var before = tracker.effective;
+                    tracker.setEffective(Math.max(TRIGGER + 1, before - Math.max(1, before / 100)));
+                    return new CompactionResult(List.copyOf(messages), CompactionResult.Mode.SUMMARY, "");
+                }
+            };
+            final var events = new CopyOnWriteArrayList<AgentEvent>();
+            final var requests = new CopyOnWriteArrayList<List<Message>>();
+            try (final var executor = Executors.newVirtualThreadPerTaskExecutor()) {
+                final var loop = newLoop(config, mapper, newClient(requests), tracker, manager, events, executor, time);
+                loop.run("work", null, "s1", List.of(), () -> false);
             }
-        };
-        final var events = new CopyOnWriteArrayList<AgentEvent>();
-        final var requests = new CopyOnWriteArrayList<List<Message>>();
-        try (final var executor = Executors.newVirtualThreadPerTaskExecutor()) {
-            final var loop = newLoop(mapper, newClient(requests), tracker, manager, events, executor, time);
-            loop.run("work", null, "s1", List.of(), () -> false);
+            final var errors = errorNotices(events);
+            assertEquals(1, errors.size(), "duration-budget exhaustion escalates: " + events);
+            assertTrue(errors.get(0).startsWith("Compaction gate:"), errors.get(0));
         }
-        final var errors = errorNotices(events);
-        assertEquals(1, errors.size(), "duration-budget exhaustion escalates: " + events);
-        assertTrue(errors.get(0).startsWith("Compaction gate:"), errors.get(0));
-    }
 
-    @Test
-    void cancelledTurnAbortsTheGateWithoutEscalation(final JsonMapper mapper) throws Exception {
-        final var tracker = new ScriptedUsageTracker(15_000);
-        final var cancelled = new AtomicBoolean();
-        final var manager = new ScriptedContextManager(TRIGGER) {
-            @Override
-            public CompactionResult compactForRecovery(
-                    final List<Message> messages,
-                    final BooleanSupplier probe,
-                    final ChatSettings settings,
-                    final CompactionCoordinator.CompactionProgress progress) {
-                recoveryCalls++;
-                // the scripted recovery flips the cancellation so the gate must abort mid-loop
-                cancelled.set(true);
-                return new CompactionResult(List.copyOf(messages), CompactionResult.Mode.SUMMARY, "");
+        @Test
+        void cancelledTurnAbortsTheGateWithoutEscalation(
+                final JsonMapper mapper, @Fusion final CodingAgentConfiguration config) throws Exception {
+            final var tracker = new ScriptedUsageTracker(15_000);
+            final var cancelled = new AtomicBoolean();
+            final var manager = new ScriptedContextManager(TRIGGER) {
+                @Override
+                public CompactionResult compactForRecovery(
+                        final List<Message> messages,
+                        final BooleanSupplier probe,
+                        final ChatSettings settings,
+                        final CompactionCoordinator.CompactionProgress progress) {
+                    recoveryCalls++;
+                    // the scripted recovery flips the cancellation so the gate must abort mid-loop
+                    cancelled.set(true);
+                    return new CompactionResult(List.copyOf(messages), CompactionResult.Mode.SUMMARY, "");
+                }
+            };
+            final var events = new CopyOnWriteArrayList<AgentEvent>();
+            final var requests = new CopyOnWriteArrayList<List<Message>>();
+            try (final var executor = Executors.newVirtualThreadPerTaskExecutor()) {
+                final var loop = newLoop(config, mapper, newClient(requests), tracker, manager, events, executor, null);
+                loop.run("work", null, "s1", List.of(), cancelled::get);
             }
-        };
-        final var events = new CopyOnWriteArrayList<AgentEvent>();
-        final var requests = new CopyOnWriteArrayList<List<Message>>();
-        try (final var executor = Executors.newVirtualThreadPerTaskExecutor()) {
-            final var loop = newLoop(mapper, newClient(requests), tracker, manager, events, executor, null);
-            loop.run("work", null, "s1", List.of(), cancelled::get);
+            assertTrue(errorNotices(events).isEmpty(), "no escalation when the turn is cancelled: " + events);
+            assertEquals(1, manager.recoveryCalls, "the gate aborts right after the cancelled pass");
         }
-        assertTrue(errorNotices(events).isEmpty(), "no escalation when the turn is cancelled: " + events);
-        assertEquals(1, manager.recoveryCalls, "the gate aborts right after the cancelled pass");
     }
 
     private static List<String> errorNotices(final List<AgentEvent> events) {
@@ -438,6 +457,7 @@ class CompactionGateTest {
     }
 
     private AgentLoop newLoop(
+            final CodingAgentConfiguration config,
             final JsonMapper mapper,
             final ChatClient client,
             final UsageTracker usage,
@@ -446,21 +466,6 @@ class CompactionGateTest {
             final ExecutorService executor,
             final PrecisionDurationMarkerProvider precision) {
         final var resolvedPrecision = precision == null ? new PrecisionDurationMarkerProvider() : precision;
-        final var entries = new HashMap<String, String>();
-        entries.put("yca.storageHome", storageHome.toString());
-        entries.put("yca.workingDir", storageHome.toString());
-        entries.put("yca.provider.providers.length", "1");
-        entries.put("yca.provider.providers.0.id", "default");
-        entries.put("yca.provider.providers.0.baseUrl", "http://localhost:1/v1/chat/completions");
-        entries.put("yca.provider.providers.0.apiKey", "test-key");
-        entries.put("yca.provider.providers.0.model", "test-model");
-        entries.put("yca.provider.providers.0.contextWindow", "128000");
-        entries.put("yca.compaction.thresholdPercent", "20");
-        entries.put("yca.compaction.speculative.startPercent", "1");
-        entries.put("yca.pruning.enabled", "false");
-        entries.put("yca.pruning.keepRecent", "2");
-        entries.put("yca.llm.maxIterations", "3");
-        final var config = TestConfigs.codingAgent(entries);
         final var emitter = new Emitter() {
             @Override
             public <T> void emit(final T event) {
@@ -519,7 +524,8 @@ class CompactionGateTest {
                 null,
                 null,
                 null,
-                (config).resolveWorkingDir());
+                (config).resolveWorkingDir(),
+                new DisabledSandbox((config).resolveWorkingDir()));
         // the gate's per-pass backoff is a real Thread.sleep (capped at 5s), which would stall the
         // suite for ~9s across these cases; the tests assert the gate's cadence/outcome through the
         // recovery-call counts and escalation events, never the wall-clock delay, so a no-op sleeper
@@ -531,5 +537,29 @@ class CompactionGateTest {
             }
         });
         return loop;
+    }
+
+    public static class ConfiguredModule extends ConfigurationTestModule {
+        public ConfiguredModule() {
+            super(values());
+        }
+
+        private static Map<String, String> values() {
+            final var entries = new HashMap<String, String>();
+            entries.put("yca.storageHome", Configured.storageHome.toString());
+            entries.put("yca.workingDir", Configured.storageHome.toString());
+            entries.put("yca.provider.providers.length", "1");
+            entries.put("yca.provider.providers.0.id", "default");
+            entries.put("yca.provider.providers.0.baseUrl", "http://localhost:1/v1/chat/completions");
+            entries.put("yca.provider.providers.0.apiKey", "test-key");
+            entries.put("yca.provider.providers.0.model", "test-model");
+            entries.put("yca.provider.providers.0.contextWindow", "128000");
+            entries.put("yca.compaction.thresholdPercent", "20");
+            entries.put("yca.compaction.speculative.startPercent", "1");
+            entries.put("yca.pruning.enabled", "false");
+            entries.put("yca.pruning.keepRecent", "2");
+            entries.put("yca.llm.maxIterations", "3");
+            return entries;
+        }
     }
 }

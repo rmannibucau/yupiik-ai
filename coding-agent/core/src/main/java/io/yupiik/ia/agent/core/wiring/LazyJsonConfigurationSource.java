@@ -19,14 +19,20 @@ import io.yupiik.fusion.framework.api.configuration.Configuration;
 import io.yupiik.fusion.framework.api.configuration.ConfigurationSource;
 import io.yupiik.fusion.framework.api.io.ReaderSupplier;
 import io.yupiik.fusion.json.configuration.JsonConfigurationSource;
-import io.yupiik.ia.agent.core.configuration.BootstrapConfiguration;
-import io.yupiik.ia.agent.core.configuration.ConfigurationLoader;
+import io.yupiik.fusion.json.internal.JsonMapperImpl;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStreamReader;
+import java.io.StringWriter;
 import java.io.UncheckedIOException;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.Properties;
 import java.util.function.Function;
 
 /**
@@ -107,16 +113,25 @@ public class LazyJsonConfigurationSource implements ConfigurationSource {
 
     private static ConfigurationSource createSource(final Configuration configuration) {
         final var globalPath = resolveGlobalConfigurationFile(configuration);
-        if (!ConfigurationLoader.load(BootstrapConfiguration.class, configuration)
-                .projectEnabled()) {
+        // Typed configuration depends on this source; use the already supplied base configuration
+        // for this bootstrap-only flag to avoid a circular dependency during source initialization.
+        if (!configuration
+                .get("yca.configuration.project.enabled")
+                .map(Boolean::parseBoolean)
+                .orElse(true)) {
             return loadJson(globalPath);
         }
-        final var child = loadJson(projectConfigurationFile(configuration));
-        if (child != null && "true".equals(child.get(INHERIT))) {
-            final var parent = loadJson(globalPath);
-            return parent == null ? child : new CombinedConfigurationSource(child, parent);
+        final var projectPath = projectConfigurationFile(configuration);
+        final var child = loadJson(projectPath, true);
+        final var parent = loadJson(globalPath);
+        if (child == null) {
+            return parent;
         }
-        return child != null ? child : loadJson(globalPath);
+        final var ordinary = "true".equals(child.get(INHERIT)) && parent != null
+                ? new CombinedConfigurationSource(child, parent)
+                : child;
+        // Project $inherit:false must not discard a restrictive trusted sandbox policy.
+        return key -> isSandboxKey(key) ? (parent == null ? null : parent.get(key)) : ordinary.get(key);
     }
 
     private static Path projectConfigurationFile(final Configuration configuration) {
@@ -124,7 +139,8 @@ public class LazyJsonConfigurationSource implements ConfigurationSource {
         return Path.of(workingDir).toAbsolutePath().normalize().resolve(".yca").resolve("configuration.json");
     }
 
-    private static Path resolveGlobalConfigurationFile(final Configuration configuration) {
+    /** Trusted global configuration location, shared with the sandbox initialization command. */
+    public static Path resolveGlobalConfigurationFile(final Configuration configuration) {
         return Path.of(configuration.get(GLOBAL_CONFIG_KEY).orElseGet(() -> defaultConfigurationFile(configuration)));
     }
 
@@ -133,7 +149,11 @@ public class LazyJsonConfigurationSource implements ConfigurationSource {
      * system properties, environment and CLI args) instead of raw {@code System.*} reads.
      */
     private static String defaultConfigurationFile(final Configuration configuration) {
-        final var storageHome = configuration.get(STORAGE_HOME_KEY).orElse("").trim();
+        final var storageHome = configuration
+                .get("yca.storageHome")
+                .or(() -> configuration.get(STORAGE_HOME_KEY))
+                .orElse("")
+                .trim();
         if (storageHome.isEmpty()) {
             final var userHome = configuration.get(USER_HOME_KEY).orElse(".");
             return Path.of(userHome, ".yupiik", "coding-agent", "configuration.json")
@@ -145,16 +165,80 @@ public class LazyJsonConfigurationSource implements ConfigurationSource {
         return Path.of(expanded, "configuration.json").toString();
     }
 
+    private static boolean isSandboxKey(final String key) {
+        final var normalized = KEY_NORMALIZER.apply(key);
+        return "sandbox".equals(normalized) || normalized.startsWith("sandbox.");
+    }
+
+    private static void rejectProjectSandbox(final Object value, final String prefix, final Path path) {
+        if (value instanceof Map<?, ?> map) {
+            for (final var entry : map.entrySet()) {
+                final var key = KEY_NORMALIZER.apply(
+                        prefix.isEmpty() ? entry.getKey().toString() : prefix + "." + entry.getKey());
+                if (isSandboxKey(key)) {
+                    throw new IllegalArgumentException("Project configuration must not override sandbox settings ('"
+                            + key + "' in " + path + "). Use trusted global configuration or --sandbox true|false.");
+                }
+                rejectProjectSandbox(entry.getValue(), key, path);
+            }
+        }
+    }
+
     private static ConfigurationSource loadJson(final Path path) {
+        return loadJson(path, false);
+    }
+
+    private static ConfigurationSource loadJson(final Path path, final boolean project) {
         if (!Files.isRegularFile(path)) {
             return null;
         }
         try (final var in = Files.newInputStream(path)) {
-            final var bytes = in.readAllBytes();
-            final ReaderSupplier supplier = () -> new InputStreamReader(new ByteArrayInputStream(bytes));
+            final byte[] bytes;
+            // Do not inject the application mapper here: it itself depends on configuration.
+            try (final var mapper = new JsonMapperImpl(List.of(), ignored -> Optional.empty())) {
+                final var document =
+                        mapper.fromString(Object.class, new String(in.readAllBytes(), StandardCharsets.UTF_8));
+                if (project) {
+                    rejectProjectSandbox(document, "", path);
+                }
+                bytes = mapper.toString(prepareCommandEnvironment(document, "")).getBytes(StandardCharsets.UTF_8);
+            }
+            final ReaderSupplier supplier =
+                    () -> new InputStreamReader(new ByteArrayInputStream(bytes), StandardCharsets.UTF_8);
             return new JsonConfigurationSource(supplier, KEY_NORMALIZER);
         } catch (final IOException e) {
             throw new UncheckedIOException("Invalid configuration file: '" + path + "'", e);
         }
+    }
+
+    private static Object prepareCommandEnvironment(final Object value, final String prefix) throws IOException {
+        if (!(value instanceof Map<?, ?> map)) {
+            return value;
+        }
+        if ("sandbox.environment.set".equals(KEY_NORMALIZER.apply(prefix))) {
+            // Fusion configuration factories consume string maps as Java properties, whereas
+            // ordinary JSON objects are flattened as nested configuration. Preserve literal
+            // variable names/values and accept natural JSON without requiring a $asList marker.
+            final var properties = new Properties();
+            for (final var entry : map.entrySet()) {
+                if (!(entry.getValue() instanceof String text)) {
+                    throw new IllegalArgumentException("Sandbox environment.set values must be strings");
+                }
+                properties.setProperty(entry.getKey().toString(), text);
+            }
+            try (final var writer = new StringWriter()) {
+                properties.store(writer, null);
+                return writer.toString();
+            }
+        }
+        final var result = new LinkedHashMap<String, Object>();
+        for (final var entry : map.entrySet()) {
+            final var key = entry.getKey().toString();
+            result.put(
+                    key,
+                    prepareCommandEnvironment(
+                            entry.getValue(), KEY_NORMALIZER.apply(prefix.isEmpty() ? key : prefix + "." + key)));
+        }
+        return result;
     }
 }

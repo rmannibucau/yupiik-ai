@@ -17,33 +17,107 @@ package io.yupiik.ia.agent.core.configuration;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-import io.yupiik.fusion.framework.api.configuration.impl.MapConfigSource;
-import io.yupiik.fusion.framework.api.container.configuration.ConfigurationImpl;
+import io.yupiik.fusion.framework.api.ConfiguringContainer;
+import io.yupiik.fusion.framework.api.configuration.ConfigurationSource;
+import io.yupiik.fusion.framework.api.container.FusionBean;
+import io.yupiik.fusion.framework.api.container.bean.ProvidedInstanceBean;
 import io.yupiik.fusion.framework.api.container.configuration.source.EnvironmentSource;
+import io.yupiik.fusion.framework.api.scope.DefaultScoped;
+import io.yupiik.fusion.testing.Fusion;
+import io.yupiik.fusion.testing.FusionSupport;
 import io.yupiik.ia.agent.core.llm.JsonMappers;
 import io.yupiik.ia.agent.core.llm.ProviderRequestBudget;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
-import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.TimeUnit;
+import java.util.stream.Stream;
+import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 
 class ProviderBudgetConfigurationTest {
-    @Test
-    void defaultsAreAbsentAndDottedPropertiesPreserveBlankAndNoncanonicalValues() {
-        assertEquals(new ProviderBudgetConfiguration(null, null, null), configuration(Map.of()));
-        assertEquals(
-                new ProviderBudgetConfiguration("/trusted/budget", "account", "2"),
-                configuration(Map.of(
-                        "yca.provider.budget.root", "/trusted/budget",
-                        "yca.provider.budget.id", "account",
-                        "yca.provider.budget.slots", "2")));
-        for (final var slots : List.of("", "01", "invalid")) {
-            final var configuration = configuration(Map.of("yca.provider.budget.slots", slots));
-            assertEquals(slots, configuration.slots());
+    @Nested
+    @FusionSupport(modules = DefaultsModule.class)
+    class Defaults {
+        @Test
+        void binds(@Fusion final ProviderBudgetConfiguration configuration) {
+            assertEquals(new ProviderBudgetConfiguration(null, null, null), configuration);
+        }
+    }
+
+    public static class DefaultsModule extends ConfigurationTestModule {
+        public DefaultsModule() {
+            super(Map.of());
+        }
+    }
+
+    @Nested
+    @FusionSupport(modules = DottedModule.class)
+    class Dotted {
+        @Test
+        void binds(@Fusion final ProviderBudgetConfiguration configuration) {
+            assertEquals(new ProviderBudgetConfiguration("/trusted/budget", "account", "2"), configuration);
+        }
+    }
+
+    public static class DottedModule extends ConfigurationTestModule {
+        public DottedModule() {
+            super(Map.of(
+                    "yca.provider.budget.root",
+                    "/trusted/budget",
+                    "yca.provider.budget.id",
+                    "account",
+                    "yca.provider.budget.slots",
+                    "2"));
+        }
+    }
+
+    @Nested
+    @FusionSupport(modules = BlankModule.class)
+    class Blank {
+        @Test
+        void binds(@Fusion final ProviderBudgetConfiguration configuration) {
+            assertEquals("", configuration.slots());
             assertThrows(IllegalArgumentException.class, () -> ProviderRequestBudget.fromConfiguration(configuration));
+        }
+    }
+
+    public static class BlankModule extends ConfigurationTestModule {
+        public BlankModule() {
+            super(Map.of("yca.provider.budget.slots", ""));
+        }
+    }
+
+    @Nested
+    @FusionSupport(modules = NoncanonicalModule.class)
+    class Noncanonical {
+        @Test
+        void binds(@Fusion final ProviderBudgetConfiguration configuration) {
+            assertEquals("01", configuration.slots());
+            assertThrows(IllegalArgumentException.class, () -> ProviderRequestBudget.fromConfiguration(configuration));
+        }
+    }
+
+    public static class NoncanonicalModule extends ConfigurationTestModule {
+        public NoncanonicalModule() {
+            super(Map.of("yca.provider.budget.slots", "01"));
+        }
+    }
+
+    @Nested
+    @FusionSupport(modules = InvalidModule.class)
+    class Invalid {
+        @Test
+        void binds(@Fusion final ProviderBudgetConfiguration configuration) {
+            assertEquals("invalid", configuration.slots());
+            assertThrows(IllegalArgumentException.class, () -> ProviderRequestBudget.fromConfiguration(configuration));
+        }
+    }
+
+    public static class InvalidModule extends ConfigurationTestModule {
+        public InvalidModule() {
+            super(Map.of("yca.provider.budget.slots", "invalid"));
         }
     }
 
@@ -87,16 +161,23 @@ class ProviderBudgetConfigurationTest {
         }
     }
 
-    private ProviderBudgetConfiguration configuration(final Map<String, String> settings) {
-        return ConfigurationLoader.load(
-                ProviderBudgetConfiguration.class, new ConfigurationImpl(List.of(new MapConfigSource(settings))));
+    public static class EnvironmentModule extends ConfigurationTestModule {
+        @Override
+        public Stream<FusionBean<?>> beans() {
+            return Stream.of(
+                    new ProvidedInstanceBean<>(DefaultScoped.class, ConfigurationSource.class, EnvironmentSource::new));
+        }
     }
 
     public static final class Child {
         public static void main(final String[] args) {
-            final var configuration = ConfigurationLoader.load(
-                    ProviderBudgetConfiguration.class, new ConfigurationImpl(List.of(new EnvironmentSource())));
-            System.out.println(configuration.root() + "|" + configuration.id() + "|" + configuration.slots());
+            try (final var container = ConfiguringContainer.of()
+                            .register(new EnvironmentModule())
+                            .start();
+                    final var instance = container.lookup(ProviderBudgetConfiguration.class)) {
+                final var configuration = instance.instance();
+                System.out.println(configuration.root() + "|" + configuration.id() + "|" + configuration.slots());
+            }
         }
     }
 }

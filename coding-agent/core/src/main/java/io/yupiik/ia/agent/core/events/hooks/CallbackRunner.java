@@ -23,7 +23,6 @@ import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.HookRegistration;
 import io.yupiik.ia.agent.core.configuration.HooksConfiguration;
 import io.yupiik.ia.agent.core.events.HookResponse;
-import io.yupiik.ia.agent.core.tools.ToolContext;
 import io.yupiik.maven.knowledge.process.ProcessService;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -191,7 +190,7 @@ public class CallbackRunner {
         pb.redirectErrorStream(false);
         final var directory = hook.dir() == null || hook.dir().isBlank()
                 ? workdir
-                : ToolContext.empty(workdir).resolvePath(hook.dir()).normalize();
+                : workdir.resolve(hook.dir()).normalize();
         pb.directory(directory.toFile());
         final Process process;
         try {

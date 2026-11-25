@@ -18,13 +18,15 @@ package io.yupiik.ia.agent.github.execution;
 import static org.junit.jupiter.api.Assertions.*;
 
 import io.yupiik.fusion.framework.api.configuration.Configuration;
+import io.yupiik.fusion.testing.Fusion;
+import io.yupiik.fusion.testing.FusionSupport;
 import io.yupiik.ia.agent.bot.runtime.configuration.ExecutorConfiguration;
-import io.yupiik.ia.agent.core.configuration.ConfigurationLoader;
 import io.yupiik.ia.agent.core.configuration.ProviderBudgetConfiguration;
 import io.yupiik.ia.agent.github.command.WorkerCommand.Options;
 import io.yupiik.ia.agent.github.execution.cache.DependencyCacheProvisioning;
 import io.yupiik.ia.agent.github.store.TaskStore;
 import io.yupiik.ia.agent.github.support.BotJsonMapper;
+import io.yupiik.ia.agent.github.support.GithubConfigurationTestModule;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -40,7 +42,11 @@ import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+@FusionSupport(modules = AttemptServicesTest.Source.class)
 class AttemptServicesTest {
+    @Fusion
+    private Options injectedOptions;
+
     private static final Pattern COMPLETIONS_URL =
             Pattern.compile("https://attempt-services\\.yca\\.internal:8443/inference/[0-9a-f-]{36}/chat/completions");
     private static final String ROUTE = "/context/11111111-2222-3333-4444-555555555555/rpc";
@@ -49,6 +55,9 @@ class AttemptServicesTest {
 
     @TempDir
     Path home;
+
+    @TempDir
+    static Path cacheHome;
 
     private final String privateSubnet = "10." + ThreadLocalRandom.current().nextInt(256) + "."
             + ThreadLocalRandom.current().nextInt(256);
@@ -179,16 +188,7 @@ class AttemptServicesTest {
 
     @Test
     void launcherOwnedProxySettingsWinOverFreshDependencyCacheSettings() throws Exception {
-        final var values = Map.of(
-                "worker.dependencyCache.mode",
-                "RESTORE_ONLY",
-                "worker.dependencyCache.root",
-                home.resolveSibling("unused-store-" + home.getFileName()).toString(),
-                "worker.dependencyCache.presets",
-                "MAVEN");
-        final var policy = ConfigurationLoader.load(Options.class, key -> Optional.ofNullable(values.get(key)))
-                .worker()
-                .dependencyCache();
+        final var policy = injectedOptions.worker().dependencyCache();
         final var environment = DependencyCacheProvisioning.provision(policy, home, true);
         assertEquals("-Dmaven.repo.local=/attempt/storage/caches/maven/repository", environment.get("MAVEN_OPTS"));
         assertFalse(Files.readString(home.resolve("storage/.m2/settings.xml")).contains("<proxies>"));
@@ -526,5 +526,15 @@ class AttemptServicesTest {
                 "attempt-services.yca.internal",
                 providerBaseUrl,
                 null);
+    }
+
+    public static class Source extends GithubConfigurationTestModule {
+        public Source() {
+            super(Map.of(
+                    "worker.dependencyCache.mode", "RESTORE_ONLY",
+                    "worker.dependencyCache.root",
+                            cacheHome.resolve("unused-store").toString(),
+                    "worker.dependencyCache.presets", "MAVEN"));
+        }
     }
 }

@@ -21,7 +21,6 @@ import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.bot.runtime.DockerControlConfiguration;
 import io.yupiik.ia.agent.bot.runtime.admission.HostAdmissionConfiguration;
 import io.yupiik.ia.agent.bot.runtime.configuration.ExecutorConfiguration;
-import io.yupiik.ia.agent.core.configuration.ConfigurationLoader;
 import io.yupiik.ia.agent.core.configuration.ProviderBudgetConfiguration;
 import io.yupiik.ia.agent.core.notifications.NotificationService;
 import io.yupiik.ia.agent.github.client.DiscussionClient;
@@ -126,12 +125,11 @@ public final class BotTestConfiguration {
     }
 
     public static ReviewPublisher reviewPublisher(
-            final GitHubClient github, final TaskStore store, final String login) {
-        return new ReviewPublisher(
-                github,
-                store,
-                configuration("", login, ""),
-                ConfigurationLoader.load(ReviewPresentationConfiguration.class, key -> Optional.empty()));
+            final ReviewPresentationConfiguration presentation,
+            final GitHubClient github,
+            final TaskStore store,
+            final String login) {
+        return new ReviewPublisher(github, store, configuration("", login, ""), presentation);
     }
 
     public static DiscussionPublisher discussionPublisher(
@@ -140,12 +138,16 @@ public final class BotTestConfiguration {
     }
 
     public static Worker worker(
+            final PromptConfiguration prompts,
+            final ReviewPresentationConfiguration presentation,
             final GithubBotConfiguration conf,
             final TaskStore store,
             final GitHubClient github,
             final JsonMapper json,
             final ExecutorConfiguration execution) {
         return worker(
+                prompts,
+                presentation,
                 conf,
                 store,
                 github,
@@ -157,6 +159,8 @@ public final class BotTestConfiguration {
     }
 
     public static Worker worker(
+            final PromptConfiguration prompts,
+            final ReviewPresentationConfiguration presentation,
             final GithubBotConfiguration conf,
             final TaskStore store,
             final GitHubClient github,
@@ -173,16 +177,11 @@ public final class BotTestConfiguration {
                 execution,
                 audit(conf, json),
                 new TeamAuthorization(github, conf, CLOCK),
-                new AttemptPreparation(
-                        json, ConfigurationLoader.load(PromptConfiguration.class, key -> Optional.empty()), execution),
+                new AttemptPreparation(json, prompts, execution),
                 new GithubPrivateContext(github, json),
                 new GithubContextSnapshot(github, json),
                 new ForkProvisioner(github, store),
-                new ReviewPublisher(
-                        github,
-                        store,
-                        conf,
-                        ConfigurationLoader.load(ReviewPresentationConfiguration.class, key -> Optional.empty())),
+                new ReviewPublisher(github, store, conf, presentation),
                 new StrictSolvePublisher(github, store, json),
                 new DiscussionPublisher(new DiscussionClient(github), store, conf),
                 new ContextConfiguration("127.0.0.1", 0, "", "", "git", "", 256, 1073741824L, 67108864L),
@@ -266,6 +265,8 @@ public final class BotTestConfiguration {
     }
 
     public static WorkerCommand workerCommand(
+            final PromptConfiguration prompts,
+            final ReviewPresentationConfiguration presentation,
             final WorkerCommand.Options options,
             final GithubBotConfiguration conf,
             final JsonMapper json,
@@ -278,7 +279,11 @@ public final class BotTestConfiguration {
             public void run() {
                 try (final var runtime =
                         new GithubServices().client(conf, json, CLOCK, new ConfigurationImpl(List.of()))) {
-                    new WorkerCommand(options, store, worker(conf, store, runtime, json, execution), notifications)
+                    new WorkerCommand(
+                                    options,
+                                    store,
+                                    worker(prompts, presentation, conf, store, runtime, json, execution),
+                                    notifications)
                             .run();
                 }
             }

@@ -18,12 +18,15 @@ package io.yupiik.ia.agent.core.shell;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
+import io.yupiik.fusion.testing.Fusion;
+import io.yupiik.fusion.testing.FusionSupport;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
-import io.yupiik.ia.agent.core.configuration.TestConfigs;
+import io.yupiik.ia.agent.core.configuration.ConfigurationTestModule;
 import io.yupiik.ia.agent.core.session.SessionStore;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Map;
+import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -35,58 +38,92 @@ import org.junit.jupiter.api.io.TempDir;
  */
 class SessionRuntimeFactoryTest {
 
-    @Test
-    void staleRecordedMarkerFallsBackToTheConfiguredWorkdir(@TempDir final Path tmp) throws Exception {
-        final var configDir = tmp.resolve("config");
-        Files.createDirectories(configDir);
-        final var missingMarker =
-                tmp.resolve("gone-project").toAbsolutePath().normalize().toString();
+    @Nested
+    @FusionSupport(modules = StaleRecordedMarkerFallsBackToTheConfiguredWorkdirScenarioModule.class)
+    class StaleRecordedMarkerFallsBackToTheConfiguredWorkdirScenario {
+        @TempDir
+        static Path directory;
 
-        final var config = TestConfigs.codingAgent(Map.of("yca.workingDir", configDir.toString()));
-        final var store = storeRecording(missingMarker);
-        final var factory = factory(config, store);
+        @Test
+        void staleRecordedMarkerFallsBackToTheConfiguredWorkdir(@Fusion final CodingAgentConfiguration configuration)
+                throws Exception {
+            final var tmp = StaleRecordedMarkerFallsBackToTheConfiguredWorkdirScenario.directory;
+            final var configDir = tmp.resolve("config");
+            Files.createDirectories(configDir);
+            final var missingMarker =
+                    tmp.resolve("gone-project").toAbsolutePath().normalize().toString();
 
-        assertEquals(
-                configDir.toAbsolutePath().normalize(),
-                factory.resolveWorkdir(null, "s1"),
-                "a recorded marker that no longer exists must fall back to the configured working dir");
+            final var config = configuration;
+            final var store = storeRecording(missingMarker);
+            final var factory = factory(config, store);
+
+            assertEquals(
+                    configDir.toAbsolutePath().normalize(),
+                    factory.resolveWorkdir(null, "s1"),
+                    "a recorded marker that no longer exists must fall back to the configured working dir");
+        }
     }
 
-    @Test
-    void liveRecordedMarkerIsKept(@TempDir final Path tmp) throws Exception {
-        final var live = tmp.resolve("live");
-        Files.createDirectories(live);
-        final var configDir = tmp.resolve("config");
-        Files.createDirectories(configDir);
+    @Nested
+    @FusionSupport(modules = LiveRecordedMarkerIsKeptScenarioModule.class)
+    class LiveRecordedMarkerIsKeptScenario {
+        @TempDir
+        static Path directory;
 
-        final var config = TestConfigs.codingAgent(Map.of("yca.workingDir", configDir.toString()));
-        final var store = storeRecording(live.toAbsolutePath().normalize().toString());
-        final var factory = factory(config, store);
+        @Test
+        void liveRecordedMarkerIsKept(@Fusion final CodingAgentConfiguration configuration) throws Exception {
+            final var tmp = LiveRecordedMarkerIsKeptScenario.directory;
+            final var live = tmp.resolve("live");
+            Files.createDirectories(live);
+            final var configDir = tmp.resolve("config");
+            Files.createDirectories(configDir);
 
-        assertEquals(
-                live.toAbsolutePath().normalize(),
-                factory.resolveWorkdir(null, "s1"),
-                "a recorded marker that still exists must keep precedence over the configured dir");
+            final var config = configuration;
+            final var store = storeRecording(live.toAbsolutePath().normalize().toString());
+            final var factory = factory(config, store);
+
+            assertEquals(
+                    live.toAbsolutePath().normalize(),
+                    factory.resolveWorkdir(null, "s1"),
+                    "a recorded marker that still exists must keep precedence over the configured dir");
+        }
     }
 
-    @Test
-    void noRecordFallsBackToTheConfiguredWorkdir(@TempDir final Path tmp) throws Exception {
-        final var configDir = tmp.resolve("config");
-        Files.createDirectories(configDir);
-        final var config = TestConfigs.codingAgent(Map.of("yca.workingDir", configDir.toString()));
-        final var factory = factory(config, storeRecording(""));
+    @Nested
+    @FusionSupport(modules = NoRecordFallsBackToTheConfiguredWorkdirScenarioModule.class)
+    class NoRecordFallsBackToTheConfiguredWorkdirScenario {
+        @TempDir
+        static Path directory;
 
-        assertEquals(
-                configDir.toAbsolutePath().normalize(),
-                factory.resolveWorkdir(null, "s1"),
-                "without a marker the configured working dir must be used");
+        @Test
+        void noRecordFallsBackToTheConfiguredWorkdir(@Fusion final CodingAgentConfiguration configuration)
+                throws Exception {
+            final var tmp = NoRecordFallsBackToTheConfiguredWorkdirScenario.directory;
+            final var configDir = tmp.resolve("config");
+            Files.createDirectories(configDir);
+            final var config = configuration;
+            final var factory = factory(config, storeRecording(""));
+
+            assertEquals(
+                    configDir.toAbsolutePath().normalize(),
+                    factory.resolveWorkdir(null, "s1"),
+                    "without a marker the configured working dir must be used");
+        }
     }
 
-    @Test
-    void invalidExplicitRootNeverFallsBackToAConfiguredDirectory(@TempDir final Path tmp) {
-        final var factory = factory(
-                TestConfigs.codingAgent(Map.of("yca.workingDir", tmp.toString())), storeRecording(tmp.toString()));
-        assertThrows(IllegalArgumentException.class, () -> factory.resolveWorkdir(tmp.resolve("missing"), "s1"));
+    @Nested
+    @FusionSupport(modules = InvalidExplicitRootNeverFallsBackToAConfiguredDirectoryScenarioModule.class)
+    class InvalidExplicitRootNeverFallsBackToAConfiguredDirectoryScenario {
+        @TempDir
+        static Path directory;
+
+        @Test
+        void invalidExplicitRootNeverFallsBackToAConfiguredDirectory(
+                @Fusion final CodingAgentConfiguration configuration) {
+            final var tmp = InvalidExplicitRootNeverFallsBackToAConfiguredDirectoryScenario.directory;
+            final var factory = factory(configuration, storeRecording(tmp.toString()));
+            assertThrows(IllegalArgumentException.class, () -> factory.resolveWorkdir(tmp.resolve("missing"), "s1"));
+        }
     }
 
     private static SessionStore storeRecording(final String marker) {
@@ -105,5 +142,43 @@ class SessionRuntimeFactoryTest {
                 null, null, // memory production policy
                 null, // quota store
                 null, null, null);
+    }
+
+    public static class StaleRecordedMarkerFallsBackToTheConfiguredWorkdirScenarioModule
+            extends ConfigurationTestModule {
+        public StaleRecordedMarkerFallsBackToTheConfiguredWorkdirScenarioModule() {
+            super(Map.of(
+                    "yca.workingDir",
+                    StaleRecordedMarkerFallsBackToTheConfiguredWorkdirScenario.directory
+                            .resolve("config")
+                            .toString()));
+        }
+    }
+
+    public static class LiveRecordedMarkerIsKeptScenarioModule extends ConfigurationTestModule {
+        public LiveRecordedMarkerIsKeptScenarioModule() {
+            super(Map.of(
+                    "yca.workingDir",
+                    LiveRecordedMarkerIsKeptScenario.directory.resolve("config").toString()));
+        }
+    }
+
+    public static class NoRecordFallsBackToTheConfiguredWorkdirScenarioModule extends ConfigurationTestModule {
+        public NoRecordFallsBackToTheConfiguredWorkdirScenarioModule() {
+            super(Map.of(
+                    "yca.workingDir",
+                    NoRecordFallsBackToTheConfiguredWorkdirScenario.directory
+                            .resolve("config")
+                            .toString()));
+        }
+    }
+
+    public static class InvalidExplicitRootNeverFallsBackToAConfiguredDirectoryScenarioModule
+            extends ConfigurationTestModule {
+        public InvalidExplicitRootNeverFallsBackToAConfiguredDirectoryScenarioModule() {
+            super(Map.of(
+                    "yca.workingDir",
+                    InvalidExplicitRootNeverFallsBackToAConfiguredDirectoryScenario.directory.toString()));
+        }
     }
 }

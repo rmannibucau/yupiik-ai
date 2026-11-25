@@ -46,10 +46,6 @@ public class MavenOutputProcessor implements OutputProcessor {
         this(logNoise, new CommandOutputPostProcessor());
     }
 
-    public MavenOutputProcessor() {
-        this(new LogNoiseOutputProcessor());
-    }
-
     private static final Pattern RUNNING = Pattern.compile("\\[INFO] Running ([\\w.,\\s]+)$");
     private static final Pattern TESTS_RUN =
             Pattern.compile("Tests run: (\\d+), Failures: (\\d+), Errors: (\\d+), Skipped: (\\d+)");

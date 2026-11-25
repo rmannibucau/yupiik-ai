@@ -41,9 +41,9 @@ class GioNotificationMenuTest {
             final var quit = new AtomicBoolean();
             try (final var menu = new GioNotificationMenu(
                     opened::add, dismissed::add, () -> acknowledged.set(true), () -> quit.set(true))) {
-                final var first = new Notice(1, "one", "Approval & <plain>", "approval_required", "main", 1);
-                final var second = new Notice(1, "one", "Question", "input_required", "btw", 2);
-                final var third = new Notice(1, "two", "Complete", "turn_end", "main", 3);
+                final var first = new Notice(1, "one", "Approval & <plain>", "approval_required", "main", 1, null);
+                final var second = new Notice(1, "one", "Question", "input_required", "btw", 2, null);
+                final var third = new Notice(1, "two", "Complete", "turn_end", "main", 3, null);
                 final var notices = List.of(first, second, third);
                 menu.updateNotices(notices);
                 assertEquals(9, gio.count(menu));
@@ -57,7 +57,7 @@ class GioNotificationMenuTest {
                 final var oldAction = gio.attribute(menu, 4, "action");
                 gio.activate(menu, oldAction);
                 assertTrue(opened.isEmpty());
-                final var replacement = new Notice(1, "one", "Newer question", "input_required", "btw", 4);
+                final var replacement = new Notice(1, "one", "Newer question", "input_required", "btw", 4, null);
                 menu.updateNotices(List.of(first, replacement, third));
                 assertEquals(List.of(second), dismissed);
                 assertFalse(gio.hasAction(menu, oldAction));

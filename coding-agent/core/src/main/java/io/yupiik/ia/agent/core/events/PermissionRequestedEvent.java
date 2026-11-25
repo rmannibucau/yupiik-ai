@@ -16,6 +16,7 @@
 package io.yupiik.ia.agent.core.events;
 
 import io.yupiik.fusion.framework.build.api.json.JsonModel;
+import io.yupiik.ia.agent.core.permissions.ApprovalGate;
 import java.util.Map;
 
 /**
@@ -25,12 +26,17 @@ import java.util.Map;
  * decision to the gate. Config key {@code yca.hooks.PermissionRequested}.
  */
 public record PermissionRequestedEvent(
-        EventContext eventContext, String toolName, Map<String, Object> args, String detail, HookResult result)
+        EventContext eventContext,
+        String toolName,
+        Map<String, Object> args,
+        String detail,
+        HookResult result,
+        ApprovalGate.Origin origin)
         implements YcaEvent {
 
     @Override
     public Object payload() {
-        return new Payload(eventContext, toolName, args, detail);
+        return new Payload(eventContext, toolName, args, detail, origin);
     }
 
     @Override
@@ -49,5 +55,10 @@ public record PermissionRequestedEvent(
     }
 
     @JsonModel
-    public record Payload(EventContext eventContext, String toolName, Map<String, Object> args, String detail) {}
+    public record Payload(
+            EventContext eventContext,
+            String toolName,
+            Map<String, Object> args,
+            String detail,
+            ApprovalGate.Origin origin) {}
 }

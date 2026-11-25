@@ -410,7 +410,8 @@ public class WebSessionManager implements AutoCloseable {
                         session.io.feedback(id, cancelled::get),
                         runtime.workdir(),
                         runtime.loop().effectiveToolRegistry(),
-                        runtime.loop().availableToolNames())
+                        runtime.loop().availableToolNames(),
+                        runtime.sandbox())
                 .whenComplete((answer, error) -> onBtwAnswer(session, state, answer, error));
         return CompletableFuture.completedFuture(true);
     }
@@ -912,13 +913,18 @@ public class WebSessionManager implements AutoCloseable {
         }
 
         private ApprovalGate approvalGate(final long owner, final BooleanSupplier cancelled) {
-            return (title, detail, toolName, args) -> {
+            return request -> {
+                final var title = request.title();
+                final var detail = request.detail();
+                final var toolName = request.toolName();
+                final var args = request.args();
                 final var result = awaitRpc(
                         Map.of(
                                 "method",
                                 "session.approval",
                                 "params",
                                 Map.of(
+                                        "origin", request.origin().name(),
                                         "tool", toolName == null ? "" : toolName,
                                         "args", args == null ? Map.of() : args,
                                         "title", title == null ? "" : title,
@@ -1039,7 +1045,11 @@ public class WebSessionManager implements AutoCloseable {
                     final var params = (Map<?, ?>) payload.get("params");
                     if ("session.approval".equals(payload.get("method"))) {
                         notifications.onApprovalRequired(
-                                session.sessionId(), title, (String) params.get("tool"), source);
+                                session.sessionId(),
+                                title,
+                                (String) params.get("tool"),
+                                source,
+                                ApprovalGate.Origin.valueOf((String) params.get("origin")));
                     } else {
                         final var questions = params.get("questions");
                         notifications.onInputRequired(

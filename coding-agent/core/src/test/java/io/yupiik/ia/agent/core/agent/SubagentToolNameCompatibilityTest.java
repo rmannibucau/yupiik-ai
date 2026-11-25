@@ -22,14 +22,18 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.fusion.framework.api.event.Emitter;
 import io.yupiik.fusion.json.JsonMapper;
+import io.yupiik.fusion.testing.Fusion;
+import io.yupiik.fusion.testing.FusionSupport;
 import io.yupiik.ia.agent.core.codegraph.StructuralCodeGraph;
 import io.yupiik.ia.agent.core.configuration.AgentConfiguration;
-import io.yupiik.ia.agent.core.configuration.TestConfigs;
+import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
+import io.yupiik.ia.agent.core.configuration.ConfigurationTestModule;
 import io.yupiik.ia.agent.core.context.BackoffSleeper;
 import io.yupiik.ia.agent.core.llm.ChatClient;
 import io.yupiik.ia.agent.core.llm.ChatCompletionRequest;
 import io.yupiik.ia.agent.core.llm.Message;
 import io.yupiik.ia.agent.core.llm.PauseEvent;
+import io.yupiik.ia.agent.core.sandbox.DisabledSandbox;
 import io.yupiik.ia.agent.core.session.InMemorySessionStore;
 import io.yupiik.ia.agent.core.snapshot.SnapshotStore;
 import io.yupiik.ia.agent.core.todo.InMemoryTodoStore;
@@ -53,6 +57,7 @@ import java.util.concurrent.Executors;
 import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -64,9 +69,6 @@ class SubagentToolNameCompatibilityTest {
     @TempDir
     private static Path testWorkdir;
 
-    @TempDir
-    Path storageHome;
-
     private JsonMapper mapper;
 
     @BeforeEach
@@ -74,62 +76,90 @@ class SubagentToolNameCompatibilityTest {
         this.mapper = mapper;
     }
 
-    @Test
-    void acceptsBarePrefixedAndMixedNames() throws Exception {
-        final var tools = List.of(tool("read", true), tool("bash", true));
-        assertVisible(Set.of("read"), run(Set.of("read"), null, null, tools));
-        assertVisible(Set.of("read"), run(Set.of("functions.read"), null, null, tools));
-        assertVisible(
-                Set.of("read", "bash"), run(Set.of("read", "functions.read", "functions.bash"), null, null, tools));
-    }
+    @Nested
+    @FusionSupport(modules = ConfiguredModule.class)
+    class Configured {
+        @TempDir
+        static Path storageHome;
 
-    @Test
-    void exactRegisteredNamesTakePrecedenceEvenWhenUnusable() throws Exception {
-        assertVisible(
-                Set.of("functions.read"),
-                run(Set.of("functions.read"), null, null, List.of(tool("read", true), tool("functions.read", true))));
-        assertRejected(
-                "functions.read",
-                run(Set.of("functions.read"), null, null, List.of(tool("read", true), tool("functions.read", false))));
-    }
-
-    @Test
-    void rejectsUnknownUnusableAndUnsupportedAliases() throws Exception {
-        final var tools = List.of(tool("read", true), tool("bash", false));
-        for (final var name :
-                List.of("functions.missing", "functions.bash", "other.read", "functions.functions.read")) {
-            assertRejected(name, run(Set.of(name), null, null, tools));
+        @Test
+        void acceptsBarePrefixedAndMixedNames(@Fusion final CodingAgentConfiguration configuration) throws Exception {
+            final var tools = List.of(tool("read", true), tool("bash", true));
+            assertVisible(Set.of("read"), run(configuration, Set.of("read"), null, null, tools));
+            assertVisible(Set.of("read"), run(configuration, Set.of("functions.read"), null, null, tools));
+            assertVisible(
+                    Set.of("read", "bash"),
+                    run(configuration, Set.of("read", "functions.read", "functions.bash"), null, null, tools));
         }
-        // A repeated prefix is not an alias even when stripping once would find a registered name.
-        assertRejected(
-                "functions.functions.read",
-                run(Set.of("functions.functions.read"), null, null, List.of(tool("functions.read", true))));
-    }
 
-    @Test
-    void omittedAndEmptyAllowlistsRemainDistinct() throws Exception {
-        final var tools = List.of(tool("read", true), tool("bash", true));
-        assertVisible(Set.of("read", "bash"), run(null, null, null, tools));
-        assertVisible(Set.of(), run(Set.of(), null, null, tools));
-        assertVisible(Set.of(), run(Set.of("functions.read"), Set.of(), null, tools));
-        assertVisible(Set.of(), run(Set.of("functions.read"), null, Set.of(), tools));
-    }
+        @Test
+        void exactRegisteredNamesTakePrecedenceEvenWhenUnusable(@Fusion final CodingAgentConfiguration configuration)
+                throws Exception {
+            assertVisible(
+                    Set.of("functions.read"),
+                    run(
+                            configuration,
+                            Set.of("functions.read"),
+                            null,
+                            null,
+                            List.of(tool("read", true), tool("functions.read", true))));
+            assertRejected(
+                    "functions.read",
+                    run(
+                            configuration,
+                            Set.of("functions.read"),
+                            null,
+                            null,
+                            List.of(tool("read", true), tool("functions.read", false))));
+        }
 
-    @Test
-    void normalizedRequestsCannotWidenParentOrProfileCeilings() throws Exception {
-        final var tools = List.of(tool("read", true), tool("bash", true));
-        final var requested = Set.of("functions.read", "functions.bash");
-        assertVisible(Set.of("read"), run(requested, Set.of("read"), null, tools));
-        assertVisible(Set.of("bash"), run(requested, null, Set.of("bash"), tools));
-        assertVisible(Set.of(), run(requested, Set.of("read"), Set.of("bash"), tools));
-        assertVisible(Set.of("read"), run(requested, Set.of("read", "bash"), Set.of("read"), tools));
-    }
+        @Test
+        void rejectsUnknownUnusableAndUnsupportedAliases(@Fusion final CodingAgentConfiguration configuration)
+                throws Exception {
+            final var tools = List.of(tool("read", true), tool("bash", false));
+            for (final var name :
+                    List.of("functions.missing", "functions.bash", "other.read", "functions.functions.read")) {
+                assertRejected(name, run(configuration, Set.of(name), null, null, tools));
+            }
+            // A repeated prefix is not an alias even when stripping once would find a registered name.
+            assertRejected(
+                    "functions.functions.read",
+                    run(
+                            configuration,
+                            Set.of("functions.functions.read"),
+                            null,
+                            null,
+                            List.of(tool("functions.read", true))));
+        }
 
-    @Test
-    void doesNotNormalizeConfiguredOrInheritedCeilings() throws Exception {
-        final var tools = List.of(tool("read", true));
-        assertRejected("functions.read", run(Set.of("read"), Set.of("functions.read"), null, tools));
-        assertRejected("functions.read", run(Set.of("read"), null, Set.of("functions.read"), tools));
+        @Test
+        void omittedAndEmptyAllowlistsRemainDistinct(@Fusion final CodingAgentConfiguration configuration)
+                throws Exception {
+            final var tools = List.of(tool("read", true), tool("bash", true));
+            assertVisible(Set.of("read", "bash"), run(configuration, null, null, null, tools));
+            assertVisible(Set.of(), run(configuration, Set.of(), null, null, tools));
+            assertVisible(Set.of(), run(configuration, Set.of("functions.read"), Set.of(), null, tools));
+            assertVisible(Set.of(), run(configuration, Set.of("functions.read"), null, Set.of(), tools));
+        }
+
+        @Test
+        void normalizedRequestsCannotWidenParentOrProfileCeilings(@Fusion final CodingAgentConfiguration configuration)
+                throws Exception {
+            final var tools = List.of(tool("read", true), tool("bash", true));
+            final var requested = Set.of("functions.read", "functions.bash");
+            assertVisible(Set.of("read"), run(configuration, requested, Set.of("read"), null, tools));
+            assertVisible(Set.of("bash"), run(configuration, requested, null, Set.of("bash"), tools));
+            assertVisible(Set.of(), run(configuration, requested, Set.of("read"), Set.of("bash"), tools));
+            assertVisible(Set.of("read"), run(configuration, requested, Set.of("read", "bash"), Set.of("read"), tools));
+        }
+
+        @Test
+        void doesNotNormalizeConfiguredOrInheritedCeilings(@Fusion final CodingAgentConfiguration configuration)
+                throws Exception {
+            final var tools = List.of(tool("read", true));
+            assertRejected("functions.read", run(configuration, Set.of("read"), Set.of("functions.read"), null, tools));
+            assertRejected("functions.read", run(configuration, Set.of("read"), null, Set.of("functions.read"), tools));
+        }
     }
 
     private void assertVisible(final Set<String> expected, final RunOutcome outcome) {
@@ -150,16 +180,12 @@ class SubagentToolNameCompatibilityTest {
     }
 
     private RunOutcome run(
+            final CodingAgentConfiguration configuration,
             final Set<String> requested,
             final Set<String> parent,
             final Set<String> profileTools,
             final List<EmbeddedTool> tools)
             throws Exception {
-        final var configuration = TestConfigs.codingAgent(Map.of(
-                "yca.storageHome", storageHome.toString(),
-                "yca.subagents.enabled", "true",
-                "yca.subagents.maxConcurrent", "2",
-                "yca.llm.maxConcurrent", "4"));
         final var providers = new ProviderManager(configuration, mapper);
         final var registry = new SubagentRegistry(configuration, providers);
         final var profile = profileTools == null
@@ -236,7 +262,7 @@ class SubagentToolNameCompatibilityTest {
                     new InMemorySessionStore(clock),
                     new SnapshotStore(configuration),
                     new InMemoryTodoStore(),
-                    ToolContext.empty(testWorkdir),
+                    ToolContext.empty(testWorkdir, new DisabledSandbox(testWorkdir)),
                     () -> false);
             state.awaitResult();
             return new RunOutcome(state.result(), List.copyOf(requests));
@@ -278,4 +304,18 @@ class SubagentToolNameCompatibilityTest {
     }
 
     private record RunOutcome(SubagentRegistry.SubagentResult result, List<ChatCompletionRequest> requests) {}
+
+    public static class ConfiguredModule extends ConfigurationTestModule {
+        public ConfiguredModule() {
+            super(values());
+        }
+
+        private static Map<String, String> values() {
+            return Map.of(
+                    "yca.storageHome", Configured.storageHome.toString(),
+                    "yca.subagents.enabled", "true",
+                    "yca.subagents.maxConcurrent", "2",
+                    "yca.llm.maxConcurrent", "4");
+        }
+    }
 }

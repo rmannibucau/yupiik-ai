@@ -17,6 +17,9 @@ package io.yupiik.ia.agent.acp;
 
 import static org.junit.jupiter.api.Assertions.*;
 
+import io.yupiik.fusion.testing.Fusion;
+import io.yupiik.fusion.testing.FusionSupport;
+import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.llm.ChatClient;
 import io.yupiik.ia.agent.core.llm.ChatSettings;
 import io.yupiik.ia.agent.core.session.SessionMetadata;
@@ -28,11 +31,18 @@ import java.util.concurrent.CompletableFuture;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+@FusionSupport(modules = OptionConfigurationTestModule.class)
 class SessionPresetValidationTest {
+    @Fusion
+    private CodingAgentConfiguration configuration;
+
+    @Fusion
+    private AcpCommand.Conf commandOptions;
+
     @Test
     void allSamplingStatesAndEffectiveModelSurviveSnapshotWithoutIdentityGuessing(@TempDir final Path root) {
         try (final var mapper = CodecsTest.mapper();
-                final var support = new OptionTestSupport(mapper, ignored -> {
+                final var support = new OptionTestSupport(configuration, commandOptions, mapper, ignored -> {
                     fail("Preset restore must not discover models");
                     return CompletableFuture.completedFuture(null);
                 })) {
@@ -68,7 +78,7 @@ class SessionPresetValidationTest {
     @Test
     void removedProviderVariantUnknownVersionAndInvalidSamplingAreRejectedOffline() {
         try (final var mapper = CodecsTest.mapper();
-                final var support = new OptionTestSupport(mapper, ignored -> {
+                final var support = new OptionTestSupport(configuration, commandOptions, mapper, ignored -> {
                     fail("Validation must remain offline");
                     return CompletableFuture.completedFuture(null);
                 })) {

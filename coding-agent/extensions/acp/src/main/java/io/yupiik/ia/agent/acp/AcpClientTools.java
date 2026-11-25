@@ -18,7 +18,9 @@ package io.yupiik.ia.agent.acp;
 import static java.util.stream.Collectors.joining;
 
 import io.yupiik.ia.agent.core.configuration.AgentMode;
+import io.yupiik.ia.agent.core.configuration.PermissionMode;
 import io.yupiik.ia.agent.core.tools.EmbeddedTool;
+import io.yupiik.ia.agent.core.tools.SandboxIntegration;
 import io.yupiik.ia.agent.core.tools.Schemas;
 import io.yupiik.ia.agent.core.tools.ToolCategory;
 import io.yupiik.ia.agent.core.tools.ToolContext;
@@ -198,7 +200,16 @@ public final class AcpClientTools implements AutoCloseable {
         }
     }
 
-    private final class ClientTool implements EmbeddedTool {
+    private final class ClientTool implements SandboxIntegration {
+        @Override
+        public String sandboxIntegrationId() {
+            return switch (kind) {
+                case READ -> "acp:fs.readTextFile";
+                case WRITE -> "acp:fs.writeTextFile";
+                case TERMINAL -> "acp:terminal";
+            };
+        }
+
         private final Kind kind;
 
         private ClientTool(final Kind kind) {
@@ -353,7 +364,9 @@ public final class AcpClientTools implements AutoCloseable {
         }
         // PermissionService.check does not by itself prohibit all edits in PLAN (e.g. YOLO/explicit allows).
         // Client terminals are deliberately conservative: none is advertised as a readonly executable.
-        if (kind != Kind.READ && context.permissions().mode() == AgentMode.PLAN) {
+        if (kind != Kind.READ
+                && context.permissions().mode() == AgentMode.PLAN
+                && context.permissions().permissionMode() != PermissionMode.FULL_YOLO) {
             throw new IllegalArgumentException("plan mode");
         }
     }

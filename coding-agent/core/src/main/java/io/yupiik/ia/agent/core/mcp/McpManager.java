@@ -27,7 +27,9 @@ import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.configuration.AgentMode;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.McpServerConfiguration;
+import io.yupiik.ia.agent.core.configuration.PermissionMode;
 import io.yupiik.ia.agent.core.tools.EmbeddedTool;
+import io.yupiik.ia.agent.core.tools.SandboxIntegration;
 import io.yupiik.ia.agent.core.tools.ToolCategory;
 import io.yupiik.ia.agent.core.tools.ToolContext;
 import io.yupiik.ia.agent.core.tools.ToolDiagnosticException;
@@ -216,7 +218,12 @@ public class McpManager implements AutoCloseable {
                                             .getBytes(StandardCharsets.UTF_8))
                                     .toString()
                                     .replace("-", "");
-                    tools.add(new EmbeddedTool() {
+                    tools.add(new SandboxIntegration() {
+                        @Override
+                        public String sandboxIntegrationId() {
+                            return "client-mcp:" + server.name();
+                        }
+
                         @Override
                         public String name() {
                             return qualified;
@@ -243,7 +250,8 @@ public class McpManager implements AutoCloseable {
                         @Override
                         public ToolResult execute(final Map<String, Object> args, final ToolContext context) {
                             if (context.permissions() == null
-                                    || context.permissions().mode() == AgentMode.PLAN) {
+                                    || (context.permissions().mode() == AgentMode.PLAN
+                                            && context.permissions().permissionMode() != PermissionMode.FULL_YOLO)) {
                                 return ToolResult.error("Client MCP tools are unavailable in PLAN mode");
                             }
                             if (context.cancelled().getAsBoolean()

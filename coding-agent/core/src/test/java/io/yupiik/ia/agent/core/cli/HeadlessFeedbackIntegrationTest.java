@@ -19,11 +19,12 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import io.yupiik.fusion.framework.api.configuration.Configuration;
 import io.yupiik.fusion.framework.api.event.Emitter;
 import io.yupiik.fusion.httpclient.core.ExtendedHttpClient;
 import io.yupiik.fusion.httpclient.core.ExtendedHttpClientConfiguration;
 import io.yupiik.fusion.json.JsonMapper;
+import io.yupiik.fusion.testing.Fusion;
+import io.yupiik.fusion.testing.FusionSupport;
 import io.yupiik.ia.agent.core.agent.AgentEvent;
 import io.yupiik.ia.agent.core.agent.AgentLoop;
 import io.yupiik.ia.agent.core.agent.AgentProvider;
@@ -31,7 +32,7 @@ import io.yupiik.ia.agent.core.agent.MemoryExtractor;
 import io.yupiik.ia.agent.core.agent.SystemPromptBuilder;
 import io.yupiik.ia.agent.core.codegraph.StructuralCodeGraph;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
-import io.yupiik.ia.agent.core.configuration.ConfigurationLoader;
+import io.yupiik.ia.agent.core.configuration.ConfigurationTestModule;
 import io.yupiik.ia.agent.core.context.ContextManager;
 import io.yupiik.ia.agent.core.context.ContextWindowCache;
 import io.yupiik.ia.agent.core.context.UsageTracker;
@@ -43,6 +44,7 @@ import io.yupiik.ia.agent.core.permissions.PermissionService;
 import io.yupiik.ia.agent.core.question.Question;
 import io.yupiik.ia.agent.core.question.UserFeedbackService;
 import io.yupiik.ia.agent.core.runtime.StatusReporter;
+import io.yupiik.ia.agent.core.sandbox.DisabledSandbox;
 import io.yupiik.ia.agent.core.session.InMemorySessionStore;
 import io.yupiik.ia.agent.core.shell.SessionRuntime;
 import io.yupiik.ia.agent.core.shell.SessionRuntimeFactory;
@@ -71,7 +73,6 @@ import java.nio.file.attribute.PosixFilePermissions;
 import java.time.Clock;
 import java.time.Duration;
 import java.util.ArrayList;
-import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -89,11 +90,12 @@ import org.junit.jupiter.params.provider.ValueSource;
 
 /**
  * Real headless command, loop, tool dispatch and ChatClient; only the model's HTTP transport is scripted.
- * No container, TCP listener, shared mapper or excluded warmup: the deadline includes fixture construction
+ * No TCP listener, shared mapper or excluded warmup: the deadline includes fixture construction
  * and cleanup. Default feedback cancellation and independent approval denial also have focused coverage in
  * RunCommandTest.fusionDefaultFeedbackCancelsWithoutChangingOtherSessions and
  * RunCommandTest.fusionExactContractOverrideAnswersWithoutApprovingToolsOrChangingOtherSessions.
  */
+@FusionSupport(modules = HeadlessFeedbackIntegrationTest.Module.class)
 @Isolated // RunCommand installs a process-wide SIGINT handler and writes to the CLI streams.
 class HeadlessFeedbackIntegrationTest {
     @TempDir
@@ -102,36 +104,13 @@ class HeadlessFeedbackIntegrationTest {
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
     @SuppressWarnings("try") // The resource restores the process-wide SIGINT handler after RunCommand.
-    void answerReachesNextModelRequestAndFinalStoredResult(final boolean fromFile) throws Exception {
-        final var home = Files.createTempDirectory("headless-feedback-");
+    void answerReachesNextModelRequestAndFinalStoredResult(
+            final boolean fromFile, @Fusion final CodingAgentConfiguration configuration) throws Exception {
+        final var home = testWorkdir;
         try (final var signal = preserveInterruptHandler();
                 final var mapper = mapper();
                 final var transport = new ModelTransport(mapper);
                 final var http = new ExtendedHttpClient(new ExtendedHttpClientConfiguration().setDelegate(transport))) {
-            final var configuration = ConfigurationLoader.load(
-                    CodingAgentConfiguration.class,
-                    Configuration.of(Map.ofEntries(
-                            Map.entry("yca.storageHome", home.toString()),
-                            Map.entry("yca.workingDir", home.toString()),
-                            Map.entry("yca.projectDir", home.toString()),
-                            Map.entry("yca.provider.providers.length", "1"),
-                            Map.entry("yca.provider.providers.0.id", "default"),
-                            Map.entry("yca.provider.providers.0.baseUrl", "http://model.invalid/v1/chat/completions"),
-                            Map.entry("yca.provider.providers.0.api", "completions"),
-                            Map.entry("yca.provider.providers.0.apiKey", "test"),
-                            Map.entry("yca.provider.providers.0.model", "feedback-regression"),
-                            Map.entry("yca.provider.providers.0.contextWindow", "128000"),
-                            Map.entry("yca.provider.providers.0.outputTokens", "1024"),
-                            Map.entry("yca.llm.maxIterations", "3"),
-                            Map.entry("yca.llm.maxConcurrent", "0"),
-                            Map.entry("yca.llm.retriesMaxAttempts", "0"),
-                            Map.entry("yca.permissions.mode", "ask"),
-                            Map.entry("yca.memory.enabled", "false"),
-                            Map.entry("yca.pruning.enabled", "false"),
-                            Map.entry("yca.compaction.enabled", "false"),
-                            Map.entry("yca.compression.enabled", "false"),
-                            Map.entry("yca.structuralCodeGraph.enabled", "false"),
-                            Map.entry("yca.mcp.servers.length", "0"))));
             final var clock = Clock.systemUTC();
             final var providers = new ProviderManager(configuration, mapper);
             try (final var chat = new ChatClient(
@@ -218,9 +197,19 @@ class HeadlessFeedbackIntegrationTest {
                             null,
                             null,
                             null,
-                            (configuration).resolveWorkingDir());
+                            (configuration).resolveWorkingDir(),
+                            new DisabledSandbox((configuration).resolveWorkingDir()));
                     final var runtime = new SessionRuntime(
-                            loop, permissions, feedback, usage, todos, status, context, prompt, home);
+                            loop,
+                            permissions,
+                            feedback,
+                            usage,
+                            todos,
+                            status,
+                            context,
+                            prompt,
+                            home,
+                            new DisabledSandbox(home));
                     final var factory = new SessionRuntimeFactory() {
                         @Override
                         public Path resolveWorkdir(final Path explicitWorkdir, final String resumedSessionId) {
@@ -307,12 +296,6 @@ class HeadlessFeedbackIntegrationTest {
                             "answering a question must not approve a separate headless permission request");
                 } finally {
                     mcp.close();
-                }
-            }
-        } finally {
-            try (final var paths = Files.walk(home)) {
-                for (final var path : paths.sorted(Comparator.reverseOrder()).toList()) {
-                    Files.delete(path);
                 }
             }
         }
@@ -562,5 +545,32 @@ class HeadlessFeedbackIntegrationTest {
 
         @Override
         public void close() {}
+    }
+
+    public static class Module extends ConfigurationTestModule {
+        public Module() {
+            super(Map.ofEntries(
+                    Map.entry("yca.storageHome", testWorkdir.toString()),
+                    Map.entry("yca.workingDir", testWorkdir.toString()),
+                    Map.entry("yca.projectDir", testWorkdir.toString()),
+                    Map.entry("yca.provider.providers.length", "1"),
+                    Map.entry("yca.provider.providers.0.id", "default"),
+                    Map.entry("yca.provider.providers.0.baseUrl", "http://model.invalid/v1/chat/completions"),
+                    Map.entry("yca.provider.providers.0.api", "completions"),
+                    Map.entry("yca.provider.providers.0.apiKey", "test"),
+                    Map.entry("yca.provider.providers.0.model", "feedback-regression"),
+                    Map.entry("yca.provider.providers.0.contextWindow", "128000"),
+                    Map.entry("yca.provider.providers.0.outputTokens", "1024"),
+                    Map.entry("yca.llm.maxIterations", "3"),
+                    Map.entry("yca.llm.maxConcurrent", "0"),
+                    Map.entry("yca.llm.retriesMaxAttempts", "0"),
+                    Map.entry("yca.permissions.mode", "ask"),
+                    Map.entry("yca.memory.enabled", "false"),
+                    Map.entry("yca.pruning.enabled", "false"),
+                    Map.entry("yca.compaction.enabled", "false"),
+                    Map.entry("yca.compression.enabled", "false"),
+                    Map.entry("yca.structuralCodeGraph.enabled", "false"),
+                    Map.entry("yca.mcp.servers.length", "0")));
+        }
     }
 }

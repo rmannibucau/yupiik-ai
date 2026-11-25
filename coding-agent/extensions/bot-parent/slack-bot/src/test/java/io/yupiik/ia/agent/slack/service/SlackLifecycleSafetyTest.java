@@ -19,12 +19,15 @@ import static io.yupiik.ia.agent.slack.support.SlackDomainFixture.task;
 import static org.junit.jupiter.api.Assertions.*;
 
 import io.yupiik.fusion.framework.api.configuration.Configuration;
+import io.yupiik.fusion.testing.Fusion;
+import io.yupiik.fusion.testing.FusionSupport;
 import io.yupiik.ia.agent.bot.feedback.FeedbackMailbox;
 import io.yupiik.ia.agent.bot.runtime.admission.HostAdmission;
 import io.yupiik.ia.agent.bot.runtime.admission.HostAdmissionConfiguration;
 import io.yupiik.ia.agent.bot.runtime.configuration.ExecutorConfiguration;
 import io.yupiik.ia.agent.core.configuration.ProviderBudgetConfiguration;
 import io.yupiik.ia.agent.core.question.Question;
+import io.yupiik.ia.agent.slack.configuration.SlackPrompts;
 import io.yupiik.ia.agent.slack.context.SlackContextStorage;
 import io.yupiik.ia.agent.slack.model.SlackQuestion;
 import io.yupiik.ia.agent.slack.model.SlackQuestionItem;
@@ -32,6 +35,7 @@ import io.yupiik.ia.agent.slack.model.SlackQuestionRequest;
 import io.yupiik.ia.agent.slack.model.SlackTask;
 import io.yupiik.ia.agent.slack.model.TaskStatus;
 import io.yupiik.ia.agent.slack.store.SlackStore;
+import io.yupiik.ia.agent.slack.support.SlackConfigurationTestModule;
 import io.yupiik.ia.agent.slack.support.SlackDomainFixture;
 import java.io.IOException;
 import java.nio.file.Files;
@@ -50,7 +54,11 @@ import java.util.function.UnaryOperator;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+@FusionSupport(modules = SlackConfigurationTestModule.class)
 class SlackLifecycleSafetyTest {
+    @Fusion
+    private SlackPrompts baselinePrompts;
+
     @TempDir
     Path root;
 
@@ -210,7 +218,7 @@ class SlackLifecycleSafetyTest {
                     fixture.executor(root),
                     fixture.json,
                     cancellingStore,
-                    new SlackPromptRenderer(SlackDomainFixture.prompts(), fixture.json),
+                    new SlackPromptRenderer(SlackDomainFixture.prompts(baselinePrompts), fixture.json),
                     sandbox,
                     feedback(fixture),
                     fixture.api,
@@ -330,7 +338,7 @@ class SlackLifecycleSafetyTest {
                 fixture.executor(root),
                 fixture.json,
                 fixture.store,
-                new SlackPromptRenderer(SlackDomainFixture.prompts(), fixture.json),
+                new SlackPromptRenderer(SlackDomainFixture.prompts(baselinePrompts), fixture.json),
                 sandbox,
                 feedback(fixture),
                 fixture.api,
@@ -342,7 +350,8 @@ class SlackLifecycleSafetyTest {
     }
 
     private SlackFeedback feedback(final SlackDomainFixture fixture) {
-        return new SlackFeedback(fixture.configuration, SlackDomainFixture.prompts(), fixture.store, fixture.api);
+        return new SlackFeedback(
+                fixture.configuration, SlackDomainFixture.prompts(baselinePrompts), fixture.store, fixture.api);
     }
 
     private void change(final SlackDomainFixture fixture, final UnaryOperator<SlackTask> operation) {

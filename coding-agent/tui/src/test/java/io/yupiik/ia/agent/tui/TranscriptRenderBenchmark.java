@@ -19,16 +19,15 @@ import com.sun.management.ThreadMXBean;
 import dev.tamboui.buffer.Buffer;
 import dev.tamboui.layout.Rect;
 import dev.tamboui.widget.Widget;
+import io.yupiik.fusion.framework.api.ConfiguringContainer;
 import io.yupiik.ia.agent.core.agent.AgentEvent;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
-import io.yupiik.ia.agent.core.configuration.ConfigurationLoader;
 import io.yupiik.ia.agent.core.shell.ThinkTagSplitter;
 import java.lang.management.ManagementFactory;
 import java.nio.file.Path;
 import java.time.Clock;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Optional;
 
 /**
  * Opt-in headless stress harness, deliberately not a JUnit test.
@@ -42,7 +41,16 @@ public final class TranscriptRenderBenchmark {
     private TranscriptRenderBenchmark() {}
 
     public static void main(final String[] args) throws Exception {
-        final var command = command();
+        try (final var container = ConfiguringContainer.of()
+                        .register(new TuiConfigurationTestModule())
+                        .start();
+                final var configuration = container.lookup(CodingAgentConfiguration.class);
+                final var tui = container.lookup(TuiConfiguration.class)) {
+            run(args, command(configuration.instance(), tui.instance()));
+        }
+    }
+
+    private static void run(final String[] args, final TuiCommand command) throws Exception {
         final var state = new UiState(new ThinkTagSplitter(), Clock.systemUTC());
         final var render = TuiCommand.class.getDeclaredMethod("layoutContent", String.class, int.class, UiState.class);
         render.setAccessible(true);
@@ -115,12 +123,8 @@ public final class TranscriptRenderBenchmark {
         }
     }
 
-    private static TuiCommand command() throws Exception {
-        final var configuration = ConfigurationLoader.load(CodingAgentConfiguration.class, k -> Optional.empty());
-        final var tui = new TuiConfiguration(
-                null, "#9d7cd8", "#fab283", "#7fd88f", "#f5a742", "#e06c75", "#b896d8", "#eeeeee", "#808080", -1.0,
-                0.22, 0.14, 0.85, "#484848", "#606060", "#141414", "auto", "auto", 4000L, 3500L, false, "unicode",
-                "auto", "auto", List.of(), null, null, true, 3, 10, "", 0.8, "#ff5555", null, null);
+    private static TuiCommand command(final CodingAgentConfiguration configuration, final TuiConfiguration tui)
+            throws Exception {
         final var constructor = TuiCommand.class.getConstructors()[0];
         final var parameters = new Object[constructor.getParameterCount()];
         for (var i = 0; i < parameters.length; i++) {

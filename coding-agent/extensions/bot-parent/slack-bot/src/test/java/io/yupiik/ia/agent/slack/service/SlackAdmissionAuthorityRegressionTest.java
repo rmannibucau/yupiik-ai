@@ -17,13 +17,17 @@ package io.yupiik.ia.agent.slack.service;
 
 import static org.junit.jupiter.api.Assertions.*;
 
+import io.yupiik.fusion.testing.Fusion;
+import io.yupiik.fusion.testing.FusionSupport;
 import io.yupiik.ia.agent.slack.configuration.SlackConfiguration;
 import io.yupiik.ia.agent.slack.configuration.SlackContextConfiguration;
+import io.yupiik.ia.agent.slack.configuration.SlackPrompts;
 import io.yupiik.ia.agent.slack.configuration.SlackThreadConfiguration;
 import io.yupiik.ia.agent.slack.context.SlackActionRegistry;
 import io.yupiik.ia.agent.slack.model.SlackTask;
 import io.yupiik.ia.agent.slack.model.TaskStatus;
 import io.yupiik.ia.agent.slack.store.SlackStore;
+import io.yupiik.ia.agent.slack.support.SlackConfigurationTestModule;
 import io.yupiik.ia.agent.slack.support.SlackDomainFixture;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -47,7 +51,11 @@ import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.api.parallel.ResourceAccessMode;
 import org.junit.jupiter.api.parallel.ResourceLock;
 
+@FusionSupport(modules = SlackConfigurationTestModule.class)
 class SlackAdmissionAuthorityRegressionTest {
+    @Fusion
+    private SlackPrompts baselinePrompts;
+
     private static final String TOKEN = "private-admission-action-token";
     private static final String DUPLICATE_TOKEN = "private-duplicate-action-token";
 
@@ -210,7 +218,7 @@ class SlackAdmissionAuthorityRegressionTest {
                             .isEmpty(),
                     "Failed durable admission must not register a grant");
 
-            final var renderer = new SlackPromptRenderer(SlackDomainFixture.prompts(), fixture.json);
+            final var renderer = new SlackPromptRenderer(SlackDomainFixture.prompts(baselinePrompts), fixture.json);
             for (final var task : reopened.list()) {
                 assertRedacted(fixture.json.toString(task));
                 assertRedacted(renderer.render(task, reopened.list(), true, Map.of()));

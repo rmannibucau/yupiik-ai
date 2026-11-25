@@ -21,6 +21,7 @@ import static io.yupiik.ia.agent.core.tools.ToolArgs.optInt;
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.fusion.httpclient.core.ExtendedHttpClient;
 import io.yupiik.htmltomarkdown.HtmlLightParser;
+import io.yupiik.ia.agent.core.sandbox.SandboxHttpTransport;
 import io.yupiik.ia.agent.core.tools.EmbeddedTool;
 import io.yupiik.ia.agent.core.tools.Schemas;
 import io.yupiik.ia.agent.core.tools.ToolCategory;
@@ -103,7 +104,8 @@ public class WebFetchTool implements EmbeddedTool {
         if (!"http".equalsIgnoreCase(uri.getScheme()) && !"https".equalsIgnoreCase(uri.getScheme())) {
             return ToolResult.error("Only http/https URLs are supported");
         }
-        final var ssrf = ssrfError(uri);
+        context.sandbox().requireNetwork(uri);
+        final var ssrf = context.sandbox().enabled() ? null : ssrfError(uri);
         if (ssrf != null) {
             return ToolResult.error(ssrf);
         }
@@ -113,10 +115,14 @@ public class WebFetchTool implements EmbeddedTool {
                 .header("accept", "text/html,application/xhtml+xml,text/plain,application/json,*/*;q=0.8")
                 .GET()
                 .build();
-        try {
+        try (final var transport = context.sandbox().enabled()
+                ? new SandboxHttpTransport(
+                        context.sandbox(), () -> context.isCancelled() || context.isCallCancelled(), MAX_BYTES)
+                : null) {
             // the request is polled in small slices so a turn cancellation surfaces promptly
             // instead of waiting for the whole fetch (which can take up to the timeout)
-            final var future = client.sendAsync(request, HttpResponse.BodyHandlers.ofByteArray());
+            final var future = (transport == null ? client : transport)
+                    .sendAsync(request, HttpResponse.BodyHandlers.ofByteArray());
             final var deadline = System.nanoTime() + Duration.ofSeconds(timeout).toNanos();
             while (true) {
                 if (context.isCancelled() || context.isCallCancelled()) {
@@ -179,8 +185,8 @@ public class WebFetchTool implements EmbeddedTool {
     /**
      * SSRF guard: rejects URLs whose host resolves (partly or fully) to a loopback, link-local,
      * private or otherwise non-routable address - the classic metadata-service (169.254.169.254)
-     * and localhost pivot. Resolution happens at request time (DNS rebinding window is small and
-     * the web UI Host/Origin guards cover the browser path); a resolution failure is fail-closed.
+     * and localhost pivot. This is only a best-effort check for unsandboxed use: the client may
+     * resolve again or follow redirects. Sandboxed use uses SandboxHttpTransport instead.
      */
     static String ssrfError(final URI uri) {
         if (uri.getHost() == null) {

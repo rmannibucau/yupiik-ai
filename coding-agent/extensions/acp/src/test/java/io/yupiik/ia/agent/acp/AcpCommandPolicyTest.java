@@ -17,51 +17,70 @@ package io.yupiik.ia.agent.acp;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
-import io.yupiik.ia.agent.core.configuration.ConfigurationLoader;
+import io.yupiik.fusion.testing.Fusion;
+import io.yupiik.fusion.testing.FusionSupport;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
+import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 
 class AcpCommandPolicyTest {
-    @Test
-    void fusionDefaultsContainOnlyAcpAdditionsToTheCommonSecretRules() {
-        final var conf = configuration(Map.of());
-        assertEquals(
-                List.of(
-                        "passphrase",
-                        "recoverycode",
-                        "backupcode",
-                        "payment",
-                        "creditcard",
-                        "debitcard",
-                        "cardnumber",
-                        "cardverification",
-                        "securitycode",
-                        "onetimecode"),
-                conf.elicitationSensitiveMarkers());
-        assertEquals(List.of("pin", "cvv", "cvc", "otp"), conf.elicitationSensitiveWords());
+    @Nested
+    @FusionSupport(modules = AcpConfigurationTestModule.class)
+    class Defaults {
+        @Test
+        void fusionDefaultsContainOnlyAcpAdditionsToTheCommonSecretRules(@Fusion final AcpCommand.Conf conf) {
+            assertEquals(
+                    List.of(
+                            "passphrase",
+                            "recoverycode",
+                            "backupcode",
+                            "payment",
+                            "creditcard",
+                            "debitcard",
+                            "cardnumber",
+                            "cardverification",
+                            "securitycode",
+                            "onetimecode"),
+                    conf.elicitationSensitiveMarkers());
+            assertEquals(List.of("pin", "cvv", "cvc", "otp"), conf.elicitationSensitiveWords());
+        }
     }
 
-    @Test
-    void fusionParsesLiteralMarkerAndWholeWordOverrides() {
-        final var conf = configuration(Map.of(
-                "elicitationSensitiveMarkers", "Team / Entry,company badge",
-                "elicitationSensitiveWords", "stepup,o.tp"));
-        assertEquals(List.of("Team / Entry", "company badge"), conf.elicitationSensitiveMarkers());
-        assertEquals(List.of("stepup", "o.tp"), conf.elicitationSensitiveWords());
+    @Nested
+    @FusionSupport(modules = OverridesModule.class)
+    class Overrides {
+        @Test
+        void fusionParsesLiteralMarkerAndWholeWordOverrides(@Fusion final AcpCommand.Conf conf) {
+            assertEquals(List.of("Team / Entry", "company badge"), conf.elicitationSensitiveMarkers());
+            assertEquals(List.of("stepup", "o.tp"), conf.elicitationSensitiveWords());
+        }
     }
 
-    @Test
-    void explicitEmptyListsDisableOnlyTheAcpAdditionsInsteadOfRestoringDefaults() {
-        final var conf = configuration(Map.of(
-                "elicitationSensitiveMarkers", "",
-                "elicitationSensitiveWords", ""));
-        assertEquals(List.of(), conf.elicitationSensitiveMarkers());
-        assertEquals(List.of(), conf.elicitationSensitiveWords());
+    @Nested
+    @FusionSupport(modules = EmptyModule.class)
+    class Empty {
+        @Test
+        void explicitEmptyListsDisableOnlyTheAcpAdditionsInsteadOfRestoringDefaults(
+                @Fusion final AcpCommand.Conf conf) {
+            assertEquals(List.of(), conf.elicitationSensitiveMarkers());
+            assertEquals(List.of(), conf.elicitationSensitiveWords());
+        }
     }
 
-    private AcpCommand.Conf configuration(final Map<String, String> properties) {
-        return ConfigurationLoader.load(AcpCommand.Conf.class, key -> Optional.ofNullable(properties.get(key)));
+    public static class OverridesModule extends AcpConfigurationTestModule {
+        public OverridesModule() {
+            super(Map.of(
+                    "elicitationSensitiveMarkers",
+                    "Team / Entry,company badge",
+                    "elicitationSensitiveWords",
+                    "stepup,o.tp"));
+        }
+    }
+
+    public static class EmptyModule extends AcpConfigurationTestModule {
+        public EmptyModule() {
+            super(Map.of("elicitationSensitiveMarkers", "", "elicitationSensitiveWords", ""));
+        }
     }
 }

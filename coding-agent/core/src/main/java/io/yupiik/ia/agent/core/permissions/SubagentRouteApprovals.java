@@ -59,13 +59,14 @@ public final class SubagentRouteApprovals {
             }
             final ApprovalGate.Result result;
             try {
-                result = gate.approve(
+                result = gate.approve(new ApprovalGate.Request(
+                        ApprovalGate.Origin.PERMISSION,
                         "Allow sub-agent model " + destination + "?",
                         "Use " + destination + " instead of " + source
                                 + ". The task and project context available to the sub-agent may be sent to this provider."
                                 + " This approval is separate from tool permissions.",
                         "subagent_model_route",
-                        Map.of("source", source, "destination", destination));
+                        Map.of("source", source, "destination", destination)));
             } catch (final RuntimeException unavailable) {
                 return false;
             }

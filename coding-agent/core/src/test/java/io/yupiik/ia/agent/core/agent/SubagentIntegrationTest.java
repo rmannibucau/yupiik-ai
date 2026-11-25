@@ -22,10 +22,12 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.fusion.framework.api.event.Emitter;
 import io.yupiik.fusion.json.JsonMapper;
+import io.yupiik.fusion.testing.Fusion;
+import io.yupiik.fusion.testing.FusionSupport;
 import io.yupiik.ia.agent.core.codegraph.StructuralCodeGraph;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
+import io.yupiik.ia.agent.core.configuration.ConfigurationTestModule;
 import io.yupiik.ia.agent.core.configuration.ProviderConfiguration;
-import io.yupiik.ia.agent.core.configuration.TestConfigs;
 import io.yupiik.ia.agent.core.context.BackoffSleeper;
 import io.yupiik.ia.agent.core.context.ContextManager;
 import io.yupiik.ia.agent.core.context.UsageTracker;
@@ -38,6 +40,7 @@ import io.yupiik.ia.agent.core.llm.PauseEvent;
 import io.yupiik.ia.agent.core.llm.ToolCall;
 import io.yupiik.ia.agent.core.llm.Usage;
 import io.yupiik.ia.agent.core.permissions.PermissionService;
+import io.yupiik.ia.agent.core.sandbox.DisabledSandbox;
 import io.yupiik.ia.agent.core.session.SessionEntry;
 import io.yupiik.ia.agent.core.session.SessionStore;
 import io.yupiik.ia.agent.core.snapshot.SnapshotStore;
@@ -63,7 +66,6 @@ import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Deque;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -81,6 +83,7 @@ import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -99,8 +102,9 @@ class SubagentIntegrationTest {
     private JsonMapper mapper;
 
     @BeforeEach
-    void bindMapper(final JsonMapper mapper) {
+    void bindMapper(final JsonMapper mapper, @Fusion final CodingAgentConfiguration configuration) {
         this.mapper = mapper;
+        this.configuration = withStorageHome(configuration, storageHome.toString());
     }
 
     private final List<AgentEvent> events = new ArrayList<>();
@@ -133,17 +137,6 @@ class SubagentIntegrationTest {
         synchronized (events) {
             return List.copyOf(events);
         }
-    }
-
-    private CodingAgentConfiguration config(final Map<String, String> overrides) {
-        final var entries = new HashMap<String, String>();
-        entries.put("yca.storageHome", storageHome.toString());
-        entries.put("yca.subagents.enabled", "true");
-        entries.put("yca.subagents.maxConcurrent", "2");
-        entries.put("yca.llm.maxConcurrent", "4");
-        entries.put("yca.tools.parallelReadonly", "true");
-        entries.putAll(overrides);
-        return TestConfigs.codingAgent(entries);
     }
 
     private ProviderManager providerManager(final int maxConcurrent) {
@@ -581,521 +574,694 @@ class SubagentIntegrationTest {
         return new TestSubagentRunner(baseRunner);
     }
 
-    @Test
-    void rejectedSchedulingCompletesTheChildAndReleasesCapacityExactlyOnce() throws Exception {
-        final var cfg = config(Map.of("yca.subagents.maxConcurrent", "1"));
-        final var reg = newRegistry(cfg, 3);
-        final var rejectingExecutor = Executors.newSingleThreadExecutor();
-        rejectingExecutor.shutdown();
-        final var runner = newRunner(
-                scriptedClient(new ArrayDeque<>(), new ArrayList<>()),
-                emptyToolRegistry(),
-                reg,
-                cfg,
-                rejectingExecutor);
-
-        final var rejected = reg.start("parent", "rejected task").orElseThrow();
-        runner.runAsync(
-                rejected,
-                noopStore(),
-                noopSnapshotStore(),
-                noopTodoStore(),
-                ToolContext.empty(testWorkdir),
-                () -> false);
-        rejected.awaitResult();
-        assertEquals(
-                SubagentRegistry.SubagentResult.Status.FAILED, rejected.result().status());
-        assertEquals(0, reg.providerActive("default"), "the rejected child released its provider slot");
-
-        final var replacement = reg.start("parent", "replacement").orElseThrow();
-        reg.complete(rejected.id(), SubagentRegistry.SubagentResult.error("duplicate completion", ""));
-        assertEquals(
-                1, reg.providerActive("default"), "a duplicate completion must not release another child's permit");
-        reg.cancel(replacement.id());
-        assertEquals(0, reg.providerActive("default"));
+    @AfterAll
+    static void closeExecutor() {
+        EXECUTOR.shutdownNow();
     }
 
-    @Test
-    void nestedRunnerSharesBudgetRestrictsToolsAndDeliversToImmediateParent() throws Exception {
-        final var cfg = config(Map.of(
-                "yca.provider.providers.length", "1",
-                "yca.provider.providers.0.id", "default",
-                "yca.provider.providers.0.model", "main",
-                "yca.provider.providers.0.subagents.maxDepth", "2",
-                "yca.subagents.allowModelOverride", "true",
-                "yca.subagents.includes", "$default/alt"));
-        final var manager = new ProviderManager(cfg, mapper);
-        final var reg = new SubagentRegistry(cfg, manager);
-        final var tools = new ArrayList<EmbeddedTool>();
-        final var toolRegistry = new ToolRegistry(null) {
-            @Override
-            public List<EmbeddedTool> tools() {
-                return List.copyOf(tools);
-            }
+    private CodingAgentConfiguration configuration;
 
-            @Override
-            public EmbeddedTool tool(final String name) {
-                return tools.stream()
-                        .filter(tool -> tool.name().equals(name))
-                        .findFirst()
-                        .orElse(null);
-            }
-        };
-        final var rounds = new AtomicInteger();
-        final var budget = new SubagentBudget(2);
-        final var client = new ChatClient() {
-            @Override
-            public Message stream(
-                    final ChatCompletionRequest request,
-                    final Consumer<PauseEvent> pauses,
-                    final Consumer<LlmStreamEvent> deltas,
-                    final BooleanSupplier cancelled) {
-                final var round = rounds.incrementAndGet();
-                final var names = request.tools().stream()
-                        .map(tool -> tool.function().name())
-                        .collect(toSet());
-                if (round == 1) {
-                    assertEquals(Set.of("spawn_subagent", "read"), names);
-                    assertEquals(1, budget.available());
-                    return ScriptedReply.toolCall(
-                                    "spawn_subagent",
-                                    "{\"task\":\"nested task\",\"model\":\"alt\",\"tools\":[\"read\"]}")
-                            .toMessage();
-                }
-                if (round == 2) {
-                    assertEquals(Set.of("read"), names);
-                    assertEquals(0, budget.available());
-                    assertEquals("$default/alt", request.settings().model());
-                    return new ScriptedReply("grandchild summary", "stop").toMessage();
-                }
-                assertEquals(3, round);
-                assertTrue(request.messages().stream()
-                        .anyMatch(message -> message.content() instanceof final String text
-                                && text.contains("<subagent ")
-                                && text.contains("grandchild summary")));
-                assertEquals(1, budget.available());
-                return new ScriptedReply("child summary", "stop").toMessage();
-            }
-        };
-        // Inline execution makes delivery ordering deterministic while exercising both real child loops.
-        try (final var executor = new AbstractExecutorService() {
-            private boolean closed;
+    @Nested
+    @FusionSupport(modules = RejectedSchedulingCompletesTheChildAndReleasesCapacityExactlyOnceModule.class)
+    class RejectedSchedulingCompletesTheChildAndReleasesCapacityExactlyOnceTests {
+        @TempDir
+        static Path root;
 
-            @Override
-            public void shutdown() {
-                closed = true;
-            }
+        @Test
+        void rejectedSchedulingCompletesTheChildAndReleasesCapacityExactlyOnce() throws Exception {
+            final var cfg = configuration;
+            final var reg = newRegistry(cfg, 3);
+            final var rejectingExecutor = Executors.newSingleThreadExecutor();
+            rejectingExecutor.shutdown();
+            final var runner = newRunner(
+                    scriptedClient(new ArrayDeque<>(), new ArrayList<>()),
+                    emptyToolRegistry(),
+                    reg,
+                    cfg,
+                    rejectingExecutor);
 
-            @Override
-            public List<Runnable> shutdownNow() {
-                shutdown();
-                return List.of();
-            }
-
-            @Override
-            public boolean isShutdown() {
-                return closed;
-            }
-
-            @Override
-            public boolean isTerminated() {
-                return closed;
-            }
-
-            @Override
-            public boolean awaitTermination(final long timeout, final TimeUnit unit) {
-                return closed;
-            }
-
-            @Override
-            public void execute(final Runnable command) {
-                command.run();
-            }
-        }) {
-            final var runner = newRunner(client, toolRegistry, reg, cfg, executor);
-            final var spawn = new SpawnSubagentTool(reg, runner, noopStore(), noopSnapshotStore(), cfg, manager);
-            tools.add(spawn);
-            tools.add(barrierRegistry(new CyclicBarrier(1), "read").tool("read"));
-            final var root = "nested-integration-" + UUID.randomUUID();
-            final var context = new ToolContext(
-                    root,
-                    null,
-                    null,
-                    new PermissionService(cfg, testWorkdir),
-                    null,
+            final var rejected = reg.start("parent", "rejected task").orElseThrow();
+            runner.runAsync(
+                    rejected,
+                    noopStore(),
+                    noopSnapshotStore(),
                     noopTodoStore(),
-                    null,
-                    null,
-                    null,
-                    () -> false,
-                    ChatSettings.EMPTY.withProviderId("default").withModel("main"),
-                    null,
-                    testWorkdir,
-                    0,
-                    Set.of("spawn_subagent", "read"),
-                    budget,
-                    toolRegistry);
-            final var started = spawn.execute(Map.of("task", "child task"), context);
-            assertTrue(started.success(), started.output());
-            final var child = reg.listAll(root).getFirst();
-            assertTrue(child.result().success(), String.valueOf(child.result()));
-            assertEquals(3, rounds.get());
-            assertEquals(2, budget.available());
-            final var deliveries = SubagentDeliveryBus.get().drain(root);
-            assertEquals(1, deliveries.size());
-            assertEquals("child summary", deliveries.getFirst().summary());
-            assertTrue(SubagentDeliveryBus.get().drain(child.childSessionId()).isEmpty());
+                    ToolContext.empty(testWorkdir, new DisabledSandbox(testWorkdir)),
+                    () -> false);
+            rejected.awaitResult();
+            assertEquals(
+                    SubagentRegistry.SubagentResult.Status.FAILED,
+                    rejected.result().status());
+            assertEquals(0, reg.providerActive("default"), "the rejected child released its provider slot");
+
+            final var replacement = reg.start("parent", "replacement").orElseThrow();
+            reg.complete(rejected.id(), SubagentRegistry.SubagentResult.error("duplicate completion", ""));
+            assertEquals(
+                    1, reg.providerActive("default"), "a duplicate completion must not release another child's permit");
+            reg.cancel(replacement.id());
+            assertEquals(0, reg.providerActive("default"));
+        }
+
+        @Test
+        void thirdSubagentRejectedWhenAtLimit() {
+            final var cfg = configuration;
+            final var reg = newRegistry(cfg, 3); // provider max 3 -> N-1 = 2, session cap = 1
+            final var budget = new SubagentBudget(1);
+
+            assertTrue(
+                    reg.start(new AgentRunSpec("parent", "t1", null, null, null, null, null, null), "default", budget)
+                            .admitted());
+            assertFalse(
+                    reg.start(new AgentRunSpec("parent", "t2", null, null, null, null, null, null), "default", budget)
+                            .admitted(),
+                    "second should be rejected at limit");
         }
     }
 
-    @Test
-    @Timeout(10)
-    void queuedChildUsesAdmittedSettingsInsteadOfParentSettingsAtExecution() throws Exception {
-        final var cfg = config(Map.of());
-        final var reg = newRegistry(cfg, 4);
-        final var captured = new AtomicReference<ChatCompletionRequest>();
-        final var client = new ChatClient() {
-            @Override
-            public Message stream(
-                    final ChatCompletionRequest request,
-                    final Consumer<PauseEvent> pauses,
-                    final Consumer<LlmStreamEvent> deltas,
-                    final BooleanSupplier cancelled) {
-                captured.set(request);
-                deltas.accept(new End("stop", null));
-                return new Message("assistant", "done", null, null, null, null);
-            }
-        };
-        final var release = new CountDownLatch(1);
-        try (final var executor = Executors.newSingleThreadExecutor()) {
-            executor.submit(() -> {
-                try {
-                    release.await();
-                } catch (final InterruptedException interrupted) {
-                    Thread.currentThread().interrupt();
+    public static class RejectedSchedulingCompletesTheChildAndReleasesCapacityExactlyOnceModule
+            extends ConfigurationTestModule {
+        public RejectedSchedulingCompletesTheChildAndReleasesCapacityExactlyOnceModule() {
+            super(Map.ofEntries(
+                    Map.entry(
+                            "yca.storageHome",
+                            RejectedSchedulingCompletesTheChildAndReleasesCapacityExactlyOnceTests.root.toString()),
+                    Map.entry("yca.subagents.enabled", "true"),
+                    Map.entry("yca.subagents.maxConcurrent", "1"),
+                    Map.entry("yca.llm.maxConcurrent", "4"),
+                    Map.entry("yca.tools.parallelReadonly", "true")));
+        }
+    }
+
+    @Nested
+    @FusionSupport(modules = NestedRunnerSharesBudgetRestrictsToolsAndDeliversToImmediateParentModule.class)
+    class NestedRunnerSharesBudgetRestrictsToolsAndDeliversToImmediateParentTests {
+        @TempDir
+        static Path root;
+
+        @Test
+        void nestedRunnerSharesBudgetRestrictsToolsAndDeliversToImmediateParent() throws Exception {
+            final var cfg = configuration;
+            final var manager = new ProviderManager(cfg, mapper);
+            final var reg = new SubagentRegistry(cfg, manager);
+            final var tools = new ArrayList<EmbeddedTool>();
+            final var toolRegistry = new ToolRegistry(null) {
+                @Override
+                public List<EmbeddedTool> tools() {
+                    return List.copyOf(tools);
                 }
-            });
-            try {
-                final var admitted = new EffectiveAgentModel(
-                        new ProviderManager.ResolvedModel(providerManager(4).provider("default"), "approved"),
-                        new ChatSettings("default", "$default/approved", "balanced", null),
-                        "approved",
-                        "$default/approved");
-                final var state = reg.start(new AgentRunSpec(
-                                "parent", "task", null, null, null, null, null, null, "default", null, admitted))
-                        .orElseThrow();
-                final var runner = newRunner(client, emptyToolRegistry(), reg, cfg, executor);
-                // The parent now has a different route; the raw spawn model is deliberately null.
-                final var switchedContext = new ToolContext(
-                        "parent",
+
+                @Override
+                public EmbeddedTool tool(final String name) {
+                    return tools.stream()
+                            .filter(tool -> tool.name().equals(name))
+                            .findFirst()
+                            .orElse(null);
+                }
+            };
+            final var rounds = new AtomicInteger();
+            final var budget = new SubagentBudget(2);
+            final var client = new ChatClient() {
+                @Override
+                public Message stream(
+                        final ChatCompletionRequest request,
+                        final Consumer<PauseEvent> pauses,
+                        final Consumer<LlmStreamEvent> deltas,
+                        final BooleanSupplier cancelled) {
+                    final var round = rounds.incrementAndGet();
+                    final var names = request.tools().stream()
+                            .map(tool -> tool.function().name())
+                            .collect(toSet());
+                    if (round == 1) {
+                        assertEquals(Set.of("spawn_subagent", "read"), names);
+                        assertEquals(1, budget.available());
+                        return ScriptedReply.toolCall(
+                                        "spawn_subagent",
+                                        "{\"task\":\"nested task\",\"model\":\"alt\",\"tools\":[\"read\"]}")
+                                .toMessage();
+                    }
+                    if (round == 2) {
+                        assertEquals(Set.of("read"), names);
+                        assertEquals(0, budget.available());
+                        assertEquals("$default/alt", request.settings().model());
+                        return new ScriptedReply("grandchild summary", "stop").toMessage();
+                    }
+                    assertEquals(3, round);
+                    assertTrue(request.messages().stream()
+                            .anyMatch(message -> message.content() instanceof final String text
+                                    && text.contains("<subagent ")
+                                    && text.contains("grandchild summary")));
+                    assertEquals(1, budget.available());
+                    return new ScriptedReply("child summary", "stop").toMessage();
+                }
+            };
+            // Inline execution makes delivery ordering deterministic while exercising both real child loops.
+            try (final var executor = new AbstractExecutorService() {
+                private boolean closed;
+
+                @Override
+                public void shutdown() {
+                    closed = true;
+                }
+
+                @Override
+                public List<Runnable> shutdownNow() {
+                    shutdown();
+                    return List.of();
+                }
+
+                @Override
+                public boolean isShutdown() {
+                    return closed;
+                }
+
+                @Override
+                public boolean isTerminated() {
+                    return closed;
+                }
+
+                @Override
+                public boolean awaitTermination(final long timeout, final TimeUnit unit) {
+                    return closed;
+                }
+
+                @Override
+                public void execute(final Runnable command) {
+                    command.run();
+                }
+            }) {
+                final var runner = newRunner(client, toolRegistry, reg, cfg, executor);
+                final var spawn = new SpawnSubagentTool(reg, runner, noopStore(), noopSnapshotStore(), cfg, manager);
+                tools.add(spawn);
+                tools.add(barrierRegistry(new CyclicBarrier(1), "read").tool("read"));
+                final var root = "nested-integration-" + UUID.randomUUID();
+                final var context = new ToolContext(
+                        root,
                         null,
                         null,
-                        null,
+                        new PermissionService(cfg, testWorkdir),
                         null,
                         noopTodoStore(),
                         null,
                         null,
                         null,
                         () -> false,
-                        ChatSettings.EMPTY.withProviderId("other").withModel("redirect"),
+                        ChatSettings.EMPTY.withProviderId("default").withModel("main"),
                         null,
-                        testWorkdir);
-                runner.runAsync(state, noopStore(), noopSnapshotStore(), noopTodoStore(), switchedContext, () -> false);
-                assertEquals(null, captured.get(), "queued children make no inference requests");
-                release.countDown();
-                final var result = state.awaitResult();
-                assertTrue(result.success(), result.error());
-                assertEquals("$default/approved", captured.get().model());
-                assertEquals("default", captured.get().settings().providerId());
-                assertEquals("balanced", captured.get().settings().variant());
-                assertEquals(
-                        new SubagentRegistry.TranscriptIdentity("default", "approved"),
-                        reg.identityOf(state.id()).orElseThrow());
-            } finally {
-                release.countDown();
+                        testWorkdir,
+                        new DisabledSandbox(testWorkdir),
+                        0,
+                        Set.of("spawn_subagent", "read"),
+                        budget,
+                        toolRegistry);
+                final var started = spawn.execute(Map.of("task", "child task"), context);
+                assertTrue(started.success(), started.output());
+                final var child = reg.listAll(root).getFirst();
+                assertTrue(child.result().success(), String.valueOf(child.result()));
+                assertEquals(3, rounds.get());
+                assertEquals(2, budget.available());
+                final var deliveries = SubagentDeliveryBus.get().drain(root);
+                assertEquals(1, deliveries.size());
+                assertEquals("child summary", deliveries.getFirst().summary());
+                assertTrue(
+                        SubagentDeliveryBus.get().drain(child.childSessionId()).isEmpty());
             }
         }
     }
 
-    @Test
-    void subagentRunsToCompletionAndResultCollected() throws Exception {
-        final var cfg = config(Map.of());
-        final var reg = newRegistry(cfg, 4);
-        final var requests = new ArrayList<List<Message>>();
-        final var replies = new ArrayDeque<>(List.of(new ScriptedReply("subagent result", "stop")));
-        final var runner = newRunner(scriptedClient(replies, requests), emptyToolRegistry(), reg, cfg);
-        final var checkTool = new CheckSubagentsTool(reg, mapper);
-
-        final var state = reg.start("parent", "task").orElseThrow();
-        runner.runAsync(
-                state, noopStore(), noopSnapshotStore(), noopTodoStore(), ToolContext.empty(testWorkdir), () -> false);
-        runner.awaitCompletion(state);
-
-        final var collect = checkTool.execute(
-                Map.of("action", "collect", "subagent_id", state.id()), ToolContext.empty(testWorkdir));
-        assertTrue(collect.success(), collect.output());
-        assertTrue(collect.output().contains("subagent result"));
-        assertTrue(collect.output().contains("\"completed\":true"));
-
-        // State removed after collect
-        assertTrue(reg.get(state.id()).isEmpty());
-        // Semaphore released
-        assertTrue(reg.start("parent", "t2").isPresent());
+    public static class NestedRunnerSharesBudgetRestrictsToolsAndDeliversToImmediateParentModule
+            extends ConfigurationTestModule {
+        public NestedRunnerSharesBudgetRestrictsToolsAndDeliversToImmediateParentModule() {
+            super(Map.ofEntries(
+                    Map.entry(
+                            "yca.storageHome",
+                            NestedRunnerSharesBudgetRestrictsToolsAndDeliversToImmediateParentTests.root.toString()),
+                    Map.entry("yca.subagents.enabled", "true"),
+                    Map.entry("yca.subagents.maxConcurrent", "2"),
+                    Map.entry("yca.llm.maxConcurrent", "4"),
+                    Map.entry("yca.tools.parallelReadonly", "true"),
+                    Map.entry("yca.provider.providers.length", "1"),
+                    Map.entry("yca.provider.providers.0.id", "default"),
+                    Map.entry("yca.provider.providers.0.model", "main"),
+                    Map.entry("yca.provider.providers.0.subagents.maxDepth", "2"),
+                    Map.entry("yca.subagents.allowModelOverride", "true"),
+                    Map.entry("yca.subagents.includes", "$default/alt")));
+        }
     }
 
-    @Test
-    void multipleSubagentsRunInParallelWithinLimit() throws Exception {
-        final var cfg = config(Map.of("yca.subagents.maxConcurrent", "2"));
-        final var reg = newRegistry(cfg, 4); // provider max 4 -> actualMax = min(3, 2) = 2
-        final var barrier = new CyclicBarrier(2);
-        final var toolReg = barrierRegistry(barrier, "read_a", "read_b");
+    @Nested
+    @FusionSupport(modules = QueuedChildUsesAdmittedSettingsInsteadOfParentSettingsAtExecutionModule.class)
+    class QueuedChildUsesAdmittedSettingsInsteadOfParentSettingsAtExecutionTests {
+        @TempDir
+        static Path root;
 
-        final var replies1 = new ArrayDeque<ScriptedReply>();
-        replies1.add(ScriptedReply.toolCall("read_a", "{}"));
-        replies1.add(new ScriptedReply("done1", "stop"));
-        final var replies2 = new ArrayDeque<ScriptedReply>();
-        replies2.add(ScriptedReply.toolCall("read_b", "{}"));
-        replies2.add(new ScriptedReply("done2", "stop"));
-
-        final var req1 = new ArrayList<List<Message>>();
-        final var req2 = new ArrayList<List<Message>>();
-        final var runner1 = newRunner(scriptedClient(replies1, req1), toolReg, reg, cfg);
-        final var runner2 = newRunner(scriptedClient(replies2, req2), toolReg, reg, cfg);
-
-        final var s1 = reg.start("parent", "t1").orElseThrow();
-        final var s2 = reg.start("parent", "t2").orElseThrow();
-        runner1.runAsync(
-                s1, noopStore(), noopSnapshotStore(), noopTodoStore(), ToolContext.empty(testWorkdir), () -> false);
-        runner2.runAsync(
-                s2, noopStore(), noopSnapshotStore(), noopTodoStore(), ToolContext.empty(testWorkdir), () -> false);
-
-        // Wait for both tools to execute concurrently (barrier)
-        assertTrue(barrier.await(3, TimeUnit.SECONDS) >= 0, "both tools should execute concurrently");
-
-        runner1.awaitCompletion(s1);
-        runner2.awaitCompletion(s2);
-
-        final var checkTool = new CheckSubagentsTool(reg, mapper);
-        final var c1 =
-                checkTool.execute(Map.of("action", "collect", "subagent_id", s1.id()), ToolContext.empty(testWorkdir));
-        final var c2 =
-                checkTool.execute(Map.of("action", "collect", "subagent_id", s2.id()), ToolContext.empty(testWorkdir));
-        assertTrue(c1.success(), c1.output());
-        assertTrue(c2.success(), c2.output());
-    }
-
-    @Test
-    void thirdSubagentRejectedWhenAtLimit() {
-        final var cfg = config(Map.of("yca.subagents.maxConcurrent", "1"));
-        final var reg = newRegistry(cfg, 3); // provider max 3 -> N-1 = 2, session cap = 1
-        final var budget = new SubagentBudget(1);
-
-        assertTrue(reg.start(new AgentRunSpec("parent", "t1", null, null, null, null, null, null), "default", budget)
-                .admitted());
-        assertFalse(
-                reg.start(new AgentRunSpec("parent", "t2", null, null, null, null, null, null), "default", budget)
-                        .admitted(),
-                "second should be rejected at limit");
-    }
-
-    @Test
-    void subagentCancellationStopsExecution() throws Exception {
-        final var cfg = config(Map.of());
-        final var reg = newRegistry(cfg, 4);
-        final var releaseLatch = new CountDownLatch(1);
-        final var toolReg = cancellableToolRegistry(releaseLatch, "slow_read");
-
-        final var replies = new ArrayDeque<ScriptedReply>();
-        replies.add(ScriptedReply.toolCall("slow_read", "{}"));
-        replies.add(new ScriptedReply("never reached", "stop"));
-        final var requests = new ArrayList<List<Message>>();
-
-        final var runner = newRunner(scriptedClient(replies, requests), toolReg, reg, cfg);
-        final var checkTool = new CheckSubagentsTool(reg, mapper);
-
-        final var state = reg.start("parent", "long task").orElseThrow();
-        runner.runAsync(
-                state, noopStore(), noopSnapshotStore(), noopTodoStore(), ToolContext.empty(testWorkdir), () -> false);
-        runner.awaitStart();
-
-        // Tool is now waiting on releaseLatch - cancel it
-        final var cancel = checkTool.execute(
-                Map.of("action", "cancel", "subagent_id", state.id()), ToolContext.empty(testWorkdir));
-        assertTrue(cancel.success(), cancel.output());
-        assertTrue(cancel.output().contains("\"cancelled\":true"));
-
-        // Release the latch so the tool can complete (and the subagent can process cancellation)
-        releaseLatch.countDown();
-
-        // Semaphore released
-        assertTrue(reg.start("parent", "t2").isPresent());
-    }
-
-    @Test
-    void subagentErrorPropagation() throws Exception {
-        final var cfg = config(Map.of());
-        final var reg = newRegistry(cfg, 4);
-        final var replies =
-                new ArrayDeque<>(List.of(new ScriptedReply("partial", "tool_calls", new RuntimeException("boom!"))));
-        final var requests = new ArrayList<List<Message>>();
-
-        final var runner = newRunner(scriptedClient(replies, requests), emptyToolRegistry(), reg, cfg);
-        final var checkTool = new CheckSubagentsTool(reg, mapper);
-
-        final var state = reg.start("parent", "failing task").orElseThrow();
-        runner.runAsync(
-                state, noopStore(), noopSnapshotStore(), noopTodoStore(), ToolContext.empty(testWorkdir), () -> false);
-        runner.awaitCompletion(state);
-
-        final var collect = checkTool.execute(
-                Map.of("action", "collect", "subagent_id", state.id()), ToolContext.empty(testWorkdir));
-        assertFalse(collect.success(), collect.output());
-        assertTrue(collect.output().contains("error"));
-    }
-
-    @Test
-    void parentCancelledStopsSubagent() throws Exception {
-        final var cfg = config(Map.of());
-        final var reg = newRegistry(cfg, 4);
-        final var releaseLatch = new CountDownLatch(1);
-        final var toolReg = cancellableToolRegistry(releaseLatch, "slow_read");
-
-        final var replies = new ArrayDeque<ScriptedReply>();
-        replies.add(ScriptedReply.toolCall("slow_read", "{}"));
-        replies.add(new ScriptedReply("never reached", "stop"));
-        final var requests = new ArrayList<List<Message>>();
-
-        final var runner = newRunner(scriptedClient(replies, requests), toolReg, reg, cfg);
-        final var checkTool = new CheckSubagentsTool(reg, mapper);
-
-        final var cancelled = new AtomicBoolean(false);
-        final var state = reg.start("parent", "task").orElseThrow();
-        runner.runAsync(
-                state,
-                noopStore(),
-                noopSnapshotStore(),
-                noopTodoStore(),
-                ToolContext.empty(testWorkdir),
-                cancelled::get);
-        runner.awaitStart();
-
-        // Tool is waiting on releaseLatch - parent cancels
-        cancelled.set(true);
-
-        // Release the latch so the in-flight tool returns right away: the cancellation probe is
-        // only read at iteration boundaries, so the loop cannot make progress until this tool
-        // completed - without the release the tool would block for its whole 10s timeout and the
-        // test would assert the same thing 10s later
-        releaseLatch.countDown();
-
-        // Wait for sub-agent to process cancellation
-        state.awaitResult();
-
-        // Sub-agent should have been cancelled
-        final var collect = checkTool.execute(
-                Map.of("action", "collect", "subagent_id", state.id()), ToolContext.empty(testWorkdir));
-        assertFalse(collect.success(), collect.output());
-
-        // ... and reported as a cancellation, not as a failure: a cancelled child must never
-        // render as a red "Subagent failed" card in the parent transcript
-        final var completions = awaitCompletions(10, TimeUnit.SECONDS);
-        assertEquals(1, completions.size(), "one completion event expected, got: " + snapshot());
-        final var completion = completions.getFirst();
-        assertTrue(completion.cancelled(), "a cancelled sub-agent must be flagged as cancelled: " + completion);
-        assertFalse(completion.success(), "a cancelled sub-agent did not succeed");
-    }
-
-    @Test
-    void subagentInheritsSystemPromptAndTools() throws Exception {
-        final var cfg = config(Map.of());
-        final var reg = newRegistry(cfg, 4);
-        final var toolReg = new ToolRegistry(null) {
-            @Override
-            public List<EmbeddedTool> tools() {
-                return List.of(tool("read"));
-            }
-
-            @Override
-            public EmbeddedTool tool(final String name) {
-                if ("read".equals(name)) {
-                    return new EmbeddedTool() {
-                        @Override
-                        public String name() {
-                            return "read";
-                        }
-
-                        @Override
-                        public String description(final Path workdir) {
-                            return "read";
-                        }
-
-                        @Override
-                        public ToolCategory category() {
-                            return ToolCategory.READ;
-                        }
-
-                        @Override
-                        public Map<String, Object> schema() {
-                            return Map.of();
-                        }
-
-                        @Override
-                        public boolean readonly() {
-                            return true;
-                        }
-
-                        @Override
-                        public ToolResult execute(final Map<String, Object> args, final ToolContext context) {
-                            return ToolResult.ok("file content");
-                        }
-                    };
+        @Test
+        @Timeout(10)
+        void queuedChildUsesAdmittedSettingsInsteadOfParentSettingsAtExecution() throws Exception {
+            final var cfg = configuration;
+            final var reg = newRegistry(cfg, 4);
+            final var captured = new AtomicReference<ChatCompletionRequest>();
+            final var client = new ChatClient() {
+                @Override
+                public Message stream(
+                        final ChatCompletionRequest request,
+                        final Consumer<PauseEvent> pauses,
+                        final Consumer<LlmStreamEvent> deltas,
+                        final BooleanSupplier cancelled) {
+                    captured.set(request);
+                    deltas.accept(new End("stop", null));
+                    return new Message("assistant", "done", null, null, null, null);
                 }
-                return null;
+            };
+            final var release = new CountDownLatch(1);
+            try (final var executor = Executors.newSingleThreadExecutor()) {
+                executor.submit(() -> {
+                    try {
+                        release.await();
+                    } catch (final InterruptedException interrupted) {
+                        Thread.currentThread().interrupt();
+                    }
+                });
+                try {
+                    final var admitted = new EffectiveAgentModel(
+                            new ProviderManager.ResolvedModel(providerManager(4).provider("default"), "approved"),
+                            new ChatSettings("default", "$default/approved", "balanced", null),
+                            "approved",
+                            "$default/approved");
+                    final var state = reg.start(new AgentRunSpec(
+                                    "parent", "task", null, null, null, null, null, null, "default", null, admitted))
+                            .orElseThrow();
+                    final var runner = newRunner(client, emptyToolRegistry(), reg, cfg, executor);
+                    // The parent now has a different route; the raw spawn model is deliberately null.
+                    final var switchedContext = new ToolContext(
+                            "parent",
+                            null,
+                            null,
+                            null,
+                            null,
+                            noopTodoStore(),
+                            null,
+                            null,
+                            null,
+                            () -> false,
+                            ChatSettings.EMPTY.withProviderId("other").withModel("redirect"),
+                            null,
+                            testWorkdir,
+                            new DisabledSandbox(testWorkdir));
+                    runner.runAsync(
+                            state, noopStore(), noopSnapshotStore(), noopTodoStore(), switchedContext, () -> false);
+                    assertEquals(null, captured.get(), "queued children make no inference requests");
+                    release.countDown();
+                    final var result = state.awaitResult();
+                    assertTrue(result.success(), result.error());
+                    assertEquals("$default/approved", captured.get().model());
+                    assertEquals("default", captured.get().settings().providerId());
+                    assertEquals("balanced", captured.get().settings().variant());
+                    assertEquals(
+                            new SubagentRegistry.TranscriptIdentity("default", "approved"),
+                            reg.identityOf(state.id()).orElseThrow());
+                } finally {
+                    release.countDown();
+                }
             }
-        };
+        }
 
-        final var replies = new ArrayDeque<ScriptedReply>();
-        replies.add(ScriptedReply.toolCall("read", "{}"));
-        replies.add(new ScriptedReply("done", "stop"));
-        final var requests = new ArrayList<List<Message>>();
+        @Test
+        void subagentRunsToCompletionAndResultCollected() throws Exception {
+            final var cfg = configuration;
+            final var reg = newRegistry(cfg, 4);
+            final var requests = new ArrayList<List<Message>>();
+            final var replies = new ArrayDeque<>(List.of(new ScriptedReply("subagent result", "stop")));
+            final var runner = newRunner(scriptedClient(replies, requests), emptyToolRegistry(), reg, cfg);
+            final var checkTool = new CheckSubagentsTool(reg, mapper);
 
-        final var runner = newRunner(scriptedClient(replies, requests), toolReg, reg, cfg);
-        final var checkTool = new CheckSubagentsTool(reg, mapper);
+            final var state = reg.start("parent", "task").orElseThrow();
+            runner.runAsync(
+                    state,
+                    noopStore(),
+                    noopSnapshotStore(),
+                    noopTodoStore(),
+                    ToolContext.empty(testWorkdir, new DisabledSandbox(testWorkdir)),
+                    () -> false);
+            runner.awaitCompletion(state);
 
-        final var state = reg.start("parent", "read something").orElseThrow();
-        runner.runAsync(
-                state, noopStore(), noopSnapshotStore(), noopTodoStore(), ToolContext.empty(testWorkdir), () -> false);
-        runner.awaitCompletion(state);
+            final var collect = checkTool.execute(
+                    Map.of("action", "collect", "subagent_id", state.id()),
+                    ToolContext.empty(testWorkdir, new DisabledSandbox(testWorkdir)));
+            assertTrue(collect.success(), collect.output());
+            assertTrue(collect.output().contains("subagent result"));
+            assertTrue(collect.output().contains("\"completed\":true"));
 
-        final var collect = checkTool.execute(
-                Map.of("action", "collect", "subagent_id", state.id()), ToolContext.empty(testWorkdir));
-        assertTrue(collect.success(), collect.output());
+            // State removed after collect
+            assertTrue(reg.get(state.id()).isEmpty());
+            // Semaphore released
+            assertTrue(reg.start("parent", "t2").isPresent());
+        }
+
+        @Test
+        void subagentCancellationStopsExecution() throws Exception {
+            final var cfg = configuration;
+            final var reg = newRegistry(cfg, 4);
+            final var releaseLatch = new CountDownLatch(1);
+            final var toolReg = cancellableToolRegistry(releaseLatch, "slow_read");
+
+            final var replies = new ArrayDeque<ScriptedReply>();
+            replies.add(ScriptedReply.toolCall("slow_read", "{}"));
+            replies.add(new ScriptedReply("never reached", "stop"));
+            final var requests = new ArrayList<List<Message>>();
+
+            final var runner = newRunner(scriptedClient(replies, requests), toolReg, reg, cfg);
+            final var checkTool = new CheckSubagentsTool(reg, mapper);
+
+            final var state = reg.start("parent", "long task").orElseThrow();
+            runner.runAsync(
+                    state,
+                    noopStore(),
+                    noopSnapshotStore(),
+                    noopTodoStore(),
+                    ToolContext.empty(testWorkdir, new DisabledSandbox(testWorkdir)),
+                    () -> false);
+            runner.awaitStart();
+
+            // Tool is now waiting on releaseLatch - cancel it
+            final var cancel = checkTool.execute(
+                    Map.of("action", "cancel", "subagent_id", state.id()),
+                    ToolContext.empty(testWorkdir, new DisabledSandbox(testWorkdir)));
+            assertTrue(cancel.success(), cancel.output());
+            assertTrue(cancel.output().contains("\"cancelled\":true"));
+
+            // Release the latch so the tool can complete (and the subagent can process cancellation)
+            releaseLatch.countDown();
+
+            // Semaphore released
+            assertTrue(reg.start("parent", "t2").isPresent());
+        }
+
+        @Test
+        void subagentErrorPropagation() throws Exception {
+            final var cfg = configuration;
+            final var reg = newRegistry(cfg, 4);
+            final var replies = new ArrayDeque<>(
+                    List.of(new ScriptedReply("partial", "tool_calls", new RuntimeException("boom!"))));
+            final var requests = new ArrayList<List<Message>>();
+
+            final var runner = newRunner(scriptedClient(replies, requests), emptyToolRegistry(), reg, cfg);
+            final var checkTool = new CheckSubagentsTool(reg, mapper);
+
+            final var state = reg.start("parent", "failing task").orElseThrow();
+            runner.runAsync(
+                    state,
+                    noopStore(),
+                    noopSnapshotStore(),
+                    noopTodoStore(),
+                    ToolContext.empty(testWorkdir, new DisabledSandbox(testWorkdir)),
+                    () -> false);
+            runner.awaitCompletion(state);
+
+            final var collect = checkTool.execute(
+                    Map.of("action", "collect", "subagent_id", state.id()),
+                    ToolContext.empty(testWorkdir, new DisabledSandbox(testWorkdir)));
+            assertFalse(collect.success(), collect.output());
+            assertTrue(collect.output().contains("error"));
+        }
+
+        @Test
+        void parentCancelledStopsSubagent() throws Exception {
+            final var cfg = configuration;
+            final var reg = newRegistry(cfg, 4);
+            final var releaseLatch = new CountDownLatch(1);
+            final var toolReg = cancellableToolRegistry(releaseLatch, "slow_read");
+
+            final var replies = new ArrayDeque<ScriptedReply>();
+            replies.add(ScriptedReply.toolCall("slow_read", "{}"));
+            replies.add(new ScriptedReply("never reached", "stop"));
+            final var requests = new ArrayList<List<Message>>();
+
+            final var runner = newRunner(scriptedClient(replies, requests), toolReg, reg, cfg);
+            final var checkTool = new CheckSubagentsTool(reg, mapper);
+
+            final var cancelled = new AtomicBoolean(false);
+            final var state = reg.start("parent", "task").orElseThrow();
+            runner.runAsync(
+                    state,
+                    noopStore(),
+                    noopSnapshotStore(),
+                    noopTodoStore(),
+                    ToolContext.empty(testWorkdir, new DisabledSandbox(testWorkdir)),
+                    cancelled::get);
+            runner.awaitStart();
+
+            // Tool is waiting on releaseLatch - parent cancels
+            cancelled.set(true);
+
+            // Release the latch so the in-flight tool returns right away: the cancellation probe is
+            // only read at iteration boundaries, so the loop cannot make progress until this tool
+            // completed - without the release the tool would block for its whole 10s timeout and the
+            // test would assert the same thing 10s later
+            releaseLatch.countDown();
+
+            // Wait for sub-agent to process cancellation
+            state.awaitResult();
+
+            // Sub-agent should have been cancelled
+            final var collect = checkTool.execute(
+                    Map.of("action", "collect", "subagent_id", state.id()),
+                    ToolContext.empty(testWorkdir, new DisabledSandbox(testWorkdir)));
+            assertFalse(collect.success(), collect.output());
+
+            // ... and reported as a cancellation, not as a failure: a cancelled child must never
+            // render as a red "Subagent failed" card in the parent transcript
+            final var completions = awaitCompletions(10, TimeUnit.SECONDS);
+            assertEquals(1, completions.size(), "one completion event expected, got: " + snapshot());
+            final var completion = completions.getFirst();
+            assertTrue(completion.cancelled(), "a cancelled sub-agent must be flagged as cancelled: " + completion);
+            assertFalse(completion.success(), "a cancelled sub-agent did not succeed");
+        }
+
+        @Test
+        void subagentInheritsSystemPromptAndTools() throws Exception {
+            final var cfg = configuration;
+            final var reg = newRegistry(cfg, 4);
+            final var toolReg = new ToolRegistry(null) {
+                @Override
+                public List<EmbeddedTool> tools() {
+                    return List.of(tool("read"));
+                }
+
+                @Override
+                public EmbeddedTool tool(final String name) {
+                    if ("read".equals(name)) {
+                        return new EmbeddedTool() {
+                            @Override
+                            public String name() {
+                                return "read";
+                            }
+
+                            @Override
+                            public String description(final Path workdir) {
+                                return "read";
+                            }
+
+                            @Override
+                            public ToolCategory category() {
+                                return ToolCategory.READ;
+                            }
+
+                            @Override
+                            public Map<String, Object> schema() {
+                                return Map.of();
+                            }
+
+                            @Override
+                            public boolean readonly() {
+                                return true;
+                            }
+
+                            @Override
+                            public ToolResult execute(final Map<String, Object> args, final ToolContext context) {
+                                return ToolResult.ok("file content");
+                            }
+                        };
+                    }
+                    return null;
+                }
+            };
+
+            final var replies = new ArrayDeque<ScriptedReply>();
+            replies.add(ScriptedReply.toolCall("read", "{}"));
+            replies.add(new ScriptedReply("done", "stop"));
+            final var requests = new ArrayList<List<Message>>();
+
+            final var runner = newRunner(scriptedClient(replies, requests), toolReg, reg, cfg);
+            final var checkTool = new CheckSubagentsTool(reg, mapper);
+
+            final var state = reg.start("parent", "read something").orElseThrow();
+            runner.runAsync(
+                    state,
+                    noopStore(),
+                    noopSnapshotStore(),
+                    noopTodoStore(),
+                    ToolContext.empty(testWorkdir, new DisabledSandbox(testWorkdir)),
+                    () -> false);
+            runner.awaitCompletion(state);
+
+            final var collect = checkTool.execute(
+                    Map.of("action", "collect", "subagent_id", state.id()),
+                    ToolContext.empty(testWorkdir, new DisabledSandbox(testWorkdir)));
+            assertTrue(collect.success(), collect.output());
+        }
+
+        @Test
+        void collectWithoutPollWorks() throws Exception {
+            final var cfg = configuration;
+            final var reg = newRegistry(cfg, 4);
+            final var replies = new ArrayDeque<>(List.of(new ScriptedReply("direct collect", "stop")));
+            final var requests = new ArrayList<List<Message>>();
+
+            final var runner = newRunner(scriptedClient(replies, requests), emptyToolRegistry(), reg, cfg);
+            final var checkTool = new CheckSubagentsTool(reg, mapper);
+
+            final var state = reg.start("parent", "task").orElseThrow();
+            runner.runAsync(
+                    state,
+                    noopStore(),
+                    noopSnapshotStore(),
+                    noopTodoStore(),
+                    ToolContext.empty(testWorkdir, new DisabledSandbox(testWorkdir)),
+                    () -> false);
+            runner.awaitCompletion(state);
+
+            // Collect directly without polling first
+            final var collect = checkTool.execute(
+                    Map.of("action", "collect", "subagent_id", state.id()),
+                    ToolContext.empty(testWorkdir, new DisabledSandbox(testWorkdir)));
+            assertTrue(collect.success(), collect.output());
+            assertTrue(collect.output().contains("direct collect"));
+        }
     }
 
-    @Test
-    void collectWithoutPollWorks() throws Exception {
-        final var cfg = config(Map.of());
-        final var reg = newRegistry(cfg, 4);
-        final var replies = new ArrayDeque<>(List.of(new ScriptedReply("direct collect", "stop")));
-        final var requests = new ArrayList<List<Message>>();
-
-        final var runner = newRunner(scriptedClient(replies, requests), emptyToolRegistry(), reg, cfg);
-        final var checkTool = new CheckSubagentsTool(reg, mapper);
-
-        final var state = reg.start("parent", "task").orElseThrow();
-        runner.runAsync(
-                state, noopStore(), noopSnapshotStore(), noopTodoStore(), ToolContext.empty(testWorkdir), () -> false);
-        runner.awaitCompletion(state);
-
-        // Collect directly without polling first
-        final var collect = checkTool.execute(
-                Map.of("action", "collect", "subagent_id", state.id()), ToolContext.empty(testWorkdir));
-        assertTrue(collect.success(), collect.output());
-        assertTrue(collect.output().contains("direct collect"));
+    public static class QueuedChildUsesAdmittedSettingsInsteadOfParentSettingsAtExecutionModule
+            extends ConfigurationTestModule {
+        public QueuedChildUsesAdmittedSettingsInsteadOfParentSettingsAtExecutionModule() {
+            super(Map.ofEntries(
+                    Map.entry(
+                            "yca.storageHome",
+                            QueuedChildUsesAdmittedSettingsInsteadOfParentSettingsAtExecutionTests.root.toString()),
+                    Map.entry("yca.subagents.enabled", "true"),
+                    Map.entry("yca.subagents.maxConcurrent", "2"),
+                    Map.entry("yca.llm.maxConcurrent", "4"),
+                    Map.entry("yca.tools.parallelReadonly", "true")));
+        }
     }
 
-    @AfterAll
-    static void closeExecutor() {
-        EXECUTOR.shutdownNow();
+    @Nested
+    @FusionSupport(modules = MultipleSubagentsRunInParallelWithinLimitModule.class)
+    class MultipleSubagentsRunInParallelWithinLimitTests {
+        @TempDir
+        static Path root;
+
+        @Test
+        void multipleSubagentsRunInParallelWithinLimit() throws Exception {
+            final var cfg = configuration;
+            final var reg = newRegistry(cfg, 4); // provider max 4 -> actualMax = min(3, 2) = 2
+            final var barrier = new CyclicBarrier(2);
+            final var toolReg = barrierRegistry(barrier, "read_a", "read_b");
+
+            final var replies1 = new ArrayDeque<ScriptedReply>();
+            replies1.add(ScriptedReply.toolCall("read_a", "{}"));
+            replies1.add(new ScriptedReply("done1", "stop"));
+            final var replies2 = new ArrayDeque<ScriptedReply>();
+            replies2.add(ScriptedReply.toolCall("read_b", "{}"));
+            replies2.add(new ScriptedReply("done2", "stop"));
+
+            final var req1 = new ArrayList<List<Message>>();
+            final var req2 = new ArrayList<List<Message>>();
+            final var runner1 = newRunner(scriptedClient(replies1, req1), toolReg, reg, cfg);
+            final var runner2 = newRunner(scriptedClient(replies2, req2), toolReg, reg, cfg);
+
+            final var s1 = reg.start("parent", "t1").orElseThrow();
+            final var s2 = reg.start("parent", "t2").orElseThrow();
+            runner1.runAsync(
+                    s1,
+                    noopStore(),
+                    noopSnapshotStore(),
+                    noopTodoStore(),
+                    ToolContext.empty(testWorkdir, new DisabledSandbox(testWorkdir)),
+                    () -> false);
+            runner2.runAsync(
+                    s2,
+                    noopStore(),
+                    noopSnapshotStore(),
+                    noopTodoStore(),
+                    ToolContext.empty(testWorkdir, new DisabledSandbox(testWorkdir)),
+                    () -> false);
+
+            // Wait for both tools to execute concurrently (barrier)
+            assertTrue(barrier.await(3, TimeUnit.SECONDS) >= 0, "both tools should execute concurrently");
+
+            runner1.awaitCompletion(s1);
+            runner2.awaitCompletion(s2);
+
+            final var checkTool = new CheckSubagentsTool(reg, mapper);
+            final var c1 = checkTool.execute(
+                    Map.of("action", "collect", "subagent_id", s1.id()),
+                    ToolContext.empty(testWorkdir, new DisabledSandbox(testWorkdir)));
+            final var c2 = checkTool.execute(
+                    Map.of("action", "collect", "subagent_id", s2.id()),
+                    ToolContext.empty(testWorkdir, new DisabledSandbox(testWorkdir)));
+            assertTrue(c1.success(), c1.output());
+            assertTrue(c2.success(), c2.output());
+        }
+    }
+
+    public static class MultipleSubagentsRunInParallelWithinLimitModule extends ConfigurationTestModule {
+        public MultipleSubagentsRunInParallelWithinLimitModule() {
+            super(Map.ofEntries(
+                    Map.entry("yca.storageHome", MultipleSubagentsRunInParallelWithinLimitTests.root.toString()),
+                    Map.entry("yca.subagents.enabled", "true"),
+                    Map.entry("yca.subagents.maxConcurrent", "2"),
+                    Map.entry("yca.llm.maxConcurrent", "4"),
+                    Map.entry("yca.tools.parallelReadonly", "true")));
+        }
+    }
+
+    private static CodingAgentConfiguration withStorageHome(
+            final CodingAgentConfiguration baseline, final String storageHome) {
+        return new CodingAgentConfiguration(
+                storageHome,
+                baseline.home(),
+                baseline.workingDir(),
+                baseline.projectDir(),
+                baseline.provider(),
+                baseline.model(),
+                baseline.llm(),
+                baseline.compaction(),
+                baseline.pruning(),
+                baseline.compression(),
+                baseline.memory(),
+                baseline.todos(),
+                baseline.optimize(),
+                baseline.permissions(),
+                baseline.sandbox(),
+                baseline.mcp(),
+                baseline.mavenRepositoryKnowledge(),
+                baseline.structuralCodeGraph(),
+                baseline.sessions(),
+                baseline.skills(),
+                baseline.agents(),
+                baseline.mode(),
+                baseline.httpClient(),
+                baseline.tools(),
+                baseline.subagents(),
+                baseline.schedulerThreads(),
+                baseline.metrics(),
+                baseline.maxLineLength(),
+                baseline.resumeAliases(),
+                baseline.slashcommands(),
+                baseline.prompt(),
+                baseline.labels(),
+                baseline.logging(),
+                baseline.hooks(),
+                baseline.notifications(),
+                baseline.secrets());
     }
 }

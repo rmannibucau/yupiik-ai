@@ -22,9 +22,12 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.fusion.framework.api.event.Emitter;
 import io.yupiik.fusion.json.JsonMapper;
+import io.yupiik.fusion.testing.Fusion;
+import io.yupiik.fusion.testing.FusionSupport;
 import io.yupiik.ia.agent.core.codegraph.StructuralCodeGraph;
 import io.yupiik.ia.agent.core.configuration.AgentConfiguration;
-import io.yupiik.ia.agent.core.configuration.TestConfigs;
+import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
+import io.yupiik.ia.agent.core.configuration.ConfigurationTestModule;
 import io.yupiik.ia.agent.core.context.BackoffSleeper;
 import io.yupiik.ia.agent.core.context.CompactionCoordinator;
 import io.yupiik.ia.agent.core.context.ContextManager;
@@ -38,6 +41,7 @@ import io.yupiik.ia.agent.core.llm.Tool;
 import io.yupiik.ia.agent.core.llm.Usage;
 import io.yupiik.ia.agent.core.permissions.PermissionService;
 import io.yupiik.ia.agent.core.runtime.StatusReporter;
+import io.yupiik.ia.agent.core.sandbox.DisabledSandbox;
 import io.yupiik.ia.agent.core.session.SessionEntry;
 import io.yupiik.ia.agent.core.session.SessionStore;
 import io.yupiik.ia.agent.core.tools.ToolExecutionService;
@@ -51,6 +55,7 @@ import java.time.Clock;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
@@ -60,6 +65,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
+import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -71,139 +77,132 @@ class AgentLoopSpeculativeCompactionTest {
     @TempDir
     private static Path testWorkdir;
 
-    @TempDir
-    Path storageHome;
+    @Nested
+    @FusionSupport(modules = DefaultPolicyModule.class)
+    class DefaultPolicy {
+        @TempDir
+        static Path storageHome;
 
-    @Test
-    void defaultPolicyDoesNotIssueBackgroundRequests(final JsonMapper mapper) throws Exception {
-        final var summaries = new AtomicInteger();
-        final var requests = new ArrayList<List<Message>>();
-        final var client = new ChatClient() {
-            @Override
-            public ChatResult chat(
-                    final ChatCompletionRequest request,
-                    final Consumer<PauseEvent> listener,
-                    final BooleanSupplier cancelled) {
-                summaries.incrementAndGet();
-                return new ChatResult(Message.assistant("unexpected digest", null), Usage.EMPTY);
-            }
+        @Test
+        void defaultPolicyDoesNotIssueBackgroundRequests(
+                final JsonMapper mapper, @Fusion final CodingAgentConfiguration config) throws Exception {
+            final var summaries = new AtomicInteger();
+            final var requests = new ArrayList<List<Message>>();
+            final var client = new ChatClient() {
+                @Override
+                public ChatResult chat(
+                        final ChatCompletionRequest request,
+                        final Consumer<PauseEvent> listener,
+                        final BooleanSupplier cancelled) {
+                    summaries.incrementAndGet();
+                    return new ChatResult(Message.assistant("unexpected digest", null), Usage.EMPTY);
+                }
 
-            @Override
-            public Message stream(
-                    final ChatCompletionRequest request,
-                    final Consumer<PauseEvent> listener,
-                    final Consumer<LlmStreamEvent> delta,
-                    final BooleanSupplier cancelled) {
-                requests.add(List.copyOf(request.messages()));
-                delta.accept(new LlmStreamEvent.End("stop", null));
-                return Message.assistant("done", null);
+                @Override
+                public Message stream(
+                        final ChatCompletionRequest request,
+                        final Consumer<PauseEvent> listener,
+                        final Consumer<LlmStreamEvent> delta,
+                        final BooleanSupplier cancelled) {
+                    requests.add(List.copyOf(request.messages()));
+                    delta.accept(new LlmStreamEvent.End("stop", null));
+                    return Message.assistant("done", null);
+                }
+            };
+            final var events = new CopyOnWriteArrayList<AgentEvent>();
+            try (final var executor = Executors.newVirtualThreadPerTaskExecutor()) {
+                final var loop = loop(config, mapper, client, events, executor);
+                assertEquals("done", loop.run("continue", null, "s1", history(), () -> false));
+                assertEquals("done", loop.run("another turn", null, "s1", history(), () -> false));
             }
-        };
-        final var events = new CopyOnWriteArrayList<AgentEvent>();
-        try (final var executor = Executors.newVirtualThreadPerTaskExecutor()) {
-            final var loop = loop(mapper, client, false, events, executor);
-            assertEquals("done", loop.run("continue", null, "s1", history(), () -> false));
-            assertEquals("done", loop.run("another turn", null, "s1", history(), () -> false));
+            assertEquals(2, requests.size());
+            assertTrue(contains(requests.getFirst(), "old answer 0"));
+            assertEquals(0, summaries.get(), "default-off must not issue background summary requests");
+            assertFalse(events.stream().anyMatch(AgentEvent.Compacted.class::isInstance));
         }
-        assertEquals(2, requests.size());
-        assertTrue(contains(requests.getFirst(), "old answer 0"));
-        assertEquals(0, summaries.get(), "default-off must not issue background summary requests");
-        assertFalse(events.stream().anyMatch(AgentEvent.Compacted.class::isInstance));
     }
 
-    @Test
-    void cancelledRunDiscardsWorkerAndNextRunStartsWithFreshHistory(final JsonMapper mapper) throws Exception {
-        final var started = new CountDownLatch(1);
-        final var workerStopped = new CountDownLatch(1);
-        final var release = new CountDownLatch(1);
-        final var summaries = new AtomicInteger();
-        final var cancelled = new AtomicBoolean();
-        final var requests = new ArrayList<List<Message>>();
-        final var client = new ChatClient() {
-            @Override
-            public ChatResult chat(
-                    final ChatCompletionRequest request,
-                    final Consumer<PauseEvent> listener,
-                    final BooleanSupplier probe)
-                    throws InterruptedException {
-                final var call = summaries.incrementAndGet();
-                if (call == 1) {
-                    started.countDown();
-                    try {
-                        await(release);
-                    } finally {
-                        workerStopped.countDown();
-                    }
-                }
-                return new ChatResult(Message.assistant("digest from run " + call, null), Usage.EMPTY);
-            }
+    @Nested
+    @FusionSupport(modules = ConcurrentPolicyModule.class)
+    class ConcurrentPolicy {
+        @TempDir
+        static Path storageHome;
 
-            @Override
-            public Message stream(
-                    final ChatCompletionRequest request,
-                    final Consumer<PauseEvent> listener,
-                    final Consumer<LlmStreamEvent> delta,
-                    final BooleanSupplier probe)
-                    throws IOException, InterruptedException {
-                requests.add(List.copyOf(request.messages()));
-                if (requests.size() == 1) {
-                    await(started);
-                    assertEquals(1, release.getCount(), "foreground overlaps a blocked summary request");
-                    cancelled.set(true);
-                    throw new IOException("Cancelled");
+        @Test
+        void cancelledRunDiscardsWorkerAndNextRunStartsWithFreshHistory(
+                final JsonMapper mapper, @Fusion final CodingAgentConfiguration config) throws Exception {
+            final var started = new CountDownLatch(1);
+            final var workerStopped = new CountDownLatch(1);
+            final var release = new CountDownLatch(1);
+            final var summaries = new AtomicInteger();
+            final var cancelled = new AtomicBoolean();
+            final var requests = new ArrayList<List<Message>>();
+            final var client = new ChatClient() {
+                @Override
+                public ChatResult chat(
+                        final ChatCompletionRequest request,
+                        final Consumer<PauseEvent> listener,
+                        final BooleanSupplier probe)
+                        throws InterruptedException {
+                    final var call = summaries.incrementAndGet();
+                    if (call == 1) {
+                        started.countDown();
+                        try {
+                            await(release);
+                        } finally {
+                            workerStopped.countDown();
+                        }
+                    }
+                    return new ChatResult(Message.assistant("digest from run " + call, null), Usage.EMPTY);
                 }
-                delta.accept(new LlmStreamEvent.End("stop", null));
-                return Message.assistant("fresh run done", null);
+
+                @Override
+                public Message stream(
+                        final ChatCompletionRequest request,
+                        final Consumer<PauseEvent> listener,
+                        final Consumer<LlmStreamEvent> delta,
+                        final BooleanSupplier probe)
+                        throws IOException, InterruptedException {
+                    requests.add(List.copyOf(request.messages()));
+                    if (requests.size() == 1) {
+                        await(started);
+                        assertEquals(1, release.getCount(), "foreground overlaps a blocked summary request");
+                        cancelled.set(true);
+                        throw new IOException("Cancelled");
+                    }
+                    delta.accept(new LlmStreamEvent.End("stop", null));
+                    return Message.assistant("fresh run done", null);
+                }
+            };
+            final var events = new CopyOnWriteArrayList<AgentEvent>();
+            try (final var executor = Executors.newVirtualThreadPerTaskExecutor()) {
+                try {
+                    final var loop = loop(config, mapper, client, events, executor);
+                    assertNull(loop.run("cancel this", null, "s1", history(), cancelled::get));
+                    release.countDown();
+                    await(workerStopped);
+                    assertTrue(events.stream().anyMatch(AgentEvent.TurnCancelled.class::isInstance));
+                    cancelled.set(false);
+                    assertEquals("fresh run done", loop.run("fresh prompt", null, "s1", null, cancelled::get));
+                } finally {
+                    release.countDown();
+                }
             }
-        };
-        final var events = new CopyOnWriteArrayList<AgentEvent>();
-        try (final var executor = Executors.newVirtualThreadPerTaskExecutor()) {
-            try {
-                final var loop = loop(mapper, client, true, events, executor);
-                assertNull(loop.run("cancel this", null, "s1", history(), cancelled::get));
-                release.countDown();
-                await(workerStopped);
-                assertTrue(events.stream().anyMatch(AgentEvent.TurnCancelled.class::isInstance));
-                cancelled.set(false);
-                assertEquals("fresh run done", loop.run("fresh prompt", null, "s1", null, cancelled::get));
-            } finally {
-                release.countDown();
-            }
+            assertEquals(2, requests.size());
+            assertEquals(1, summaries.get(), "the short fresh run must not need another summary");
+            assertTrue(contains(requests.getLast(), "fresh prompt"));
+            assertFalse(contains(requests.getLast(), "old answer 0"));
+            assertFalse(contains(requests.getLast(), "digest from run 1"));
+            assertFalse(events.stream().anyMatch(AgentEvent.Compacted.class::isInstance));
         }
-        assertEquals(2, requests.size());
-        assertEquals(1, summaries.get(), "the short fresh run must not need another summary");
-        assertTrue(contains(requests.getLast(), "fresh prompt"));
-        assertFalse(contains(requests.getLast(), "old answer 0"));
-        assertFalse(contains(requests.getLast(), "digest from run 1"));
-        assertFalse(events.stream().anyMatch(AgentEvent.Compacted.class::isInstance));
     }
 
     private AgentLoop loop(
+            final CodingAgentConfiguration config,
             final JsonMapper mapper,
             final ChatClient client,
-            final boolean concurrent,
             final List<AgentEvent> events,
             final ExecutorService executor) {
-        final var entries = new HashMap<String, String>();
-        entries.put("yca.storageHome", storageHome.toString());
-        entries.put("yca.workingDir", storageHome.toString());
-        entries.put("yca.provider.providers.length", "1");
-        entries.put("yca.provider.providers.0.id", "default");
-        entries.put("yca.provider.providers.0.baseUrl", "http://localhost:1/v1/chat/completions");
-        entries.put("yca.provider.providers.0.apiKey", "test-key");
-        entries.put("yca.provider.providers.0.model", "test-model");
-        entries.put("yca.provider.providers.0.contextWindow", "128000");
-        entries.put("yca.compaction.thresholdPercent", "20");
-        entries.put("yca.compaction.tail.budgetTokens", "1");
-        entries.put("yca.compaction.summarizer.chunkChars", "200000");
-        entries.put("yca.compaction.speculative.startPercent", "1");
-        entries.put("yca.pruning.enabled", "false");
-        entries.put("yca.pruning.keepRecent", "2");
-        entries.put("yca.llm.maxIterations", "3");
-        if (concurrent) {
-            entries.put("yca.compaction.speculative.policy", "concurrent");
-        }
-        final var config = TestConfigs.codingAgent(entries);
         final var providers = new ProviderManager(config, mapper);
         final var usage = new UsageTracker(providers, client, null, Clock.systemUTC());
         final var emitter = new Emitter() {
@@ -266,7 +265,8 @@ class AgentLoopSpeculativeCompactionTest {
                 null,
                 executor,
                 null,
-                (config).resolveWorkingDir());
+                (config).resolveWorkingDir(),
+                new DisabledSandbox((config).resolveWorkingDir()));
     }
 
     private static List<Message> history() {
@@ -284,5 +284,58 @@ class AgentLoopSpeculativeCompactionTest {
 
     private static void await(final CountDownLatch latch) throws InterruptedException {
         assertTrue(latch.await(10, TimeUnit.SECONDS), "timed out waiting for the scripted request handshake");
+    }
+
+    public static class DefaultPolicyModule extends ConfigurationTestModule {
+        public DefaultPolicyModule() {
+            super(values());
+        }
+
+        private static Map<String, String> values() {
+            final var entries = new HashMap<String, String>();
+            entries.put("yca.storageHome", DefaultPolicy.storageHome.toString());
+            entries.put("yca.workingDir", DefaultPolicy.storageHome.toString());
+            entries.put("yca.provider.providers.length", "1");
+            entries.put("yca.provider.providers.0.id", "default");
+            entries.put("yca.provider.providers.0.baseUrl", "http://localhost:1/v1/chat/completions");
+            entries.put("yca.provider.providers.0.apiKey", "test-key");
+            entries.put("yca.provider.providers.0.model", "test-model");
+            entries.put("yca.provider.providers.0.contextWindow", "128000");
+            entries.put("yca.compaction.thresholdPercent", "20");
+            entries.put("yca.compaction.tail.budgetTokens", "1");
+            entries.put("yca.compaction.summarizer.chunkChars", "200000");
+            entries.put("yca.compaction.speculative.startPercent", "1");
+            entries.put("yca.pruning.enabled", "false");
+            entries.put("yca.pruning.keepRecent", "2");
+            entries.put("yca.llm.maxIterations", "3");
+            return entries;
+        }
+    }
+
+    public static class ConcurrentPolicyModule extends ConfigurationTestModule {
+        public ConcurrentPolicyModule() {
+            super(values());
+        }
+
+        private static Map<String, String> values() {
+            final var entries = new HashMap<String, String>();
+            entries.put("yca.storageHome", ConcurrentPolicy.storageHome.toString());
+            entries.put("yca.workingDir", ConcurrentPolicy.storageHome.toString());
+            entries.put("yca.provider.providers.length", "1");
+            entries.put("yca.provider.providers.0.id", "default");
+            entries.put("yca.provider.providers.0.baseUrl", "http://localhost:1/v1/chat/completions");
+            entries.put("yca.provider.providers.0.apiKey", "test-key");
+            entries.put("yca.provider.providers.0.model", "test-model");
+            entries.put("yca.provider.providers.0.contextWindow", "128000");
+            entries.put("yca.compaction.thresholdPercent", "20");
+            entries.put("yca.compaction.tail.budgetTokens", "1");
+            entries.put("yca.compaction.summarizer.chunkChars", "200000");
+            entries.put("yca.compaction.speculative.startPercent", "1");
+            entries.put("yca.pruning.enabled", "false");
+            entries.put("yca.pruning.keepRecent", "2");
+            entries.put("yca.llm.maxIterations", "3");
+            entries.put("yca.compaction.speculative.policy", "concurrent");
+            return entries;
+        }
     }
 }

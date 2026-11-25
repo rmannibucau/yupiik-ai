@@ -27,6 +27,22 @@ import io.yupiik.ia.agent.core.optimize.BeforeToolExecutionEvent;
 import io.yupiik.ia.agent.core.optimize.CommandOutputPostProcessor;
 import io.yupiik.ia.agent.core.optimize.OutputProcessor;
 import io.yupiik.ia.agent.core.security.ToolExecutionPrepare;
+import io.yupiik.ia.agent.core.tools.builtin.ApplyPatchTool;
+import io.yupiik.ia.agent.core.tools.builtin.AskUserTool;
+import io.yupiik.ia.agent.core.tools.builtin.BashTool;
+import io.yupiik.ia.agent.core.tools.builtin.CheckSubagentsTool;
+import io.yupiik.ia.agent.core.tools.builtin.EditFileTool;
+import io.yupiik.ia.agent.core.tools.builtin.GlobTool;
+import io.yupiik.ia.agent.core.tools.builtin.GrepTool;
+import io.yupiik.ia.agent.core.tools.builtin.ListSubagentOptionsTool;
+import io.yupiik.ia.agent.core.tools.builtin.ManageContextTool;
+import io.yupiik.ia.agent.core.tools.builtin.ReadFileTool;
+import io.yupiik.ia.agent.core.tools.builtin.SandboxAccessTool;
+import io.yupiik.ia.agent.core.tools.builtin.SpawnSubagentTool;
+import io.yupiik.ia.agent.core.tools.builtin.WebFetchTool;
+import io.yupiik.ia.agent.core.tools.builtin.WebSearchTool;
+import io.yupiik.ia.agent.core.tools.builtin.WriteFileTool;
+import io.yupiik.ia.agent.core.tools.builtin.WriteTodoTool;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
@@ -83,6 +99,13 @@ public class ToolExecutionService {
      */
     public ToolResult execute(final EmbeddedTool tool, final Map<String, Object> args, final ToolContext context) {
         final var ctx = Objects.requireNonNull(context, "context");
+        if (ctx.sandbox().enabled() && !sandboxAdapted(tool) && !trustedIntegration(tool)) {
+            return ToolResult.error("Sandbox restriction: tool '" + tool.name() + "' is not sandbox-adapted. "
+                    + "ACP/client and extension tools require additional trust, not filesystem confinement; "
+                    + "they require an exact opt-in in trusted global sandbox.trustedIntegrations ("
+                    + integrationId(tool) + "). Trust is NOT confinement and is not granted by sandbox_access. "
+                    + "Filesystem/network grants and normal tool approvals do not bypass this restriction.");
+        }
         final var optimize = configuration.optimize();
         final var optimizeThis = optimize.enabled() && !commandOutput.isDisabled(optimize, List.of(tool.name()));
         if (optimizeThis) {
@@ -173,6 +196,46 @@ public class ToolExecutionService {
         // preserve the tri-state (OK/PENDING/ERROR) so a PENDING result is not collapsed to ERROR:
         // use the status-preserving copy rather than the legacy boolean constructor.
         return new ToolResult(result.status(), output, result.fileMutations());
+    }
+
+    /** Positive implementation allowlist: tool names, READ category and readonly are not security claims. */
+    private static boolean sandboxAdapted(final EmbeddedTool tool) {
+        return tool instanceof ReadFileTool
+                || tool instanceof WriteFileTool
+                || tool instanceof EditFileTool
+                || tool instanceof ApplyPatchTool
+                || tool instanceof GlobTool
+                || tool instanceof GrepTool
+                || tool instanceof SandboxAccessTool
+                || tool instanceof BashTool
+                || tool instanceof WebFetchTool
+                || tool instanceof WebSearchTool
+                || tool instanceof AskUserTool
+                || tool instanceof WriteTodoTool
+                || tool instanceof ManageContextTool
+                || tool instanceof SpawnSubagentTool
+                || tool instanceof ListSubagentOptionsTool
+                || tool instanceof CheckSubagentsTool;
+    }
+
+    private boolean trustedIntegration(final EmbeddedTool tool) {
+        if (tool instanceof SandboxIntegration integration) {
+            final var id = integration.sandboxIntegrationId();
+            if (id != null && (id.startsWith("mcp:") || id.startsWith("client-mcp:"))) {
+                // MCP is an operator/client-selected trusted integration, not a confined implementation.
+                return true;
+            }
+        }
+        final var sandbox = configuration.sandbox();
+        return sandbox != null
+                && sandbox.trustedIntegrations() != null
+                && sandbox.trustedIntegrations().contains(integrationId(tool));
+    }
+
+    private static String integrationId(final EmbeddedTool tool) {
+        return tool instanceof SandboxIntegration integration
+                ? integration.sandboxIntegrationId()
+                : "java:" + tool.getClass().getName();
     }
 
     private String optimizeOutput(

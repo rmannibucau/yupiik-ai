@@ -17,13 +17,15 @@ package io.yupiik.ia.agent.github.execution;
 
 import static org.junit.jupiter.api.Assertions.*;
 
+import io.yupiik.fusion.testing.Fusion;
+import io.yupiik.fusion.testing.FusionSupport;
 import io.yupiik.ia.agent.bot.runtime.model.AgentConfigurationDocument;
-import io.yupiik.ia.agent.core.configuration.ConfigurationLoader;
 import io.yupiik.ia.agent.github.configuration.GithubExecutorConfiguration;
 import io.yupiik.ia.agent.github.configuration.PromptConfiguration;
 import io.yupiik.ia.agent.github.configuration.WorkerOptions;
 import io.yupiik.ia.agent.github.model.AgentResult;
 import io.yupiik.ia.agent.github.support.BotJsonMapper;
+import io.yupiik.ia.agent.github.support.GithubConfigurationTestModule;
 import io.yupiik.ia.agent.github.support.TaskFixtures;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -37,7 +39,14 @@ import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+@FusionSupport(modules = GithubConfigurationTestModule.class)
 class AttemptBrokerPreparationTest {
+    @Fusion
+    private PromptConfiguration prompts;
+
+    @Fusion
+    private GithubExecutorConfiguration executorRoot;
+
     @TempDir
     Path home;
 
@@ -47,11 +56,7 @@ class AttemptBrokerPreparationTest {
     @Test
     void stagesOnlyLazyMetadataAndPackagedJavaLauncher() throws Exception {
         try (final var json = BotJsonMapper.create(key -> Optional.empty())) {
-            final var preparation = new AttemptPreparation(
-                    json,
-                    ConfigurationLoader.load(PromptConfiguration.class, key -> Optional.empty()),
-                    ConfigurationLoader.load(GithubExecutorConfiguration.class, key -> Optional.empty())
-                            .shared());
+            final var preparation = new AttemptPreparation(json, prompts, executorRoot.shared());
             final var attempt = preparation.prepare(
                     Files.writeString(home.resolve("trusted.json"), "{}"), home.resolve("attempts"));
             try {
@@ -104,11 +109,7 @@ class AttemptBrokerPreparationTest {
     @Test
     void nonoLauncherPreservesWhitespaceApostrophesAndArgumentsWithoutShellEvaluation() throws Exception {
         try (final var json = BotJsonMapper.create(key -> Optional.empty())) {
-            final var preparation = new AttemptPreparation(
-                    json,
-                    ConfigurationLoader.load(PromptConfiguration.class, key -> Optional.empty()),
-                    ConfigurationLoader.load(GithubExecutorConfiguration.class, key -> Optional.empty())
-                            .shared());
+            final var preparation = new AttemptPreparation(json, prompts, executorRoot.shared());
             final var attempt = preparation.prepare(
                     Files.writeString(home.resolve("trusted.json"), "{}"), home.resolve("attempts"));
             try {
@@ -172,11 +173,7 @@ class AttemptBrokerPreparationTest {
     @Test
     void missingNonoPackagedHelperFailsClosedWithoutFallbackLauncher() throws Exception {
         try (final var json = BotJsonMapper.create(key -> Optional.empty())) {
-            final var preparation = new AttemptPreparation(
-                    json,
-                    ConfigurationLoader.load(PromptConfiguration.class, key -> Optional.empty()),
-                    ConfigurationLoader.load(GithubExecutorConfiguration.class, key -> Optional.empty())
-                            .shared());
+            final var preparation = new AttemptPreparation(json, prompts, executorRoot.shared());
             final var attempt = preparation.prepare(
                     Files.writeString(home.resolve("trusted.json"), "{}"), home.resolve("attempts"));
             try {
@@ -215,11 +212,7 @@ class AttemptBrokerPreparationTest {
     @Test
     void brokerPromptsAreStructuredCredentialFreeAndDoNotContradictLazyGit() {
         try (final var json = BotJsonMapper.create(key -> Optional.empty())) {
-            final var preparation = new AttemptPreparation(
-                    json,
-                    ConfigurationLoader.load(PromptConfiguration.class, key -> Optional.empty()),
-                    ConfigurationLoader.load(GithubExecutorConfiguration.class, key -> Optional.empty())
-                            .shared());
+            final var preparation = new AttemptPreparation(json, prompts, executorRoot.shared());
             for (final var kind : List.of("solve", "review", "fix")) {
                 final var task = TaskFixtures.task(Map.of(
                         "id",

@@ -26,10 +26,12 @@ Choose a task below, or open the xref:cli.adoc[command directory] to find a comm
 == Control access and execution
 
 Permission checks and process isolation solve different problems.
-Start with permissions, then choose an external sandbox when you need OS-level isolation.
+Start with permissions, then review the built-in sandbox and choose an external boundary when you need whole-controller isolation.
 
 * xref:features/permissions.adoc[Permissions]: approval modes and allow/deny rules.
-* xref:features/sandboxes.adoc[External sandboxes]: nono, AgentFS and dedicated isx machines.
+* xref:sandboxing/overview.adoc[Sandboxing]: platform support, prerequisites, architecture, setup, configuration examples and enforcement limits.
+* xref:sandboxing/helper.adoc[Linux sandbox helper]: packaging, installation, trusted executable selection and diagnostics.
+* xref:features/external-sandboxes.adoc[External sandbox alternatives]: nono, AgentFS and isx recipes for whole-controller isolation and disposable environments.
 * xref:features/iteration-guards.adoc[Iteration guards]: stop runaway loops and repeated exploration.
 * xref:features/agents.adoc[Custom agents]: named prompts and sub-agent routing.
 * xref:features/hooks.adoc[Hooks and events]: connect external programs to agent events.

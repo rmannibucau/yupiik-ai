@@ -32,19 +32,23 @@ import io.yupiik.fusion.framework.api.container.FusionModule;
 import io.yupiik.fusion.framework.api.event.Emitter;
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.fusion.json.serialization.JsonCodec;
+import io.yupiik.fusion.testing.Fusion;
+import io.yupiik.fusion.testing.FusionSupport;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
-import io.yupiik.ia.agent.core.configuration.ConfigurationLoader;
 import io.yupiik.ia.agent.core.configuration.NativeProviderConfiguration;
 import io.yupiik.ia.agent.core.llm.ChatClient;
 import io.yupiik.ia.agent.core.llm.ChatCompletionRequest;
 import io.yupiik.ia.agent.core.llm.Message;
 import io.yupiik.ia.agent.core.llm.Tool;
+import io.yupiik.ia.agent.core.sandbox.DisabledSandbox;
 import io.yupiik.ia.agent.core.tools.EmbeddedTool;
 import io.yupiik.ia.agent.core.tools.ToolContext;
 import io.yupiik.ia.agent.core.wiring.HttpClientProducer;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import io.yupiik.ia.agent.github.configuration.AgentContextConfiguration;
+import io.yupiik.ia.agent.github.support.GithubConfigurationTestModule;
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.lang.reflect.ParameterizedType;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
@@ -55,13 +59,15 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BiPredicate;
+import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.api.parallel.Execution;
+import org.junit.jupiter.api.parallel.ExecutionMode;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 
@@ -71,9 +77,16 @@ import org.junit.jupiter.params.provider.CsvSource;
  * Ordinary tool declarations and structured-output schema adaptation are deliberately tested separately:
  * ChatClient currently only strictifies/sanitizes the latter, not ordinary tool declarations.
  */
+@Execution(ExecutionMode.SAME_THREAD) // The class owns one stable configuration and its fixture paths/transport.
+@FusionSupport(modules = ContextToolWireTest.Source.class)
 class ContextToolWireTest {
+    @Fusion
+    private CodingAgentConfiguration injectedConfiguration;
+
     @TempDir
-    Path home;
+    static Path home;
+
+    private static HttpServer modelServer;
 
     @ParameterizedTest(name = "{0}: {1}, {2}")
     @CsvSource({
@@ -97,7 +110,7 @@ class ContextToolWireTest {
             final var cases = cases();
             final var requests = new CopyOnWriteArrayList<Map<String, Object>>();
             final var paths = new CopyOnWriteArrayList<String>();
-            final var server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+            final var server = modelServer;
             server.createContext(
                     "/v1/models",
                     exchange -> respond(exchange, json.toString(Map.of("data", List.of(Map.of("id", model))))));
@@ -115,9 +128,8 @@ class ContextToolWireTest {
                     exchange.close();
                 }
             });
-            server.start();
             try {
-                final var config = configuration(server, provider, api, model);
+                final var config = injectedConfiguration;
                 try (final var http = new HttpClientProducer()
                                 .httpClient(config, new NativeProviderConfiguration(null, null));
                         final var client = new ChatClient(
@@ -179,7 +191,8 @@ class ContextToolWireTest {
                                 .filter(tool -> tool.name().equals(fixture.tool()))
                                 .findFirst()
                                 .orElseThrow();
-                        final var result = runtime.execute(arguments, ToolContext.empty(home));
+                        final var result =
+                                runtime.execute(arguments, ToolContext.empty(home, new DisabledSandbox(home)));
                         // Capability is intentionally disabled: valid arguments pass runtime validation,
                         // while invalid model output must be rejected before any transport/fallback.
                         assertEquals(
@@ -193,7 +206,8 @@ class ContextToolWireTest {
                     }
                 }
             } finally {
-                server.stop(0);
+                server.removeContext("/");
+                server.removeContext("/v1/models");
                 if (stubFailure.get() != null) {
                     throw new AssertionError("Local model fixture failed", stubFailure.get());
                 }
@@ -209,7 +223,7 @@ class ContextToolWireTest {
                 final var lookup = container.lookup(JsonMapper.class)) {
             final var json = lookup.instance();
             final var requests = new CopyOnWriteArrayList<Map<String, Object>>();
-            final var server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+            final var server = modelServer;
             server.createContext(
                     "/v1/models",
                     exchange ->
@@ -219,9 +233,8 @@ class ContextToolWireTest {
                         Object.class, new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8))));
                 respondModel(exchange, json, api, textResponse(api, "schema-fixture"));
             });
-            server.start();
             try {
-                final var config = configuration(server, "fixture", api, "schema-fixture");
+                final var config = injectedConfiguration;
                 try (final var http = new HttpClientProducer()
                                 .httpClient(config, new NativeProviderConfiguration(null, null));
                         final var client = new ChatClient(
@@ -237,7 +250,7 @@ class ContextToolWireTest {
                         final var before = json.toString(schema);
                         client.chatStructured(
                                 new ChatCompletionRequest(
-                                        "$fixture/schema-fixture",
+                                        "$fixture-" + api + "/schema-fixture",
                                         List.of(Message.user("Return fixture JSON")),
                                         null,
                                         null,
@@ -296,28 +309,10 @@ class ContextToolWireTest {
                     assertEquals(2, requests.size(), "one bounded structured-output request per context tool");
                 }
             } finally {
-                server.stop(0);
+                server.removeContext("/");
+                server.removeContext("/v1/models");
             }
         }
-    }
-
-    private CodingAgentConfiguration configuration(
-            final HttpServer server, final String provider, final String api, final String model) {
-        final var values = new HashMap<String, String>();
-        values.put("yca.storageHome", home.toString());
-        values.put("yca.provider.providers.length", "1");
-        values.put("yca.provider.providers.0.id", provider);
-        values.put("yca.provider.providers.0.api", api);
-        values.put(
-                "yca.provider.providers.0.baseUrl",
-                "http://127.0.0.1:" + server.getAddress().getPort() + route(api));
-        values.put("yca.provider.providers.0.apiKey", "offline-fixture-key");
-        values.put("yca.provider.providers.0.model", model);
-        values.put("yca.provider.providers.0.contextWindow", "128000");
-        values.put("yca.provider.providers.0.timeoutSeconds", "5");
-        values.put("yca.llm.retriesMaxAttempts", "1");
-        values.put("yca.llm.rateLimitRequestsPerMinute", "0");
-        return ConfigurationLoader.load(CodingAgentConfiguration.class, key -> Optional.ofNullable(values.get(key)));
     }
 
     private static List<EmbeddedTool> tools(final JsonMapper json) {
@@ -577,4 +572,59 @@ class ContextToolWireTest {
     }
 
     private record Fixture(String tool, Map<String, Object> arguments, boolean valid) {}
+
+    @AfterAll
+    static void stopModelServer() {
+        if (modelServer != null) {
+            modelServer.stop(0);
+        }
+    }
+
+    public static class Source extends GithubConfigurationTestModule {
+        public Source() {
+            super(settings());
+        }
+
+        private static Map<String, String> settings() {
+            try {
+                modelServer = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+            } catch (final IOException e) {
+                throw new UncheckedIOException(e);
+            }
+            modelServer.start();
+            final var providers = List.of(
+                    List.of("openai", "completions", "gpt-4.1"),
+                    List.of("openai-responses", "responses", "gpt-4.1"),
+                    List.of("codex", "codex", "gpt-5-codex"),
+                    List.of("claude", "anthropic", "claude-sonnet-4-5"),
+                    List.of("deepseek", "completions", "deepseek-v4-flash"),
+                    List.of("glm", "completions", "glm-4.7"),
+                    List.of("gemini-flash", "completions", "gemini-2.5-flash"),
+                    List.of("qwen", "completions", "qwen3-coder-plus"),
+                    List.of("qwen-27b", "completions", "Qwen/Qwen3.5-27B"),
+                    List.of("fixture-completions", "completions", "schema-fixture"),
+                    List.of("fixture-responses", "responses", "schema-fixture"),
+                    List.of("fixture-codex", "codex", "schema-fixture"),
+                    List.of("fixture-anthropic", "anthropic", "schema-fixture"));
+            final var values = new HashMap<String, String>();
+            values.put("yca.storageHome", home.toString());
+            values.put("yca.provider.providers.length", Integer.toString(providers.size()));
+            for (int i = 0; i < providers.size(); i++) {
+                final var provider = providers.get(i);
+                final var prefix = "yca.provider.providers." + i + ".";
+                values.put(prefix + "id", provider.get(0));
+                values.put(prefix + "api", provider.get(1));
+                values.put(prefix + "model", provider.get(2));
+                values.put(
+                        prefix + "baseUrl",
+                        "http://127.0.0.1:" + modelServer.getAddress().getPort() + route(provider.get(1)));
+                values.put(prefix + "apiKey", "offline-fixture-key");
+                values.put(prefix + "contextWindow", "128000");
+                values.put(prefix + "timeoutSeconds", "5");
+            }
+            values.put("yca.llm.retriesMaxAttempts", "1");
+            values.put("yca.llm.rateLimitRequestsPerMinute", "0");
+            return values;
+        }
+    }
 }

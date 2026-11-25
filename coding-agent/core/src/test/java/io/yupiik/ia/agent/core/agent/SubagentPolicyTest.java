@@ -20,21 +20,21 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import io.yupiik.fusion.testing.Fusion;
+import io.yupiik.fusion.testing.FusionSupport;
 import io.yupiik.ia.agent.core.configuration.AgentMode;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
+import io.yupiik.ia.agent.core.configuration.ConfigurationTestModule;
 import io.yupiik.ia.agent.core.configuration.PermissionMode;
-import io.yupiik.ia.agent.core.configuration.TestConfigs;
 import io.yupiik.ia.agent.core.permissions.PermissionService;
 import java.nio.file.Path;
 import java.util.Map;
 import java.util.Set;
+import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 class SubagentPolicyTest {
-    @TempDir
-    Path storageHome;
-
     @Test
     void toolCeilingsIntersectAndAnEmptyCeilingStaysEmpty() {
         assertEquals(
@@ -66,25 +66,39 @@ class SubagentPolicyTest {
         assertFalse(cancelled.budgetExhausted());
     }
 
-    @Test
-    void childPermissionForkCopiesModesButIsolatesSessionGrants() {
-        final CodingAgentConfiguration configuration =
-                TestConfigs.codingAgent(Map.of("yca.storageHome", storageHome.toString()));
-        final var parent = new PermissionService(configuration, storageHome);
+    @Nested
+    @FusionSupport(modules = PermissionModule.class)
+    class PermissionFork {
+        @TempDir
+        static Path storageHome;
 
-        parent.setMode(AgentMode.BUILD);
-        parent.setPermissionMode(PermissionMode.AUTO_EDIT);
-        parent.grantSession(
-                "write_file", Map.of("path", storageHome.resolve("parent.txt").toString()));
+        @Test
+        void childPermissionForkCopiesModesButIsolatesSessionGrants(
+                @Fusion final CodingAgentConfiguration configuration) {
+            final var parent = new PermissionService(configuration, storageHome);
 
-        final var child = parent.forkForChild();
-        assertEquals(AgentMode.BUILD, child.mode());
-        assertEquals(PermissionMode.AUTO_EDIT, child.permissionMode());
-        assertTrue(child.sessionGrants().isEmpty(), "parent approvals must not transfer to a child");
+            parent.setMode(AgentMode.BUILD);
+            parent.setPermissionMode(PermissionMode.AUTO_EDIT);
+            parent.grantSession(
+                    "write_file",
+                    Map.of("path", storageHome.resolve("parent.txt").toString()));
 
-        child.grantSession(
-                "write_file", Map.of("path", storageHome.resolve("child.txt").toString()));
-        assertEquals(1, child.sessionGrants().size());
-        assertEquals(1, parent.sessionGrants().size(), "child approvals must not mutate the parent");
+            final var child = parent.forkForChild();
+            assertEquals(AgentMode.BUILD, child.mode());
+            assertEquals(PermissionMode.AUTO_EDIT, child.permissionMode());
+            assertTrue(child.sessionGrants().isEmpty(), "parent approvals must not transfer to a child");
+
+            child.grantSession(
+                    "write_file",
+                    Map.of("path", storageHome.resolve("child.txt").toString()));
+            assertEquals(1, child.sessionGrants().size());
+            assertEquals(1, parent.sessionGrants().size(), "child approvals must not mutate the parent");
+        }
+    }
+
+    public static class PermissionModule extends ConfigurationTestModule {
+        public PermissionModule() {
+            super(Map.of("yca.storageHome", PermissionFork.storageHome.toString()));
+        }
     }
 }

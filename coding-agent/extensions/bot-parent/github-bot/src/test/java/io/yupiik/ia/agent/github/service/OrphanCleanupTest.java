@@ -17,12 +17,14 @@ package io.yupiik.ia.agent.github.service;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-import io.yupiik.ia.agent.core.configuration.ConfigurationLoader;
+import io.yupiik.fusion.testing.Fusion;
+import io.yupiik.fusion.testing.FusionSupport;
 import io.yupiik.ia.agent.github.command.CleanupCommand;
 import io.yupiik.ia.agent.github.configuration.GithubExecutorConfiguration;
 import io.yupiik.ia.agent.github.store.TaskStore;
 import io.yupiik.ia.agent.github.support.BotJsonMapper;
 import io.yupiik.ia.agent.github.support.BotTestConfiguration;
+import io.yupiik.ia.agent.github.support.GithubConfigurationTestModule;
 import io.yupiik.ia.agent.github.support.TaskFixtures;
 import java.nio.channels.FileChannel;
 import java.nio.file.Files;
@@ -36,6 +38,7 @@ import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -45,32 +48,46 @@ class OrphanCleanupTest {
 
     private final Instant now = Instant.parse("2026-11-11T12:00:00Z");
 
-    @Test
-    void cleanupCommandUsesInjectedClockForMinimumAge() throws Exception {
-        final var home = Files.createDirectory(root.resolve("state"));
-        final var attempts = Files.createDirectory(root.resolve("attempts"));
-        final var orphan = prepared(attempts, "yca-github-clock");
-        final var configuration = BotTestConfiguration.home(home);
-        final var execution = ConfigurationLoader.load(
-                        GithubExecutorConfiguration.class,
-                        key -> "github.executor.attemptRoot".equals(key)
-                                ? Optional.of(attempts.toString())
-                                : Optional.empty())
-                .shared();
-        try (final var json = BotJsonMapper.create(key -> Optional.empty())) {
-            final var store = new TaskStore(configuration, json);
-            final var options = new CleanupCommand.Options(24, false);
-            new CleanupCommand(
-                            options,
-                            configuration,
-                            execution,
-                            json,
-                            store,
-                            Clock.fixed(now.minus(Duration.ofDays(4)), ZoneOffset.UTC))
-                    .run();
-            assertTrue(Files.exists(orphan));
-            new CleanupCommand(options, configuration, execution, json, store, Clock.fixed(now, ZoneOffset.UTC)).run();
-            assertFalse(Files.exists(orphan));
+    @Nested
+    @FusionSupport(modules = CommandModule.class)
+    class Command {
+        @TempDir
+        private static Path root;
+
+        @Fusion
+        private GithubExecutorConfiguration executorRoot;
+
+        @Test
+        void cleanupCommandUsesInjectedClockForMinimumAge() throws Exception {
+            final var home = Files.createDirectory(root.resolve("state"));
+            final var attempts = Files.createDirectory(root.resolve("attempts"));
+            final var orphan = prepared(attempts, "yca-github-clock");
+            final var configuration = BotTestConfiguration.home(home);
+            final var execution = executorRoot.shared();
+            try (final var json = BotJsonMapper.create(key -> Optional.empty())) {
+                final var store = new TaskStore(configuration, json);
+                final var options = new CleanupCommand.Options(24, false);
+                new CleanupCommand(
+                                options,
+                                configuration,
+                                execution,
+                                json,
+                                store,
+                                Clock.fixed(now.minus(Duration.ofDays(4)), ZoneOffset.UTC))
+                        .run();
+                assertTrue(Files.exists(orphan));
+                new CleanupCommand(options, configuration, execution, json, store, Clock.fixed(now, ZoneOffset.UTC))
+                        .run();
+                assertFalse(Files.exists(orphan));
+            }
+        }
+    }
+
+    public static class CommandModule extends GithubConfigurationTestModule {
+        public CommandModule() {
+            super(Map.of(
+                    "github.executor.attemptRoot",
+                    Command.root.resolve("attempts").toString()));
         }
     }
 

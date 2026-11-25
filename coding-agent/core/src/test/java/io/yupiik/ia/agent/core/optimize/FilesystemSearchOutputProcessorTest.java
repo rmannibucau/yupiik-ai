@@ -19,15 +19,24 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import io.yupiik.ia.agent.core.configuration.TestConfigs;
+import io.yupiik.fusion.testing.Fusion;
+import io.yupiik.fusion.testing.FusionSupport;
+import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
+import io.yupiik.ia.agent.core.configuration.ConfigurationTestModule;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Stream;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+@FusionSupport(modules = FilesystemSearchOutputProcessorTest.Settings.class)
 class FilesystemSearchOutputProcessorTest {
-    private final FilesystemSearchOutputProcessor processor =
-            new FilesystemSearchOutputProcessor(TestConfigs.codingAgent(Map.of("yca.optimize.maxEntries", "20")));
+    private FilesystemSearchOutputProcessor processor;
+
+    @BeforeEach
+    void init(@Fusion final CodingAgentConfiguration configuration) {
+        processor = new FilesystemSearchOutputProcessor(configuration);
+    }
 
     private List<String> run(final String command, final String... lines) {
         return processor.process(command, Stream.of(lines)).toList();
@@ -90,5 +99,11 @@ class FilesystemSearchOutputProcessorTest {
     void collapsesRepeatedLines() {
         final var out = run("ls", "a", "a", "a", "a", "b");
         assertEquals(List.of("4 x a", "b"), out);
+    }
+
+    public static class Settings extends ConfigurationTestModule {
+        public Settings() {
+            super(Map.of("yca.optimize.maxEntries", "20"));
+        }
     }
 }

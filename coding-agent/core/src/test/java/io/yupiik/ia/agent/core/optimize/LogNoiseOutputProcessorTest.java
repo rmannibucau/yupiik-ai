@@ -18,32 +18,27 @@ package io.yupiik.ia.agent.core.optimize;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import io.yupiik.fusion.framework.api.configuration.Configuration;
-import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
-import io.yupiik.ia.agent.core.configuration.ConfigurationLoader;
-import io.yupiik.ia.agent.core.configuration.OptimizeConfiguration;
-import java.util.Map;
+import io.yupiik.fusion.testing.Fusion;
+import io.yupiik.fusion.testing.FusionSupport;
+import io.yupiik.ia.agent.core.configuration.ConfigurationTestModule;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 /**
  * Regression guard for the log-noise filter: proves the {@code @Property(defaultValue=...)}
- * defaults (materialized through {@link ConfigurationLoader} and
+ * defaults (materialized through normal Fusion injection and
  * matched via {@link FastRegex}) drop the expected framework log lines and never drop
  * warnings/errors. Covers the yupiik-logging-jul, Spring Boot, Tomcat/Jetty, Gradle and Maven
  * formats.
  */
+@FusionSupport(modules = ConfigurationTestModule.class)
 class LogNoiseOutputProcessorTest {
 
-    private final LogNoiseOutputProcessor processor = new LogNoiseOutputProcessor(defaultsOptimize());
+    private LogNoiseOutputProcessor processor;
 
-    /**
-     * Materializes the {@link OptimizeConfiguration} bearing every {@code @Property(defaultValue=...)}
-     * default, as the container would at startup with no {@code yca.optimize.*} property set. Kept in
-     * test code only (production configuration records are anemic data models with no defaults helper).
-     */
-    private static OptimizeConfiguration defaultsOptimize() {
-        return ConfigurationLoader.load(CodingAgentConfiguration.class, Configuration.of(Map.of()))
-                .optimize();
+    @BeforeEach
+    void init(@Fusion final LogNoiseOutputProcessor processor) {
+        this.processor = processor;
     }
 
     @Test

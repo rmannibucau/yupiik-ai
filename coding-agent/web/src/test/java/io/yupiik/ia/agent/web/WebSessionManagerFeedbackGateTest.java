@@ -21,8 +21,10 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.fusion.json.JsonMapper;
+import io.yupiik.fusion.testing.Fusion;
+import io.yupiik.fusion.testing.FusionSupport;
 import io.yupiik.ia.agent.core.agent.SystemPromptBuilder;
-import io.yupiik.ia.agent.core.configuration.CodingAgentConfigurations;
+import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.context.BackoffSleeper;
 import io.yupiik.ia.agent.core.context.UsageTracker;
 import io.yupiik.ia.agent.core.llm.ChatSettings;
@@ -30,6 +32,7 @@ import io.yupiik.ia.agent.core.notifications.NotificationService;
 import io.yupiik.ia.agent.core.permissions.ApprovalGate;
 import io.yupiik.ia.agent.core.question.Question;
 import io.yupiik.ia.agent.core.question.UserFeedbackService;
+import io.yupiik.ia.agent.core.sandbox.Sandbox;
 import io.yupiik.ia.agent.core.session.SessionStore;
 import io.yupiik.ia.agent.core.shell.SessionLifecycle;
 import io.yupiik.ia.agent.core.shell.SessionRuntimeFactory;
@@ -69,11 +72,18 @@ import org.junit.jupiter.api.io.TempDir;
  * that would make the model's turn spin.
  */
 @ExtendWith(TestWebJsonMapper.class)
+@FusionSupport(modules = WebSessionManagerFeedbackGateTest.SessionModule.class)
 @Timeout(30)
 class WebSessionManagerFeedbackGateTest {
 
     @TempDir
-    Path storageHome;
+    static Path storageHome;
+
+    public static class SessionModule extends WebConfigurationTestModule {
+        public SessionModule() {
+            super(Map.of("yca.storageHome", storageHome.toString()));
+        }
+    }
 
     private JsonMapper mapper;
     private WebSessionManager manager;
@@ -83,17 +93,11 @@ class WebSessionManagerFeedbackGateTest {
     private final BlockingQueue<String> acknowledgements = new LinkedBlockingQueue<>();
 
     @BeforeEach
-    void setup(final JsonMapper mapper) {
+    void setup(final JsonMapper mapper, @Fusion final CodingAgentConfiguration configuration) {
         this.mapper = mapper;
         this.broker = new FakeSseBroker(mapper);
         this.answerer = new FakeBtwAnswerer();
 
-        // public main helper (same one core's own tests use to point a provider at a mock): avoids
-        // touching the fusion-generated config factory directly, which is not package-accessible here.
-        final var configuration = CodingAgentConfigurations.builder()
-                .baseUrl("http://localhost:0")
-                .storageHome(storageHome.toString())
-                .build();
         final var sessionStore = new SessionStore() {};
         final var runtimeFactory = new SessionRuntimeFactory(
                 null,
@@ -146,7 +150,11 @@ class WebSessionManagerFeedbackGateTest {
 
                     @Override
                     public void onApprovalRequired(
-                            final String session, final String title, final String tool, final String source) {
+                            final String session,
+                            final String title,
+                            final String tool,
+                            final String source,
+                            final ApprovalGate.Origin origin) {
                         alerts.add(session + ":approval:" + tool + ":" + source);
                     }
                 });
@@ -277,7 +285,12 @@ class WebSessionManagerFeedbackGateTest {
         final var approval = CompletableFuture.supplyAsync(() -> manager.runtime("s2")
                 .permissions()
                 .gate()
-                .approve("secret title", "secret detail", "bash", Map.of("command", "secret command")));
+                .approve(new ApprovalGate.Request(
+                        ApprovalGate.Origin.PERMISSION,
+                        "secret title",
+                        "secret detail",
+                        "bash",
+                        Map.of("command", "secret command"))));
         assertEquals(
                 Set.of("s1:input:2:main", "s2:approval:bash:main"),
                 Set.of(alerts.poll(5, TimeUnit.SECONDS), alerts.poll(5, TimeUnit.SECONDS)));
@@ -310,8 +323,8 @@ class WebSessionManagerFeedbackGateTest {
         final var side = CompletableFuture.supplyAsync(
                 () -> answerer.feedback.ask(List.of(new Question("b", "btw", List.of(), false))));
         assertEquals("s1:input:1:btw", alerts.poll(5, TimeUnit.SECONDS));
-        final var permission =
-                CompletableFuture.supplyAsync(() -> answerer.approval.approve("title", "detail", "bash", Map.of()));
+        final var permission = CompletableFuture.supplyAsync(() -> answerer.approval.approve(
+                new ApprovalGate.Request(ApprovalGate.Origin.PERMISSION, "title", "detail", "bash", Map.of())));
         assertEquals("s1:approval:bash:btw", alerts.poll(5, TimeUnit.SECONDS));
         manager.clearBtw("s1");
         assertEquals(Map.of("cancelled", true), side.get(5, TimeUnit.SECONDS));
@@ -392,7 +405,8 @@ class WebSessionManagerFeedbackGateTest {
                 final BooleanSupplier cancelled,
                 final ApprovalGate sessionGate,
                 final ChatSettings sessionSettings,
-                final Path workdir) {
+                final Path workdir,
+                final Sandbox sandbox) {
             return CompletableFuture.completedFuture(new BtwAnswerer.BtwAnswer("unused", false));
         }
 
@@ -408,7 +422,8 @@ class WebSessionManagerFeedbackGateTest {
                 final UserFeedbackService feedback,
                 final Path workdir,
                 final ToolRegistry registry,
-                final Set<String> ceiling) {
+                final Set<String> ceiling,
+                final Sandbox sandbox) {
             assertNotNull(ceiling);
             this.feedback = feedback;
             this.approval = sessionGate;

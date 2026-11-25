@@ -19,7 +19,8 @@ import static java.util.stream.Collectors.toSet;
 import static org.junit.jupiter.api.Assertions.*;
 
 import com.sun.net.httpserver.HttpServer;
-import io.yupiik.ia.agent.core.configuration.ConfigurationLoader;
+import io.yupiik.fusion.testing.Fusion;
+import io.yupiik.fusion.testing.FusionSupport;
 import io.yupiik.ia.agent.github.client.GitHubClient;
 import io.yupiik.ia.agent.github.command.PollCommand.Options;
 import io.yupiik.ia.agent.github.configuration.FixConfiguration;
@@ -29,6 +30,7 @@ import io.yupiik.ia.agent.github.model.TaskKind;
 import io.yupiik.ia.agent.github.store.TaskStore;
 import io.yupiik.ia.agent.github.support.BotJsonMapper;
 import io.yupiik.ia.agent.github.support.BotTestConfiguration;
+import io.yupiik.ia.agent.github.support.GithubConfigurationTestModule;
 import io.yupiik.ia.agent.github.support.TaskFixtures;
 import java.net.InetSocketAddress;
 import java.net.URI;
@@ -58,7 +60,11 @@ import java.util.stream.Collectors;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+@FusionSupport(modules = GithubConfigurationTestModule.class)
 class PollerTest {
+    @Fusion
+    private Options defaultOptions;
+
     private static final Pattern ISSUE_PATH = Pattern.compile(".*/issues/[0-9]+$");
     private static final Pattern DISCOVERY_SUCCESS = Pattern.compile(
             "GitHub poll phase=discovery outcome=success durationMillis=\\d+ requests=0 httpMillis=\\d+ pacingMillis=\\d+");
@@ -187,10 +193,13 @@ class PollerTest {
             final var conf =
                     configuration("http://127.0.0.1:" + server.getAddress().getPort(), "42");
             final var store = new TaskStore(conf, json);
-            final var options = ConfigurationLoader.load(
-                            Options.class,
-                            key -> "poll.search.enabled".equals(key) ? Optional.of("false") : Optional.empty())
-                    .poll();
+            final var options = new PollOptions(
+                    defaultOptions.poll().since(),
+                    defaultOptions.poll().pageBudget(),
+                    defaultOptions.poll().reviews(),
+                    defaultOptions.poll().discussions(),
+                    defaultOptions.poll().parallelism(),
+                    new PollOptions.Search(false, defaultOptions.poll().search().reconciliationIntervalSeconds()));
             try (final var github =
                     new GitHubClient(URI.create(conf.api()), json, () -> "test", BotTestConfiguration.CLOCK)) {
                 final var poller = BotTestConfiguration.poller(conf, store, github, BotTestConfiguration.CLOCK, null);
@@ -337,10 +346,13 @@ class PollerTest {
             final var conf =
                     configuration("http://127.0.0.1:" + server.getAddress().getPort(), "42");
             final var store = new TaskStore(conf, json);
-            final var options = ConfigurationLoader.load(
-                            Options.class,
-                            key -> "poll.search.enabled".equals(key) ? Optional.of("false") : Optional.empty())
-                    .poll();
+            final var options = new PollOptions(
+                    defaultOptions.poll().since(),
+                    defaultOptions.poll().pageBudget(),
+                    defaultOptions.poll().reviews(),
+                    defaultOptions.poll().discussions(),
+                    defaultOptions.poll().parallelism(),
+                    new PollOptions.Search(false, defaultOptions.poll().search().reconciliationIntervalSeconds()));
             try (final var github =
                     new GitHubClient(URI.create(conf.api()), json, () -> "test", BotTestConfiguration.CLOCK)) {
                 assertEquals(
@@ -560,8 +572,7 @@ class PollerTest {
             }
             assertEquals(0, requests.get());
             assertEquals(0, github.statistics().requests());
-            final var defaults = ConfigurationLoader.load(Options.class, ignored -> Optional.empty())
-                    .poll();
+            final var defaults = defaultOptions.poll();
             assertEquals(4, defaults.parallelism());
             assertTrue(defaults.search().enabled());
             assertEquals(3600, defaults.search().reconciliationIntervalSeconds());

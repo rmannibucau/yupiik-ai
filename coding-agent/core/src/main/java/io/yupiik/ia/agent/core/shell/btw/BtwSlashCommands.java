@@ -92,7 +92,8 @@ public class BtwSlashCommands implements SlashCommandSet {
                         runtime.feedback(),
                         runtime.workdir(),
                         runtime.loop().effectiveToolRegistry(),
-                        runtime.loop().availableToolNames())
+                        runtime.loop().availableToolNames(),
+                        runtime.sandbox())
                 .thenApply(answer -> ShellOutcome.transcript(rendered(question, answer.text())))
                 .exceptionally(e -> ShellOutcome.error("btw failed: " + message(e)))
                 .toCompletableFuture();

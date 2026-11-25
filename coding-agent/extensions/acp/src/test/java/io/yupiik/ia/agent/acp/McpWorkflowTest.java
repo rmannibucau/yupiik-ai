@@ -130,6 +130,9 @@ class McpWorkflowTest {
             }
             command.addAll(List.of(
                     "acp",
+                    // Exercise legacy MCP transports and ACP consent, not OS sandbox policy.
+                    "--sandbox",
+                    "false",
                     "--yca-storageHome",
                     tmp.resolve("storage").toString(),
                     "--yca-home",

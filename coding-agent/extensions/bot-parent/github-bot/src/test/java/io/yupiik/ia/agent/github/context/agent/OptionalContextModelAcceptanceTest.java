@@ -21,25 +21,27 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 import io.yupiik.fusion.framework.api.ConfiguringContainer;
 import io.yupiik.fusion.framework.api.RuntimeContainer;
 import io.yupiik.fusion.framework.api.configuration.Configuration;
-import io.yupiik.fusion.framework.api.configuration.impl.MapConfigSource;
 import io.yupiik.fusion.framework.api.container.FusionBean;
 import io.yupiik.fusion.framework.api.container.FusionListener;
 import io.yupiik.fusion.framework.api.container.FusionModule;
 import io.yupiik.fusion.framework.api.event.Emitter;
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.fusion.json.serialization.JsonCodec;
+import io.yupiik.fusion.testing.Fusion;
+import io.yupiik.fusion.testing.FusionSupport;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
-import io.yupiik.ia.agent.core.configuration.ConfigurationLoader;
 import io.yupiik.ia.agent.core.configuration.NativeProviderConfiguration;
 import io.yupiik.ia.agent.core.llm.ChatClient;
 import io.yupiik.ia.agent.core.llm.ChatCompletionRequest;
 import io.yupiik.ia.agent.core.llm.Message;
 import io.yupiik.ia.agent.core.llm.Tool;
+import io.yupiik.ia.agent.core.sandbox.DisabledSandbox;
 import io.yupiik.ia.agent.core.tools.EmbeddedTool;
 import io.yupiik.ia.agent.core.tools.ToolContext;
 import io.yupiik.ia.agent.core.wiring.HttpClientProducer;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import io.yupiik.ia.agent.github.configuration.AgentContextConfiguration;
+import io.yupiik.ia.agent.github.support.GithubConfigurationTestModule;
 import java.lang.reflect.ParameterizedType;
 import java.nio.file.Path;
 import java.time.Clock;
@@ -47,7 +49,6 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 import java.util.Set;
 import java.util.function.BiPredicate;
 import org.junit.jupiter.api.Test;
@@ -61,9 +62,13 @@ import org.junit.jupiter.api.io.TempDir;
  * No ambient provider credentials/configuration are inherited and no system properties are mutated.
  * The context capability is disabled: only the explicitly authorized model endpoint can be called.
  */
+@FusionSupport(modules = OptionalContextModelAcceptanceTest.Source.class)
 class OptionalContextModelAcceptanceTest {
+    @Fusion
+    private CodingAgentConfiguration injectedConfiguration;
+
     @TempDir
-    Path home;
+    static Path home;
 
     @Test
     @Timeout(120)
@@ -72,26 +77,13 @@ class OptionalContextModelAcceptanceTest {
         assumeTrue(
                 "true".equals(environment.get("YCA_CONTEXT_ACCEPTANCE_ENABLED")),
                 "Live context model acceptance requires explicit authorization");
-        final var values = new HashMap<String, String>();
-        values.put("yca.storageHome", home.toString());
-        values.put("yca.workingDir", home.toString());
-        values.put("yca.provider.providers.length", "1");
-        for (final var field : Map.of(
-                        "id", "PROVIDER", "api", "API", "model", "MODEL", "baseUrl", "BASE_URL", "apiKey", "API_KEY")
-                .entrySet()) {
-            final var name = "YCA_CONTEXT_ACCEPTANCE_" + field.getValue();
+        for (final var suffix : List.of("PROVIDER", "API", "MODEL", "BASE_URL", "API_KEY")) {
+            final var name = "YCA_CONTEXT_ACCEPTANCE_" + suffix;
             final var value = environment.get(name);
             assertNotNull(value, "Explicit acceptance setting required: " + name);
             assertFalse(value.isBlank(), "Explicit acceptance setting must not be blank: " + name);
-            values.put("yca.provider.providers.0." + field.getKey(), value);
         }
-        values.put("yca.provider.providers.0.timeoutSeconds", "60");
-        values.put("yca.provider.providers.0.contextWindow", "128000");
-        values.put("yca.llm.retriesMaxAttempts", "1");
-        values.put("yca.llm.rateLimitRequestsPerMinute", "0");
-        final var source = new MapConfigSource(values);
-        final var config =
-                ConfigurationLoader.load(CodingAgentConfiguration.class, key -> Optional.ofNullable(source.get(key)));
+        final var config = injectedConfiguration;
         final var workdir = config.resolveWorkingDir();
         try (final var container = jsonContainer();
                 final var lookup = container.lookup(JsonMapper.class)) {
@@ -100,8 +92,8 @@ class OptionalContextModelAcceptanceTest {
             final List<EmbeddedTool> tools = List.of(
                     new GitTool(disabled, json, Configuration.of(Map.of())),
                     new GithubContextTool(disabled, json, Configuration.of(Map.of())));
-            final var provider = source.get("yca.provider.providers.0.id");
-            final var model = source.get("yca.provider.providers.0.model");
+            final var provider = config.provider().providers().getFirst().id();
+            final var model = config.provider().providers().getFirst().model();
             try (final var http =
                             new HttpClientProducer().httpClient(config, new NativeProviderConfiguration(null, null));
                     final var client =
@@ -139,7 +131,8 @@ class OptionalContextModelAcceptanceTest {
                     } else {
                         assertEquals("summary", arguments.get("operation"));
                     }
-                    final var result = tool.execute(arguments, ToolContext.empty(workdir));
+                    final var result =
+                            tool.execute(arguments, ToolContext.empty(workdir, new DisabledSandbox(workdir)));
                     assertTrue(result.error());
                     assertEquals(
                             "Context capability unavailable.",
@@ -179,5 +172,43 @@ class OptionalContextModelAcceptanceTest {
                     }
                 })
                 .start();
+    }
+
+    public static class Source extends GithubConfigurationTestModule {
+        public Source() {
+            super(settings());
+        }
+
+        private static Map<String, String> settings() {
+            if (!"true".equals(System.getenv("YCA_CONTEXT_ACCEPTANCE_ENABLED"))) {
+                return Map.of("yca.storageHome", home.toString(), "yca.workingDir", home.toString());
+            }
+            final var values = new HashMap<String, String>();
+            values.put("yca.storageHome", home.toString());
+            values.put("yca.workingDir", home.toString());
+            values.put("yca.provider.providers.length", "1");
+            for (final var field : Map.of(
+                            "id",
+                            "PROVIDER",
+                            "api",
+                            "API",
+                            "model",
+                            "MODEL",
+                            "baseUrl",
+                            "BASE_URL",
+                            "apiKey",
+                            "API_KEY")
+                    .entrySet()) {
+                final var value = System.getenv("YCA_CONTEXT_ACCEPTANCE_" + field.getValue());
+                if (value != null) {
+                    values.put("yca.provider.providers.0." + field.getKey(), value);
+                }
+            }
+            values.put("yca.provider.providers.0.timeoutSeconds", "60");
+            values.put("yca.provider.providers.0.contextWindow", "128000");
+            values.put("yca.llm.retriesMaxAttempts", "1");
+            values.put("yca.llm.rateLimitRequestsPerMinute", "0");
+            return values;
+        }
     }
 }

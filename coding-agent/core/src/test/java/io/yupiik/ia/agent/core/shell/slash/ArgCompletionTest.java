@@ -24,7 +24,7 @@ import org.junit.jupiter.api.Test;
 
 class ArgCompletionTest {
 
-    private static final List<String> PERMISSIONS = List.of("ask", "auto_edit", "yolo", "none", "show");
+    private static final List<String> PERMISSIONS = List.of("ask", "auto_edit", "yolo", "full_yolo", "none", "show");
 
     @Test
     void previousTokenUsesAsciiSeparatorsButUnicodeAwareStripping() {
@@ -40,10 +40,10 @@ class ArgCompletionTest {
     void prefixTokenMatchesCandidate() {
         // "y" and "yo" are prefixes of "yolo"
         assertEquals(
-                List.of("yolo"),
+                List.of("full_yolo", "yolo"),
                 ArgCompletion.fuzzyResult("option", PERMISSIONS, "y").items());
         assertEquals(
-                List.of("yolo"),
+                List.of("full_yolo", "yolo"),
                 ArgCompletion.fuzzyResult("option", PERMISSIONS, "yo").items());
         // "auto" is a prefix of "auto_edit"
         assertEquals(
@@ -60,7 +60,7 @@ class ArgCompletionTest {
         // containment is deliberate: "olo" is inside "yolo", "ini" inside "gpt-5-mini"
         // (the /model completion is reachable by typing the model's suffix)
         assertEquals(
-                List.of("yolo"),
+                List.of("full_yolo", "yolo"),
                 ArgCompletion.fuzzyResult("option", PERMISSIONS, "olo").items());
         assertEquals(
                 List.of("gpt-5-mini"),
@@ -71,7 +71,7 @@ class ArgCompletionTest {
     @Test
     void emptyTokenMatchesEveryCandidateSortedNaturally() {
         assertEquals(
-                List.of("ask", "auto_edit", "none", "show", "yolo"),
+                List.of("ask", "auto_edit", "full_yolo", "none", "show", "yolo"),
                 ArgCompletion.fuzzyResult("option", PERMISSIONS, "").items());
         assertEquals(
                 ArgCompletion.fuzzyResult("option", PERMISSIONS, "").items(),
@@ -84,7 +84,7 @@ class ArgCompletionTest {
                 ArgCompletion.fuzzyResult("option", PERMISSIONS, "Y").items(),
                 ArgCompletion.fuzzyResult("option", PERMISSIONS, "y").items());
         assertEquals(
-                List.of("yolo"),
+                List.of("full_yolo", "yolo"),
                 ArgCompletion.fuzzyResult("option", PERMISSIONS, "YOLO").items());
     }
 
