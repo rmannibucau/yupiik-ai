@@ -587,7 +587,12 @@ public class TuiCommand implements Runnable {
                                     + "slash command. Values are comma separated; prefix with "
                                     + "sep=<char>, to split on another single character when a value itself contains "
                                     + "commas.")
-            List<String> initialPrompt) {
+            List<String> initialPrompt,
+
+            @Property(
+                    defaultValue = "null",
+                    documentation = "Enable or disable sandboxing for this session; defaults to yca.sandbox.enabled.")
+            Boolean sandbox) {
 
         /**
          * Convenience constructor for the common case: no prompt injected at startup.
@@ -604,7 +609,7 @@ public class TuiCommand implements Runnable {
                 final KeyBindingPreset bindings,
                 final boolean showThinking,
                 final String theme) {
-            this(session, context, bindings, showThinking, true, theme, List.of());
+            this(session, context, bindings, showThinking, true, theme, List.of(), null);
         }
     }
 
@@ -1004,7 +1009,7 @@ public class TuiCommand implements Runnable {
         state.runner = tui;
         state.session.sessionId(state.sessionId).activeAgent(state.activeAgent);
         final var workdir = sessionRuntimeFactory.resolveWorkdir(null, state.sessionId);
-        final var runtime = sessionRuntimeFactory.create(state.sessionId, workdir);
+        final var runtime = sessionRuntimeFactory.create(state.sessionId, workdir, conf.sandbox());
         state.runtime(runtime);
         state.session.runtime(runtime);
         state.model.bindCompression(runtime.compression());
@@ -1089,7 +1094,7 @@ public class TuiCommand implements Runnable {
             shellRegistry.unregister(env(tui, state));
         }
         final var workdir = sessionRuntimeFactory.resolveWorkdir(null, state.sessionId);
-        final var runtime = sessionRuntimeFactory.create(state.sessionId, workdir);
+        final var runtime = sessionRuntimeFactory.create(state.sessionId, workdir, conf.sandbox());
         state.runtime(runtime);
         state.session.runtime(runtime);
         state.model.bindCompression(runtime.compression());

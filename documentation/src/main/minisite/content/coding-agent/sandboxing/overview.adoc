@@ -25,7 +25,10 @@ The macOS launcher is experimental and has not been runtime-qualified; do not as
 |===
 
 Sandbox enforcement defaults to enabled.
-All agent modes accept `--sandbox true|false`; `--sandbox false` deliberately selects host execution.
+The `tui`, `cli`, `run`, `web` and `acp` commands expose a nullable `--sandbox true|false` launch option in their help; `--sandbox false` deliberately selects host execution.
+Omitting the option inherits the trusted global `sandbox.enabled` setting (or `yca.sandbox.enabled` with the `yca` wrapper), which defaults to `true`.
+The launch option overrides only `enabled` for every session created by that command, including resumed sessions and new tabs; it does not rewrite global configuration or replace the helper, filesystem, network or other sandbox policy.
+Command-prefixed forms such as `yca tui --tui-sandbox true` are also supported.
 A missing prerequisite or failed launch never automatically retries outside the sandbox.
 `full_yolo` also deliberately bypasses the sandbox and is not recommended.
 

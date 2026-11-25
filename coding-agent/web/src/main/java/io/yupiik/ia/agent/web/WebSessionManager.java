@@ -102,6 +102,7 @@ public class WebSessionManager implements AutoCloseable {
 
     private final ConcurrentHashMap<String, WebSession> sessions = new ConcurrentHashMap<>();
     private final AtomicLong rpcId = new AtomicLong();
+    private volatile Boolean sandboxOverride;
 
     public WebSessionManager(
             final SessionRuntimeFactory sessionRuntimeFactory,
@@ -181,6 +182,11 @@ public class WebSessionManager implements AutoCloseable {
         this.chatClient = chatClient;
     }
 
+    /** Sets the command-bound override before the web server accepts sessions. */
+    public void sandboxOverride(final Boolean sandboxOverride) {
+        this.sandboxOverride = sandboxOverride;
+    }
+
     /** Whether a session is currently driven by the web server. */
     public boolean isAttached(final String sessionId) {
         return sessions.containsKey(sessionId);
@@ -212,7 +218,7 @@ public class WebSessionManager implements AutoCloseable {
 
     private WebSession createAttached(final String sessionId) {
         final var workdir = sessionRuntimeFactory.resolveWorkdir(null, sessionId);
-        final var runtime = sessionRuntimeFactory.create(sessionId, workdir);
+        final var runtime = sessionRuntimeFactory.create(sessionId, workdir, sandboxOverride);
         final var transcript = new ConversationTranscript();
         final var frontend = new WebShellFrontend(sessionId, broker, transcript, mapper);
         final var session = new ShellSession().sessionId(sessionId).runtime(runtime);

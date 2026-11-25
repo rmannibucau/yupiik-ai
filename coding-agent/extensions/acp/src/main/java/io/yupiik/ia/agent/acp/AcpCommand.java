@@ -103,7 +103,7 @@ public class AcpCommand implements Runnable {
                         + (available.isEmpty() ? "" : ", " + String.join(", ", available)));
             }
         }
-        server.run(System.in, stdio.protocolOutput(), settings);
+        server.run(System.in, stdio.protocolOutput(), settings, conf.sandbox());
     }
 
     private void login(final ChatSettings settings) {
@@ -233,5 +233,34 @@ public class AcpCommand implements Runnable {
                             + "regular expressions. Replaces the ACP defaults, not the common rules from "
                             + "yca.secrets.environment. An empty list disables only "
                             + "these additions; generic credential forms remain unsupported.")
-            List<String> elicitationSensitiveWords) {}
+            List<String> elicitationSensitiveWords,
+
+            @Property(
+                    defaultValue = "null",
+                    documentation = "Override sandbox enablement for ACP sessions; defaults to yca.sandbox.enabled. "
+                            + "Sandbox policy is independent of tool permissions.")
+            Boolean sandbox) {
+        public Conf(
+                final String provider,
+                final String model,
+                final String variant,
+                final boolean login,
+                final boolean device,
+                final boolean enterprise,
+                final String workspace,
+                final List<String> elicitationSensitiveMarkers,
+                final List<String> elicitationSensitiveWords) {
+            this(
+                    provider,
+                    model,
+                    variant,
+                    login,
+                    device,
+                    enterprise,
+                    workspace,
+                    elicitationSensitiveMarkers,
+                    elicitationSensitiveWords,
+                    null);
+        }
+    }
 }

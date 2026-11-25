@@ -44,6 +44,7 @@ import io.yupiik.ia.agent.core.session.SessionEntry;
 import io.yupiik.ia.agent.core.session.SessionMetadata;
 import io.yupiik.ia.agent.core.shell.*;
 import io.yupiik.ia.agent.core.tools.ToolRegistry;
+import java.io.InputStream;
 import java.io.OutputStream;
 import java.io.PipedInputStream;
 import java.io.PipedOutputStream;
@@ -53,6 +54,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Clock;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -69,6 +71,9 @@ import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.NullSource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 @Timeout(15)
 class SessionSetupPersistenceTest {
@@ -93,6 +98,7 @@ class SessionSetupPersistenceTest {
         private final AcpSessionOptions options;
         private final FileSessionStore store;
         private final Map<String, SessionRuntime> runtimes = new ConcurrentHashMap<>();
+        private final List<Boolean> sandboxOverrides = new ArrayList<>();
         private final Map<String, String> contexts = new ConcurrentHashMap<>();
         private final Map<String, String> providerHistory = new ConcurrentHashMap<>();
         private final BlockingQueue<String> lines = new LinkedBlockingQueue<>();
@@ -118,6 +124,14 @@ class SessionSetupPersistenceTest {
         };
 
         private Fixture(final CodingAgentConfiguration configuration, final AcpCommand.Conf commandOptions)
+                throws Exception {
+            this(configuration, commandOptions, null);
+        }
+
+        private Fixture(
+                final CodingAgentConfiguration configuration,
+                final AcpCommand.Conf commandOptions,
+                final AcpCommand.Conf commandBoundOptions)
                 throws Exception {
             support = new OptionTestSupport(
                     configuration,
@@ -156,7 +170,12 @@ class SessionSetupPersistenceTest {
 
                 @Override
                 public SessionRuntime create(
-                        final String key, final String id, final ToolRegistry registry, final Path root) {
+                        final String key,
+                        final String id,
+                        final ToolRegistry registry,
+                        final Path root,
+                        final Boolean sandboxOverride) {
+                    sandboxOverrides.add(sandboxOverride);
                     final var permissions = new PermissionService(support.configuration, root);
                     final var loop = new AgentLoop(root, new DisabledSandbox(root)) {
                         private volatile ChatSettings selection = ChatSettings.EMPTY;
@@ -217,30 +236,57 @@ class SessionSetupPersistenceTest {
                     return turnCompletion == null ? CompletableFuture.completedFuture(true) : turnCompletion;
                 }
             };
-            server = new AcpServer(
-                    mapper,
-                    factory,
-                    new SessionLifecycle(store),
-                    shells,
-                    store,
-                    turns,
-                    new ToolRegistry(mcp),
-                    mcp,
-                    options,
-                    null,
-                    new SecretNames(support.configuration),
-                    List.of(),
-                    null,
-                    null,
-                    null,
-                    support.providers,
-                    support.configuration,
-                    null,
-                    null,
-                    support.commandOptions);
+            server =
+                    new AcpServer(
+                            mapper,
+                            factory,
+                            new SessionLifecycle(store),
+                            shells,
+                            store,
+                            turns,
+                            new ToolRegistry(mcp),
+                            mcp,
+                            options,
+                            null,
+                            new SecretNames(support.configuration),
+                            List.of(),
+                            null,
+                            null,
+                            null,
+                            support.providers,
+                            support.configuration,
+                            null,
+                            null,
+                            support.commandOptions) {
+                        @Override
+                        public void run(
+                                final InputStream commandInput,
+                                final PrintStream commandOutput,
+                                final ChatSettings settings,
+                                final Boolean sandboxOverride) {
+                            super.run(input, commandOutput, settings, sandboxOverride);
+                        }
+                    };
             Thread.ofVirtual().start(() -> {
                 try {
-                    server.run(input, output, ChatSettings.EMPTY);
+                    if (commandBoundOptions == null) {
+                        server.run(input, output, ChatSettings.EMPTY);
+                    } else {
+                        new AcpCommand(
+                                        commandBoundOptions,
+                                        server,
+                                        new AcpStdio(Optional.empty()) {
+                                            @Override
+                                            public PrintStream protocolOutput() {
+                                                return output;
+                                            }
+                                        },
+                                        support.providers,
+                                        support.chat,
+                                        null,
+                                        null)
+                                .run();
+                    }
                     done.complete(null);
                 } catch (final Throwable error) {
                     done.completeExceptionally(error);
@@ -338,6 +384,53 @@ class SessionSetupPersistenceTest {
     class ExactCapabilitiesAndTwo {
         @TempDir
         static Path home;
+
+        @ParameterizedTest
+        @NullSource
+        @ValueSource(booleans = {false, true})
+        void commandSandboxOverrideSurvivesNewLoadAndResume(
+                final Boolean sandbox,
+                @Fusion final CodingAgentConfiguration configuration,
+                @Fusion final AcpCommand.Conf commandOptions)
+                throws Exception {
+            final var bound = new AcpCommand.Conf(
+                    null,
+                    null,
+                    null,
+                    false,
+                    false,
+                    false,
+                    null,
+                    commandOptions.elicitationSensitiveMarkers(),
+                    commandOptions.elicitationSensitiveWords(),
+                    sandbox);
+            // The server's injected configuration must not win over the command-bound override.
+            final var injected = new AcpCommand.Conf(
+                    null,
+                    null,
+                    null,
+                    false,
+                    false,
+                    false,
+                    null,
+                    commandOptions.elicitationSensitiveMarkers(),
+                    commandOptions.elicitationSensitiveWords(),
+                    !Boolean.TRUE.equals(sandbox));
+            try (final var f = new Fixture(configuration, injected, bound)) {
+                final var first = f.create(1, home, List.of(), "append", "sandbox test");
+                f.closeSession(2, first);
+                f.send(3, "session/load", Map.of("sessionId", first, "cwd", home.toString(), "mcpServers", List.of()));
+                assertNull(f.response(3).error());
+                f.closeSession(4, first);
+                f.send(
+                        5,
+                        "session/resume",
+                        Map.of("sessionId", first, "cwd", home.toString(), "mcpServers", List.of()));
+                assertNull(f.response(5).error());
+                f.create(6, home, List.of(), "append", "another session");
+                assertEquals(Arrays.asList(sandbox, sandbox, sandbox, sandbox), f.sandboxOverrides);
+            }
+        }
 
         @Test
         void exactCapabilitiesAndTwoRootPromptPresetsRoundTripWithoutGrantsOrMetadataReplay(

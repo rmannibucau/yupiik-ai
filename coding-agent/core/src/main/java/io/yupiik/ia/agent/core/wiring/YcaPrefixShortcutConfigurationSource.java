@@ -43,15 +43,6 @@ public class YcaPrefixShortcutConfigurationSource implements ConfigurationSource
 
     @Override
     public String get(final String key) {
-        if ("yca.sandbox.enabled".equals(key)) {
-            final var sandbox = delegate.get("sandbox");
-            if (sandbox != null) {
-                if (!"true".equalsIgnoreCase(sandbox) && !"false".equalsIgnoreCase(sandbox)) {
-                    throw new IllegalArgumentException("--sandbox requires true or false.");
-                }
-                return sandbox;
-            }
-        }
         if (key != null && key.startsWith(PREFIX)) {
             final var stripped = key.substring(PREFIX.length());
             final var strippedValue = delegate.get(stripped);

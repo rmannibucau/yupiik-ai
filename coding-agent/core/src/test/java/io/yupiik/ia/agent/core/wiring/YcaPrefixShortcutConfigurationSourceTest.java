@@ -17,7 +17,6 @@ package io.yupiik.ia.agent.core.wiring;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
-import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import io.yupiik.fusion.framework.api.main.ArgsConfigSource;
 import java.util.List;
@@ -74,16 +73,18 @@ class YcaPrefixShortcutConfigurationSourceTest {
     }
 
     @Test
-    void sandboxAliasSupportsEqualsAndHasShortcutPrecedence() {
+    void commandSandboxDoesNotOverrideGlobalPolicy() {
         final var source = new YcaPrefixShortcutConfigurationSource(
                 new ArgsConfigSource(List.of("--sandbox=false", "--yca.sandbox.enabled", "true")));
-        assertEquals("false", source.get("yca.sandbox.enabled"));
+        assertEquals("true", source.get("yca.sandbox.enabled"));
+        assertEquals("false", source.get("sandbox"));
     }
 
     @Test
-    void sandboxAliasRequiresAnExplicitBoolean() {
+    void commandSandboxValuesAreNotValidatedByTheShortcutSource() {
         final var source = new YcaPrefixShortcutConfigurationSource(new ArgsConfigSource(List.of("--sandbox", "no")));
-        assertThrows(IllegalArgumentException.class, () -> source.get("yca.sandbox.enabled"));
+        assertNull(source.get("yca.sandbox.enabled"));
+        assertEquals("no", source.get("sandbox"));
     }
 
     @Test

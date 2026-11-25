@@ -173,7 +173,11 @@ class SessionLifecycleTest {
 
                 @Override
                 public SessionRuntime create(
-                        final String key, final String id, final ToolRegistry tools, final Path workdir) {
+                        final String key,
+                        final String id,
+                        final ToolRegistry tools,
+                        final Path workdir,
+                        final Boolean sandboxOverride) {
                     if (beforeCreate != null) {
                         beforeCreate.accept(id);
                     }

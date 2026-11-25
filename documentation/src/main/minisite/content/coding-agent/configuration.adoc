@@ -50,8 +50,9 @@ The `yca` prefix may be omitted: `--provider-model` also works.
 Dots and hyphens become underscores, and letters become uppercase.
 
 IMPORTANT: Sandbox policy is a trusted-configuration exception to ordinary project precedence.
-Project-local `sandbox`/`yca.sandbox` overrides are rejected, and a project file cannot discard trusted global sandbox settings with `$inherit: false` or by omitting inheritance.
+Project-local keys containing a `sandbox` path segment are rejected, including `sandbox`/`yca.sandbox` policies and command options such as `tui.sandbox` or `run.sandbox`, and a project file cannot discard trusted global sandbox settings with `$inherit: false` or by omitting inheritance.
 Use trusted global settings or `--sandbox true|false`; see xref:sandboxing/overview.adoc[Sandboxes and tool permissions] for prerequisites, initialization, configuration examples and enforcement limits.
+The command option is a nullable launch-time override of `sandbox.enabled` only; omitting it inherits the global setting and all other sandbox policy remains unchanged.
 
 [mermaid]
 ....

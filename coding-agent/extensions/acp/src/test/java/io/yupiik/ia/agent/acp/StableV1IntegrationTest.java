@@ -201,7 +201,11 @@ class StableV1IntegrationTest {
             final var factory = new SessionRuntimeFactory() {
                 @Override
                 public SessionRuntime create(
-                        final String key, final String id, final ToolRegistry registry, final Path cwd) {
+                        final String key,
+                        final String id,
+                        final ToolRegistry registry,
+                        final Path cwd,
+                        final Boolean sandboxOverride) {
                     assertFalse(
                             store.load(id).isEmpty(),
                             "new root marker precedes factory; restore preserves stored history");

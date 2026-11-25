@@ -77,6 +77,7 @@ public class WebCommand implements Runnable, AutoCloseable {
 
     @Override
     public void run() {
+        sessionManager.sandboxOverride(conf.sandbox());
         mcpManager.start();
         // publish the sessions the user asked to restore OOTB; the frontend reads them (sessions.restore)
         // on boot and opens a tab for each, so `yca web --session a --session b` restores those tabs.
@@ -185,5 +186,22 @@ public class WebCommand implements Runnable, AutoCloseable {
                                     + " a longer scroll-back without paginating but cost more DOM nodes on load and during"
                                     + " live streaming; 1024 is a good balance for large screens. The live SSE event buffer"
                                     + " (TAIL_LIMIT) is a separate, independent cap.")
-            int windowBlocks) {}
+            int windowBlocks,
+
+            @Property(
+                    defaultValue = "null",
+                    documentation = "Override sandbox enablement for web sessions; defaults to yca.sandbox.enabled. "
+                            + "Sandbox policy is independent of tool permissions.")
+            Boolean sandbox) {
+        public WebConf(
+                final String host,
+                final int port,
+                final boolean openBrowser,
+                final boolean virtualThreads,
+                final boolean accessLogEnabled,
+                final List<String> session,
+                final int windowBlocks) {
+            this(host, port, openBrowser, virtualThreads, accessLogEnabled, session, windowBlocks, null);
+        }
+    }
 }

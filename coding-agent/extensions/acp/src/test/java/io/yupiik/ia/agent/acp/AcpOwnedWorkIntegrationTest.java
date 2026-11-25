@@ -284,7 +284,11 @@ class AcpOwnedWorkIntegrationTest {
             final var factory = new SessionRuntimeFactory() {
                 @Override
                 public SessionRuntime create(
-                        final String key, final String id, final ToolRegistry registry, final Path cwd) {
+                        final String key,
+                        final String id,
+                        final ToolRegistry registry,
+                        final Path cwd,
+                        final Boolean sandboxOverride) {
                     final var effective = sessionTools.apply(id, registry);
                     final var loop = new AgentLoop(cwd, new DisabledSandbox(cwd)) {
                         private ChatSettings settings = ChatSettings.EMPTY;

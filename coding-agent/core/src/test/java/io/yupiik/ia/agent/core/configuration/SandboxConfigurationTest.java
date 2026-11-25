@@ -17,6 +17,7 @@ package io.yupiik.ia.agent.core.configuration;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -68,7 +69,13 @@ class SandboxConfigurationTest {
                 "{\"yca.sandbox.unix.socketBridges\":[{\"path\":\"/run/docker.sock\",\"port\":2375}]}",
                 "{\"yca.sandbox.environment.set.TOKEN\":\"secret\"}",
                 "{\"yca.sandbox.macOs.experimental\":true}",
-                "{\"yca-sandbox-macOs-experimental\":true}"
+                "{\"yca-sandbox-macOs-experimental\":true}",
+                "{\"tui\":{\"sandbox\":false}}",
+                "{\"yca\":{\"cli\":{\"sandbox\":false}}}",
+                "{\"run.sandbox\":false}",
+                "{\"yca-web-sandbox\":false}",
+                "{\"acp.sandbox\":false}",
+                "{\"future\":{\"command\":{\"sandbox\":{\"enabled\":false}}}}"
             })
     void projectCannotOptInTrustedSandboxExceptions(final String json) throws IOException {
         Files.createDirectory(root.resolve(".yca"));
@@ -88,6 +95,16 @@ class SandboxConfigurationTest {
         assertEquals(
                 "mcp:docs, acp:fs.readTextFile",
                 configuration.get("yca.sandbox.trustedIntegrations").orElseThrow());
+    }
+
+    @Test
+    void trustedCommandSandboxSettingSurvivesProjectWithoutInheritance() throws IOException {
+        Files.writeString(root.resolve("global.json"), "{\"tui\":{\"sandbox\":false}}");
+        Files.createDirectory(root.resolve(".yca"));
+        Files.writeString(root.resolve(".yca/configuration.json"), "{\"$inherit\":false,\"tui\":{\"theme\":\"dark\"}}");
+        final var configuration = fileConfiguration();
+        assertEquals("false", configuration.get("yca.tui.sandbox").orElseThrow());
+        assertEquals("dark", configuration.get("yca.tui.theme").orElseThrow());
     }
 
     @Test
@@ -176,9 +193,9 @@ class SandboxConfigurationTest {
 
     @ParameterizedTest
     @ValueSource(strings = {"cli", "run", "web", "tui", "acp"})
-    void sandboxAliasWorksAcrossModes(final String mode) {
+    void globalSandboxEnabledUsesGenericShortcutsAcrossModes(final String mode) {
         for (final var enabled : List.of("true", "false")) {
-            for (final var option : List.of("--sandbox", "--sandbox-enabled", "--yca.sandbox.enabled")) {
+            for (final var option : List.of("--sandbox.enabled", "--sandbox-enabled", "--yca.sandbox.enabled")) {
                 final var source =
                         new YcaPrefixShortcutConfigurationSource(new ArgsConfigSource(List.of(mode, option, enabled)));
                 assertEquals(enabled, source.get("yca.sandbox.enabled"), mode + " " + option);
@@ -189,6 +206,24 @@ class SandboxConfigurationTest {
     @Nested
     @FusionSupport(modules = OverrideModule.class)
     class Overrides {
+        @Test
+        void launchOverrideChangesOnlyEnabled(@Fusion final CodingAgentConfiguration configuration) {
+            final var policy = configuration.sandbox();
+            assertSame(policy, policy.withEnabled(null));
+            assertSame(policy, policy.withEnabled(false));
+            final var enabled = policy.withEnabled(true);
+            assertTrue(enabled.enabled());
+            assertEquals(policy, enabled.withEnabled(false));
+            assertSame(policy.helper(), enabled.helper());
+            assertSame(policy.filesystem(), enabled.filesystem());
+            assertSame(policy.network(), enabled.network());
+            assertSame(policy.trustedIntegrations(), enabled.trustedIntegrations());
+            assertSame(policy.macOs(), enabled.macOs());
+            assertSame(policy.environment(), enabled.environment());
+            assertSame(policy.unix(), enabled.unix());
+            assertFalse(policy.enabled(), "the trusted global policy must remain unchanged");
+        }
+
         @Test
         void bindsTheConfiguredPolicy(@Fusion final CodingAgentConfiguration configuration) {
             final var sandbox = new SandboxConfiguration(

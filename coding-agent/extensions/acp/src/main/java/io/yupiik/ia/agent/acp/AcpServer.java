@@ -160,7 +160,15 @@ public class AcpServer {
     }
 
     public void run(final InputStream input, final PrintStream output, final ChatSettings settings) {
-        try (final var connection = new Connection(output, settings)) {
+        run(input, output, settings, conf.sandbox());
+    }
+
+    public void run(
+            final InputStream input,
+            final PrintStream output,
+            final ChatSettings settings,
+            final Boolean sandboxOverride) {
+        try (final var connection = new Connection(output, settings, sandboxOverride)) {
             final var hook = new Thread(connection::close, "yca-acp-shutdown");
             Runtime.getRuntime().addShutdownHook(hook);
             try {
@@ -201,6 +209,7 @@ public class AcpServer {
     private final class Connection implements AutoCloseable {
         private final PrintStream output;
         private final ChatSettings settings;
+        private final Boolean sandboxOverride;
         private final AcpConnection transport;
         private final JsonMapper nullsMapper;
         private final Map<String, State> sessions = new ConcurrentHashMap<>();
@@ -228,7 +237,7 @@ public class AcpServer {
         private volatile InputStream input;
         private boolean initialized;
 
-        private Connection(final PrintStream output, final ChatSettings settings) {
+        private Connection(final PrintStream output, final ChatSettings settings, final Boolean sandboxOverride) {
             this.output = output;
             this.nullsMapper = mapper.as(JsonMapper.Configuring.class)
                     .orElseThrow()
@@ -236,6 +245,7 @@ public class AcpServer {
                     .build();
             this.transport = new AcpConnection(mapper, nullsMapper, output, () -> !closed.get());
             this.settings = settings;
+            this.sandboxOverride = sandboxOverride;
             catalogTimer.setRemoveOnCancelPolicy(true);
         }
 
@@ -694,7 +704,7 @@ public class AcpServer {
                                 holder.get().terminal(context.subagentId(), context.ordinal(), terminalId));
                 clientTools.configureAdditionalDirectories(setup.additionalDirectories());
                 final var registry = tools.withTools(owned.tools()).withTools(clientTools.tools());
-                runtime = factory.create(id, id, registry, cwd);
+                runtime = factory.create(id, id, registry, cwd, sandboxOverride);
                 runtime.updateChatSettings(selection);
                 runtime.configureSessionContext(setup.additionalDirectories(), setup.systemPrompt());
                 if (preset != null) {

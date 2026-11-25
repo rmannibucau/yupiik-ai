@@ -217,7 +217,7 @@ class HeadlessFeedbackIntegrationTest {
                         }
 
                         @Override
-                        public SessionRuntime create(final String id, final Path workdir) {
+                        public SessionRuntime create(final String id, final Path workdir, final Boolean sandbox) {
                             assertEquals(sessionId, id);
                             assertEquals(home, workdir);
                             return runtime;
@@ -246,7 +246,8 @@ class HeadlessFeedbackIntegrationTest {
                                             "",
                                             1000000,
                                             "",
-                                            fromFile ? promptFile.toString() : null),
+                                            fromFile ? promptFile.toString() : null,
+                                            null),
                                     registry,
                                     factory,
                                     store,

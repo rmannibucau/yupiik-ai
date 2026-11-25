@@ -154,19 +154,35 @@ public class SessionRuntimeFactory {
      * @param sessionId  the initial chat session id owned by the runtime
      */
     public SessionRuntime create(final String sessionKey, final String sessionId, final Path workdir) {
-        return create(sessionKey, sessionId, toolRegistry, workdir);
+        return create(sessionKey, sessionId, workdir, null);
+    }
+
+    /** Creates a runtime with a launch-time override of sandbox enforcement only. */
+    public SessionRuntime create(
+            final String sessionKey, final String sessionId, final Path workdir, final Boolean sandboxOverride) {
+        return create(sessionKey, sessionId, toolRegistry, workdir, sandboxOverride);
     }
 
     /** Creates a runtime with an isolated tool registry for this session's loop. */
     public SessionRuntime create(
             final String sessionKey, final String sessionId, final ToolRegistry sessionTools, final Path workdir) {
+        return create(sessionKey, sessionId, sessionTools, workdir, null);
+    }
+
+    /** Creates a runtime with isolated tools and a launch-time sandbox enforcement override. */
+    public SessionRuntime create(
+            final String sessionKey,
+            final String sessionId,
+            final ToolRegistry sessionTools,
+            final Path workdir,
+            final Boolean sandboxOverride) {
         Objects.requireNonNull(workdir, "workdir");
         if (!workdir.isAbsolute() || !workdir.equals(workdir.normalize())) {
             throw new IllegalArgumentException("workdir must be absolute and normalized: " + workdir);
         }
         final var permissions = new PermissionService(configuration, emitter, bashRulesRegistry, workdir);
         final var sandbox = new SessionSandbox(
-                configuration.sandbox(),
+                configuration.sandbox().withEnabled(sandboxOverride),
                 configuration.resolveWorkingDir(),
                 workdir,
                 permissions,
@@ -288,7 +304,12 @@ public class SessionRuntimeFactory {
 
     /** Convenience: the key and the initial session id are the same value. */
     public SessionRuntime create(final String sessionId, final Path workdir) {
-        return create(sessionId, sessionId, workdir);
+        return create(sessionId, workdir, null);
+    }
+
+    /** Convenience with a command-specific sandbox enforcement override. */
+    public SessionRuntime create(final String sessionId, final Path workdir, final Boolean sandboxOverride) {
+        return create(sessionId, sessionId, workdir, sandboxOverride);
     }
 
     /** Validate prompt budget/context before a frontend allocates a persistent session or publishes resources. */

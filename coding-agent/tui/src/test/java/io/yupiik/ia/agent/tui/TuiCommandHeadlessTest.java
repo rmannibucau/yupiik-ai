@@ -919,7 +919,7 @@ class TuiCommandHeadlessTest {
                 container,
                 deps,
                 new TuiCommand.TuiConf(
-                        sessionId, "", KeyBindingPreset.STANDARD, true, true, "dark", List.of("continue")));
+                        sessionId, "", KeyBindingPreset.STANDARD, true, true, "dark", List.of("continue"), null));
 
         uiThread = new Thread(command::run, "tui-headless-initial-resume");
         uiThread.setDaemon(true);
@@ -959,7 +959,8 @@ class TuiCommandHeadlessTest {
                         true,
                         true,
                         "dark",
-                        List.of("injected first", "injected second")));
+                        List.of("injected first", "injected second"),
+                        null));
 
         uiThread = new Thread(command::run, "tui-headless-initial-list");
         uiThread.setDaemon(true);
@@ -1002,7 +1003,8 @@ class TuiCommandHeadlessTest {
                         true,
                         true,
                         "dark",
-                        List.of("/mode build", "hello from the script")));
+                        List.of("/mode build", "hello from the script"),
+                        null));
 
         uiThread = new Thread(command::run, "tui-headless-initial-slash");
         uiThread.setDaemon(true);
@@ -1040,7 +1042,8 @@ class TuiCommandHeadlessTest {
                         true,
                         true,
                         "dark",
-                        initial ? List.of(original, "must-not-release-startup-queue") : List.of()));
+                        initial ? List.of(original, "must-not-release-startup-queue") : List.of(),
+                        null));
         uiThread = new Thread(command::run, "tui-routing-restore");
         uiThread.setDaemon(true);
         uiThread.start();
@@ -1121,7 +1124,8 @@ class TuiCommandHeadlessTest {
                         true,
                         true,
                         "dark",
-                        initial ? List.of(original, "accepted startup successor") : List.of()));
+                        initial ? List.of(original, "accepted startup successor") : List.of(),
+                        null));
         uiThread = new Thread(command::run, "tui-routing-accept");
         uiThread.setDaemon(true);
         uiThread.start();

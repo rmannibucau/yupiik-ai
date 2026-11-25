@@ -337,6 +337,7 @@ class CliSessionSwitchTest {
             assertTrue(f.hooks.stream()
                     .anyMatch(e -> e.eventContext().cwd().equals(turn.root().toString())));
         }
+
         // Even a late history supplier is bound to its submitted session, not the latest CLI alias.
         assertTrue(f.requests.get(1).history().get().stream().anyMatch(m -> "history-B".equals(m.content())));
         assertTrue(f.memory.readProject(f.alpha).contains("remembered-A"));
@@ -350,6 +351,18 @@ class CliSessionSwitchTest {
         assertEquals(3, f.rootsResolved, "resolve once per runtime, not again per turn or same-id resume");
         f.assertDisposed();
         assertTrue(f.output.toString().contains("session A - context file: " + f.store.path("A")));
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void launchSandboxOverrideSurvivesResumeAndNew(final boolean sandbox, final JsonMapper mapper) throws Exception {
+        final var f = new Fixture(home, mapper, configuration);
+        f.sandboxOverride = sandbox;
+        f.line("/resume B");
+        f.line("/new");
+        f.run();
+        assertEquals(List.of(sandbox, sandbox, sandbox), f.sandboxOverrides);
+        f.assertDisposed();
     }
 
     @Test
@@ -526,6 +539,8 @@ class CliSessionSwitchTest {
         private final Deque<Supplier<String>> input = new ArrayDeque<>();
         private final Deque<Supplier<String>> interactions = new ArrayDeque<>();
         private List<String> initialPrompts = List.of();
+        private Boolean sandboxOverride;
+        private final List<Boolean> sandboxOverrides = new ArrayList<>();
         private final StringBuilder output = new StringBuilder();
         private final FileSessionStore store;
         private final MemoryStore memory;
@@ -730,7 +745,8 @@ class CliSessionSwitchTest {
                         }
 
                         @Override
-                        public SessionRuntime create(final String id, final Path root) {
+                        public SessionRuntime create(final String id, final Path root, final Boolean sandbox) {
+                            sandboxOverrides.add(sandbox);
                             if (failCreate && !created.isEmpty()) {
                                 throw new IllegalStateException("create failed");
                             }
@@ -919,7 +935,8 @@ class CliSessionSwitchTest {
                                         "hidden",
                                         false,
                                         true,
-                                        initialPrompts),
+                                        initialPrompts,
+                                        sandboxOverride),
                                 lifecycle,
                                 store,
                                 factory,

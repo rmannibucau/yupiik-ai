@@ -75,4 +75,13 @@ public record SandboxConfiguration(
         SandboxEnvironmentConfiguration environment,
 
         @Property(documentation = "Trusted Linux Unix socket capabilities, outside filesystem/network confinement.")
-        SandboxUnixConfiguration unix) {}
+        SandboxUnixConfiguration unix) {
+    /** Applies a launch-time override without changing the trusted sandbox policy. */
+    public SandboxConfiguration withEnabled(final Boolean override) {
+        if (override == null || override == enabled) {
+            return this;
+        }
+        return new SandboxConfiguration(
+                override, helper, filesystem, network, trustedIntegrations, macOs, environment, unix);
+    }
+}

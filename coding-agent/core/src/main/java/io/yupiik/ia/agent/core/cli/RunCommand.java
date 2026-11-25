@@ -188,7 +188,12 @@ public class RunCommand implements Runnable {
                     defaultValue = "\"\"",
                     documentation =
                             "Private regular UTF-8 prompt file (maximum 8 MiB, no symlinks); exclusive with prompt.")
-            String promptFile) {}
+            String promptFile,
+
+            @Property(
+                    defaultValue = "null",
+                    documentation = "Enable or disable sandboxing for this session; defaults to yca.sandbox.enabled.")
+            Boolean sandbox) {}
 
     private String readPrompt() {
         final var inline = conf.prompt() != null && !conf.prompt().isBlank();
@@ -269,7 +274,7 @@ public class RunCommand implements Runnable {
         };
         final var shellSession = new ShellSession().sessionId(sessionId);
         final var workdir = sessionRuntimeFactory.resolveWorkdir(null, sessionId);
-        final var runtime = sessionRuntimeFactory.create(sessionId, workdir);
+        final var runtime = sessionRuntimeFactory.create(sessionId, workdir, conf.sandbox());
         shellSession.runtime(runtime);
         final var shellEnv = new ShellEnv(frontend, null, shellSession, null);
         shellRegistry.register(shellEnv);

@@ -252,7 +252,8 @@ class RunCommandTest {
                 runConf.resultRequiredFields(),
                 runConf.resultMaxBytes(),
                 runConf.resultCorrectionPrompt(),
-                file);
+                file,
+                runConf.sandbox());
     }
 
     private void verifyFusionFeedback(final boolean override, final boolean fromFile) {
@@ -321,10 +322,10 @@ class RunCommandTest {
             }
 
             @Override
-            public SessionRuntime create(final String sessionId, final Path workdir) {
+            public SessionRuntime create(final String sessionId, final Path workdir, final Boolean sandbox) {
                 final var runtime = runtimeFactory(
                                 loop, new PermissionService(configuration, (configuration).resolveWorkingDir()))
-                        .create(sessionId, workdir);
+                        .create(sessionId, workdir, sandbox);
                 active.set(runtime);
                 return runtime;
             }
@@ -413,7 +414,7 @@ class RunCommandTest {
             }
 
             @Override
-            public SessionRuntime create(final String sessionId, final Path workdir) {
+            public SessionRuntime create(final String sessionId, final Path workdir, final Boolean sandbox) {
                 return new SessionRuntime(
                         loop,
                         permissions,
@@ -523,6 +524,7 @@ class RunCommandTest {
                             "",
                             1000000,
                             defaultCorrectionPrompt(),
+                            null,
                             null),
                     shellRegistry,
                     runtimeFactory(agentLoop, new PermissionService(null, testWorkdir)),
@@ -647,7 +649,8 @@ class RunCommandTest {
                             "",
                             1000000,
                             defaultCorrectionPrompt(),
-                            fromFile ? file.toString() : null),
+                            fromFile ? file.toString() : null,
+                            null),
                     shellRegistry,
                     runtimeFactory(agentLoop, new PermissionService(null, testWorkdir)),
                     sessionStore(),
@@ -768,6 +771,7 @@ class RunCommandTest {
                                     "summary|failure",
                                     1000000,
                                     defaultCorrectionPrompt(),
+                                    null,
                                     null),
                             testRegistry(),
                             runtimeFactory(loop, new PermissionService(null, testWorkdir)),
@@ -811,6 +815,7 @@ class RunCommandTest {
                                     "summary|failure",
                                     1000000,
                                     defaultCorrectionPrompt(),
+                                    null,
                                     null),
                             testRegistry(),
                             runtimeFactory(loop, new PermissionService(null, testWorkdir)),
@@ -854,6 +859,7 @@ class RunCommandTest {
                             "summary|failure",
                             1000000,
                             defaultCorrectionPrompt(),
+                            null,
                             null),
                     registry,
                     runtimeFactory(loop, new PermissionService(null, testWorkdir)),
@@ -898,6 +904,7 @@ class RunCommandTest {
                             "",
                             1000000,
                             defaultCorrectionPrompt(),
+                            null,
                             null),
                     shellRegistry,
                     runtimeFactory(agentLoop, new PermissionService(null, testWorkdir)),
@@ -948,6 +955,7 @@ class RunCommandTest {
                             "",
                             1000000,
                             defaultCorrectionPrompt(),
+                            null,
                             null),
                     shellRegistry,
                     runtimeFactory(agentLoop, permissions),
@@ -998,6 +1006,7 @@ class RunCommandTest {
                             "",
                             1000000,
                             defaultCorrectionPrompt(),
+                            null,
                             null),
                     shellRegistry,
                     runtimeFactory(agentLoop, permissions),
@@ -1044,6 +1053,7 @@ class RunCommandTest {
                             "",
                             1000000,
                             defaultCorrectionPrompt(),
+                            null,
                             null),
                     shellRegistry,
                     runtimeFactory(agentLoop, permissions),
@@ -1091,6 +1101,7 @@ class RunCommandTest {
                             "",
                             1000000,
                             defaultCorrectionPrompt(),
+                            null,
                             null),
                     shellRegistry,
                     runtimeFactory(agentLoop, permissions),
@@ -1143,6 +1154,7 @@ class RunCommandTest {
                             "",
                             1000000,
                             defaultCorrectionPrompt(),
+                            null,
                             null),
                     shellRegistry,
                     runtimeFactory(agentLoop, new PermissionService(null, testWorkdir)),
@@ -1192,6 +1204,7 @@ class RunCommandTest {
                             "",
                             1000000,
                             defaultCorrectionPrompt(),
+                            null,
                             null),
                     shellRegistry,
                     runtimeFactory(agentLoop, new PermissionService(null, testWorkdir)),
@@ -1226,6 +1239,7 @@ class RunCommandTest {
                             "",
                             1000000,
                             defaultCorrectionPrompt(),
+                            null,
                             null),
                     shellRegistry,
                     runtimeFactory(stubAgentLoop(), new PermissionService(null, testWorkdir)),
@@ -1295,6 +1309,7 @@ class RunCommandTest {
                             "",
                             1000000,
                             defaultCorrectionPrompt(),
+                            null,
                             null),
                     shellRegistry,
                     runtimeFactory(agentLoop, new PermissionService(null, testWorkdir)),
@@ -1349,6 +1364,7 @@ class RunCommandTest {
                             "",
                             1000000,
                             defaultCorrectionPrompt(),
+                            null,
                             null),
                     shellRegistry,
                     runtimeFactory(agentLoop, new PermissionService(null, testWorkdir)),
@@ -1402,6 +1418,7 @@ class RunCommandTest {
                             "summary|failure",
                             1000000,
                             runConf.resultCorrectionPrompt(),
+                            null,
                             null),
                     testRegistry(),
                     runtimeFactory(loop, new PermissionService(null, testWorkdir)),

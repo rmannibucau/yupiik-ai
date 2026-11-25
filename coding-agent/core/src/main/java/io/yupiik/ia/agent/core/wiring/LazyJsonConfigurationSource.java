@@ -167,7 +167,7 @@ public class LazyJsonConfigurationSource implements ConfigurationSource {
 
     private static boolean isSandboxKey(final String key) {
         final var normalized = KEY_NORMALIZER.apply(key);
-        return "sandbox".equals(normalized) || normalized.startsWith("sandbox.");
+        return ("." + normalized + ".").contains(".sandbox.");
     }
 
     private static void rejectProjectSandbox(final Object value, final String prefix, final Path path) {

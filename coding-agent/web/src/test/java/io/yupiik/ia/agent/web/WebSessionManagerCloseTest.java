@@ -17,6 +17,7 @@ package io.yupiik.ia.agent.web;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.fusion.json.JsonMapper;
@@ -24,8 +25,10 @@ import io.yupiik.fusion.testing.Fusion;
 import io.yupiik.fusion.testing.FusionSupport;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.context.BackoffSleeper;
+import io.yupiik.ia.agent.core.mcp.McpManager;
 import io.yupiik.ia.agent.core.session.SessionStore;
 import io.yupiik.ia.agent.core.shell.SessionLifecycle;
+import io.yupiik.ia.agent.core.shell.SessionRuntime;
 import io.yupiik.ia.agent.core.shell.SessionRuntimeFactory;
 import io.yupiik.ia.agent.core.shell.ShellEnv;
 import io.yupiik.ia.agent.core.shell.ShellRegistry;
@@ -35,6 +38,9 @@ import io.yupiik.ia.agent.core.shell.slash.SlashRegistry;
 import io.yupiik.ia.agent.core.wiring.PrecisionDurationMarkerProvider;
 import java.nio.file.Path;
 import java.time.Clock;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
@@ -45,6 +51,9 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.NullSource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 /**
  * Verifies the web's "close tab" semantics ({@code session.cancelAll}) align on the TUI's
@@ -72,36 +81,45 @@ class WebSessionManagerCloseTest {
     private WebSessionManager manager;
     private SseBroker broker;
     private CancelCapturingTurnRunner turnRunner;
+    private final List<Boolean> sandboxOverrides = new ArrayList<>();
 
     @BeforeEach
     void setup(final JsonMapper mapper, @Fusion final CodingAgentConfiguration configuration) {
         this.mapper = mapper;
         final var sessionStore = new SessionStore() {};
-        final var runtimeFactory = new SessionRuntimeFactory(
-                null,
-                null,
-                null,
-                configuration,
-                null,
-                sessionStore,
-                null,
-                null,
-                null,
-                null,
-                null,
-                null,
-                null,
-                this.mapper,
-                null,
-                Clock.systemUTC(),
-                new PrecisionDurationMarkerProvider(),
-                new BackoffSleeper(),
-                null,
-                null,
-                null,
-                null,
-                null,
-                null);
+        final var runtimeFactory =
+                new SessionRuntimeFactory(
+                        null,
+                        null,
+                        null,
+                        configuration,
+                        null,
+                        sessionStore,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        this.mapper,
+                        null,
+                        Clock.systemUTC(),
+                        new PrecisionDurationMarkerProvider(),
+                        new BackoffSleeper(),
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null) {
+                    @Override
+                    public SessionRuntime create(
+                            final String sessionId, final Path workdir, final Boolean sandboxOverride) {
+                        sandboxOverrides.add(sandboxOverride);
+                        return super.create(sessionId, workdir, sandboxOverride);
+                    }
+                };
         this.turnRunner = new CancelCapturingTurnRunner();
         this.broker = new SseBroker(this.mapper);
         this.manager = new WebSessionManager(
@@ -128,6 +146,37 @@ class WebSessionManagerCloseTest {
                 broker.close();
             }
         }
+    }
+
+    @ParameterizedTest
+    @NullSource
+    @ValueSource(booleans = {false, true})
+    void commandOverrideReachesEveryAttachedAndReplacedRuntime(final Boolean sandbox) {
+        // Stop startup after command configuration is applied, before opening any HTTP server.
+        final var stopped = new IllegalStateException("stop before HTTP startup");
+        final var mcp = new McpManager(null, mapper, List.of(), null, null) {
+            @Override
+            public void start() {
+                throw stopped;
+            }
+        };
+        final var command = new WebCommand(
+                new WebCommand.WebConf("127.0.0.1", 0, false, true, false, List.of(), 1024, sandbox),
+                broker,
+                manager,
+                null,
+                null,
+                mapper,
+                null,
+                mcp);
+        assertEquals(stopped, assertThrows(IllegalStateException.class, command::run));
+
+        manager.attach("s1");
+        manager.attach("s1"); // idempotent attachment must not allocate another runtime
+        manager.replace("s1");
+        manager.attach("s2");
+
+        assertEquals(Arrays.asList(sandbox, sandbox, sandbox), sandboxOverrides);
     }
 
     /** Idle submit starts a turn; busy()=true then queues follow-ups behind it. */

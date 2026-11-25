@@ -602,7 +602,7 @@ class TuiCommandRenderTest {
                     }
 
                     @Override
-                    public SessionRuntime create(final String sessionId, final Path workdir) {
+                    public SessionRuntime create(final String sessionId, final Path workdir, final Boolean sandbox) {
                         return new SessionRuntime(
                                 sessionAgentLoopFactory == null ? agentLoop : sessionAgentLoopFactory.apply(sessionId),
                                 permissionService,

@@ -305,7 +305,12 @@ public class CliCommand implements Runnable {
                                     + "routing as interactive input. Values are comma separated; prefix with "
                                     + "sep=<char>, to split on another single character when a value itself contains "
                                     + "commas.")
-            List<String> initialPrompt) {
+            List<String> initialPrompt,
+
+            @Property(
+                    defaultValue = "null",
+                    documentation = "Enable or disable sandboxing for this session; defaults to yca.sandbox.enabled.")
+            Boolean sandbox) {
 
         /**
          * Convenience constructor for the common case: no prompt injected at startup.
@@ -341,7 +346,8 @@ public class CliCommand implements Runnable {
                     showToolOutput,
                     showUsage,
                     true,
-                    List.of());
+                    List.of(),
+                    null);
         }
     }
 
@@ -364,7 +370,7 @@ public class CliCommand implements Runnable {
         println(MarkdownColorizer.info("session " + sessionId + " - context file: " + contextPath));
         // the banner reads the session runtime (permission mode), wire it before printing
         final var workdir = sessionRuntimeFactory.resolveWorkdir(null, sessionId);
-        final var runtime = sessionRuntimeFactory.create(sessionId, workdir);
+        final var runtime = sessionRuntimeFactory.create(sessionId, workdir, conf.sandbox());
         session.runtime(runtime);
         frontend.bindCompression(runtime.compression());
         printBanner();
@@ -1078,7 +1084,7 @@ public class CliCommand implements Runnable {
             // Resume resolves eligible persisted metadata, otherwise the actual invocation default.
             final var root = sessionRuntimeFactory.resolveWorkdir(
                     fresh ? session.runtime().workdir() : null, fresh ? null : nextId);
-            final var next = sessionRuntimeFactory.create(nextId, root);
+            final var next = sessionRuntimeFactory.create(nextId, root, conf.sandbox());
             try {
                 sessionLifecycle.installGates(io.approvalGate(), io.feedbackGate(), next);
                 if (fresh) {

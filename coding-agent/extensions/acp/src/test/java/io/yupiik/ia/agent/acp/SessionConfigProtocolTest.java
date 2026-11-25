@@ -390,7 +390,11 @@ class SessionConfigProtocolTest {
 
                 @Override
                 public SessionRuntime create(
-                        final String key, final String id, final ToolRegistry registry, final Path workdir) {
+                        final String key,
+                        final String id,
+                        final ToolRegistry registry,
+                        final Path workdir,
+                        final Boolean sandboxOverride) {
                     final var runtime = support.runtime(ChatSettings.EMPTY, settings -> accept.test(settings), workdir);
                     runtimes.put(id, runtime);
                     return runtime;

@@ -247,6 +247,38 @@ class SessionRuntimeTest {
     }
 
     @Test
+    void launchSandboxOverrideIsSessionLocalAndRetainsPolicy() {
+        final var factory = factory();
+        final var inherited = factory.create("inherited", "inherited", storageHome);
+        try {
+            final var disabled = factory.create("disabled", "disabled", storageHome, false);
+            try {
+                final var enabled = factory.create("enabled", "enabled", null, storageHome, true);
+                try {
+                    assertTrue(inherited.sandbox().enabled());
+                    assertFalse(disabled.sandbox().enabled());
+                    assertTrue(enabled.sandbox().enabled());
+                    assertTrue(configuration.sandbox().enabled(), "launch overrides must not mutate global policy");
+                    final var blocked = URI.create("https://8.8.8.8");
+                    disabled.sandbox().requireNetwork(blocked);
+                    assertThrows(
+                            SecurityException.class, () -> enabled.sandbox().requireNetwork(blocked));
+                    enabled.sandbox().requireNetwork(URI.create("https://1.1.1.1"));
+                    disabled.permissions().setPermissionMode(PermissionMode.FULL_YOLO);
+                    disabled.permissions().setPermissionMode(PermissionMode.ASK);
+                    assertFalse(disabled.sandbox().enabled(), "mode changes must retain the launch-time override");
+                } finally {
+                    enabled.close();
+                }
+            } finally {
+                disabled.close();
+            }
+        } finally {
+            inherited.close();
+        }
+    }
+
+    @Test
     void routeApprovalsAreSessionOwnedAndClearedOnDisposal() {
         final var factory = factory();
         final var first = factory.create("k1", "s1", storageHome);
