@@ -125,6 +125,29 @@ class NotificationEndpointTest {
     }
 
     @Test
+    void sessionAcknowledgementsRoundTripAndRejectDelayedEvents() throws Exception {
+        try (final var container = ConfiguringContainer.of().start();
+                final var instance = container.lookup(NotificationEndpoint.class)) {
+            final var endpoint = instance.instance();
+            final var state = new UnreadNotifications();
+            try (final var listener = endpoint.listen(new ServiceConfiguration(0, TOKEN, true, null), state)) {
+                final var configuration = new ServiceConfiguration(listener.port(), TOKEN, true, null);
+                final var main = new Notice(1, "session", "Main", "approval_required", "main", 1);
+                final var btw = new Notice(1, "session", "Btw", "input_required", "btw", 2);
+                endpoint.publish(configuration, main);
+                endpoint.publish(configuration, btw);
+                endpoint.publish(configuration, new Notice(1, "session", "", "session_acknowledged", "main", 1));
+                assertEquals(List.of(btw), state.read());
+                endpoint.publish(configuration, main);
+                assertEquals(List.of(btw), state.read());
+                endpoint.publish(configuration, new Notice(1, "session", "", "session_acknowledged", "btw", 2));
+                endpoint.publish(configuration, btw);
+                assertTrue(state.read().isEmpty());
+            }
+        }
+    }
+
+    @Test
     void rejectsMalformedAndOversizedFramesWithoutStoppingListener() throws Exception {
         try (final var container = ConfiguringContainer.of().start();
                 final var instance = container.lookup(NotificationEndpoint.class)) {

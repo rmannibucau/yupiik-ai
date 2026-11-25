@@ -8,12 +8,14 @@ package io.yupiik.ia.agent.notifications;
 
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.locks.ReentrantLock;
 
 /** Bounded process-local unread activity. Stopping the companion intentionally forgets all reminders. */
 public final class UnreadNotifications {
+    private static final int MAX_RETAINED = 256;
     private static final Runnable NO_CHANGE_LISTENER = () -> {};
     private static final Comparator<Notice> NEWEST = Comparator.comparingLong(Notice::timestamp)
             .reversed()
@@ -21,6 +23,8 @@ public final class UnreadNotifications {
             .thenComparing(Notice::source);
     private final ReentrantLock lock = new ReentrantLock();
     private final Map<Key, Notice> notices = new HashMap<>();
+    // Oldest updated acknowledgement is evicted first; no unbounded session tombstones.
+    private final LinkedHashMap<String, Long> acknowledgedSessions = new LinkedHashMap<>();
     private volatile Runnable changeListener = NO_CHANGE_LISTENER;
 
     /** Set the desktop owner's thread-safe wakeup, or null to detach it before disposing the native tray. */
@@ -31,13 +35,31 @@ public final class UnreadNotifications {
     public void publish(final Notice notice) {
         lock.lock();
         try {
-            notices.merge(
-                    new Key(notice.session(), notice.source()),
-                    notice,
-                    (old, next) -> old.timestamp() > next.timestamp() ? old : next);
-            if (notices.size() > 256) {
-                final var oldest = notices.values().stream().max(NEWEST).orElseThrow();
-                notices.remove(new Key(oldest.session(), oldest.source()));
+            final var acknowledged = acknowledgedSessions.get(notice.session());
+            if ("session_acknowledged".equals(notice.type())) {
+                if (acknowledged != null && notice.timestamp() <= acknowledged) {
+                    return;
+                }
+                acknowledgedSessions.remove(notice.session());
+                acknowledgedSessions.put(notice.session(), notice.timestamp());
+                if (acknowledgedSessions.size() > MAX_RETAINED) {
+                    acknowledgedSessions.pollFirstEntry();
+                }
+                notices.values()
+                        .removeIf(current -> current.session().equals(notice.session())
+                                && current.timestamp() <= notice.timestamp());
+            } else {
+                if (acknowledged != null && notice.timestamp() <= acknowledged) {
+                    return;
+                }
+                notices.merge(
+                        new Key(notice.session(), notice.source()),
+                        notice,
+                        (old, next) -> old.timestamp() > next.timestamp() ? old : next);
+                if (notices.size() > MAX_RETAINED) {
+                    final var oldest = notices.values().stream().max(NEWEST).orElseThrow();
+                    notices.remove(new Key(oldest.session(), oldest.source()));
+                }
             }
         } finally {
             lock.unlock();

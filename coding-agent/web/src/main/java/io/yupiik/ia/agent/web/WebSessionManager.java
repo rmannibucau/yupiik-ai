@@ -252,8 +252,10 @@ public class WebSessionManager implements AutoCloseable {
             return CompletableFuture.failedFuture(new IllegalArgumentException("session not attached: " + sessionId));
         }
         if (prompt == null) {
+            acknowledgeInteraction(sessionId);
             return submitPrompt(session, null, agentName);
         }
+        acknowledgeInteraction(sessionId);
         return ShellInputRouting.resolve(prompt, slashRegistry.registry(), session.env.io())
                 .thenCompose(decision -> switch (decision) {
                     case COMMAND -> slash(session, prompt.strip());
@@ -269,6 +271,7 @@ public class WebSessionManager implements AutoCloseable {
         if (session == null) {
             return CompletableFuture.failedFuture(new IllegalArgumentException("session not attached: " + sessionId));
         }
+        acknowledgeInteraction(sessionId);
         return ShellInputRouting.resolve(text, slashRegistry.registry(), session.env.io())
                 .thenCompose(decision -> switch (decision) {
                     case COMMAND -> slash(session, text.strip()).thenApply(ignored -> "accepted");
@@ -520,6 +523,7 @@ public class WebSessionManager implements AutoCloseable {
         if (session == null) {
             return CompletableFuture.failedFuture(new IllegalArgumentException("session not attached: " + sessionId));
         }
+        acknowledgeInteraction(sessionId);
         return slash(session, text);
     }
 
@@ -560,13 +564,28 @@ public class WebSessionManager implements AutoCloseable {
         if (session == null || session.io == null) {
             return false;
         }
-        if (!session.io.resolve(id, result)) {
+        session.io.pendingLock.lock();
+        try {
+            final var pending = session.io.pendingRequests.get(id);
+            if (pending != null && !pending.future().isDone()) {
+                // Keep validation, acknowledgement and completion atomic with cancellation and
+                // other answers. Completing the future can immediately publish the next request.
+                acknowledgeInteraction(sessionId);
+                return session.io.resolve(id, result);
+            }
             // already resolved/completed (e.g. the turn was cancelled or the request timed out):
             // not a hard error, but log it so a spurious late resolve is diagnosable.
             LOGGER.fine(() -> "resolve for unknown pending request " + id + " on session " + sessionId);
             return false;
+        } finally {
+            session.io.pendingLock.unlock();
         }
-        return true;
+    }
+
+    private void acknowledgeInteraction(final String sessionId) {
+        if (notifications != null) {
+            notifications.onSessionInteraction(sessionId);
+        }
     }
 
     /**
@@ -1013,20 +1032,25 @@ public class WebSessionManager implements AutoCloseable {
                     }
                 });
                 broker.pushRpc(session.sessionId(), payload);
+                // Stamp the pending notification before an answer can acknowledge it.
+                if (notifications != null && !future.isDone() && !cancelled.getAsBoolean()) {
+                    final var title = sessionStore == null ? "" : sessionStore.summary(session.sessionId());
+                    final var source = owner == 0 ? "main" : "btw";
+                    final var params = (Map<?, ?>) payload.get("params");
+                    if ("session.approval".equals(payload.get("method"))) {
+                        notifications.onApprovalRequired(
+                                session.sessionId(), title, (String) params.get("tool"), source);
+                    } else {
+                        final var questions = params.get("questions");
+                        notifications.onInputRequired(
+                                session.sessionId(),
+                                title,
+                                questions instanceof List<?> list ? list.size() : 1,
+                                source);
+                    }
+                }
             } finally {
                 pendingLock.unlock();
-            }
-            if (notifications != null && !future.isDone() && !cancelled.getAsBoolean()) {
-                final var title = sessionStore == null ? "" : sessionStore.summary(session.sessionId());
-                final var source = owner == 0 ? "main" : "btw";
-                final var params = (Map<?, ?>) payload.get("params");
-                if ("session.approval".equals(payload.get("method"))) {
-                    notifications.onApprovalRequired(session.sessionId(), title, (String) params.get("tool"), source);
-                } else {
-                    final var questions = params.get("questions");
-                    notifications.onInputRequired(
-                            session.sessionId(), title, questions instanceof List<?> list ? list.size() : 1, source);
-                }
             }
             return future;
         }

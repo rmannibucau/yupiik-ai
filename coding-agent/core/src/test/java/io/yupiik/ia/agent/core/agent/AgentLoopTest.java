@@ -56,6 +56,7 @@ import io.yupiik.ia.agent.core.llm.PauseEvent;
 import io.yupiik.ia.agent.core.llm.Tool;
 import io.yupiik.ia.agent.core.llm.ToolCall;
 import io.yupiik.ia.agent.core.memory.MemoryStore;
+import io.yupiik.ia.agent.core.notifications.NotificationService;
 import io.yupiik.ia.agent.core.permissions.PermissionService;
 import io.yupiik.ia.agent.core.runtime.Cancellations;
 import io.yupiik.ia.agent.core.runtime.StatusReporter;
@@ -154,6 +155,46 @@ class AgentLoopTest {
     private Consumer<AgentEvent> eventObserver;
     private Consumer<Object> emittedObserver;
     private Consumer<ChatSettings> usageAttachmentObserver;
+    private NotificationService notifications;
+
+    @Test
+    void userTurnAcknowledgesSessionBeforePublishingTurnEnd() {
+        final var calls = new ArrayList<String>();
+        notifications = new NotificationService(config(1_000_000), null) {
+            @Override
+            public void onSessionInteraction(final String sessionId) {
+                calls.add("ack:" + sessionId);
+            }
+
+            @Override
+            public void onTurnEnd(
+                    final String sessionId,
+                    final String title,
+                    final String model,
+                    final String provider,
+                    final boolean success,
+                    final String body) {
+                calls.add("turn_end:" + sessionId);
+            }
+        };
+        final var replies = new ArrayDeque<>(List.of(new ScriptedReply("done", "stop", false)));
+        final var loop = loop(
+                chatClient(replies, new ArrayList<>()),
+                null,
+                config(1_000_000),
+                noContextManager(),
+                noSessionStore(),
+                null,
+                registryOf(),
+                null,
+                null);
+        try {
+            assertEquals("done", loop.run("check", null, "session", null, () -> false));
+        } finally {
+            loop.close();
+        }
+        assertEquals(List.of("ack:session", "turn_end:session"), calls);
+    }
 
     @Test
     void cancellationWhileModelSwitchingHookIsBlockedPreventsCommitButNotAnAdmittedSwitch() throws Exception {
@@ -8047,7 +8088,7 @@ class AgentLoopTest {
                             }
                         },
                 null,
-                null,
+                notifications,
                 null,
                 null,
                 null,

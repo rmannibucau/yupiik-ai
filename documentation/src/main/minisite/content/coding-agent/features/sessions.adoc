@@ -163,9 +163,14 @@ The payload is passed only through environment variables, for both built-in and 
 * `YCA_NOTIFICATION_PROVIDER`
 * `YCA_NOTIFICATION_SUCCESS` (`true` or `false` for turn end; empty for pending interactions, which have no outcome yet)
 * `YCA_NOTIFICATION_BODY`
-* `YCA_NOTIFICATION_TYPE` (`turn_end`, `input_required` or `approval_required`)
+* `YCA_NOTIFICATION_TYPE` (`turn_end`, `input_required`, `approval_required` or `session_acknowledged`)
+* `YCA_NOTIFICATION_TIMESTAMP` (event time in epoch milliseconds, captured before asynchronous delivery; successive events in one agent process are strictly ordered)
 * `YCA_NOTIFICATION_TOOL` (interaction tool label for approvals, empty for feedback; absent for turn end)
 * `YCA_NOTIFICATION_SOURCE` (`main` or `btw` for interactions; absent for turn end)
+
+Custom commands also receive `session_acknowledged` when the user interacts with a session, with its session identifier and empty content/outcome fields.
+This control event clears existing reminders rather than displaying a new notification; custom commands that only display popups should ignore it.
+The built-in OS notification commands do not receive acknowledgement events.
 
 Interaction model and provider environment variables are empty; turn-end payloads retain their existing values.
 For the web UI these are OS notifications on the *server host*, not browser push notifications.

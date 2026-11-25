@@ -193,6 +193,7 @@ class NotificationsCliTest {
                                 "YCA_NOTIFICATION_TITLE", "Test title",
                                 "YCA_NOTIFICATION_TYPE", "approval_required",
                                 "YCA_NOTIFICATION_SOURCE", "btw",
+                                "YCA_NOTIFICATION_TIMESTAMP", "1234",
                                 "YCA_NOTIFICATION_BODY", "This must not be stored"),
                         "publish",
                         "--notification-service-port",
@@ -206,9 +207,43 @@ class NotificationsCliTest {
                 assertEquals("Test title", notice.title());
                 assertEquals("approval_required", notice.type());
                 assertEquals("btw", notice.source());
-                assertTrue(notice.timestamp() > 0);
+                assertEquals(1234, notice.timestamp());
                 assertFalse(mapper.instance().toString(notice).contains("This must not be stored"));
                 assertFalse(result.output().contains(TOKEN), result.output());
+            }
+        }
+    }
+
+    @Test
+    void acknowledgementEnvironmentClearsSessionAndRejectsDelayedEvents(@TempDir final Path directory)
+            throws Exception {
+        try (final var container = ConfiguringContainer.of().start();
+                final var mapper = container.lookup(JsonMapper.class)) {
+            final var unread = new UnreadNotifications();
+            final var endpoint = new NotificationEndpoint(mapper.instance());
+            unread.publish(new Notice(1, "session", "Main", "turn_end", "main", 1));
+            unread.publish(new Notice(1, "session", "Btw", "input_required", "btw", 2));
+            final var newer = new Notice(1, "newer", "Newer", "turn_end", "main", 3);
+            unread.publish(newer);
+            try (final var listener = endpoint.listen(new ServiceConfiguration(0, TOKEN, true, null), unread)) {
+                for (final var type : List.of("session_acknowledged", "approval_required")) {
+                    final var result = run(
+                            directory,
+                            Map.of(
+                                    "NOTIFICATION_SERVICE_TOKEN",
+                                    TOKEN,
+                                    "YCA_NOTIFICATION_SESSION",
+                                    "session",
+                                    "YCA_NOTIFICATION_TYPE",
+                                    type,
+                                    "YCA_NOTIFICATION_TIMESTAMP",
+                                    "2"),
+                            "publish",
+                            "--notification-service-port",
+                            Integer.toString(listener.port()));
+                    assertEquals(0, result.exitCode(), result.output());
+                    assertEquals(List.of(newer), unread.read());
+                }
             }
         }
     }
@@ -232,6 +267,7 @@ class NotificationsCliTest {
                 assertEquals("", notices.getFirst().title());
                 assertEquals("turn_end", notices.getFirst().type());
                 assertEquals("main", notices.getFirst().source());
+                assertTrue(notices.getFirst().timestamp() > 0);
             }
         }
     }

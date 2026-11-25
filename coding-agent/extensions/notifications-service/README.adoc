@@ -8,7 +8,20 @@ Both commands optionally accept `--notification-service-token-file /absolute/pat
 Do not set both sources to nonblank values; restrict the file to your user.
 This keeps credentials off argv and lets YCA's JSON command invoke the native binary directly without an environment wrapper; see the guide for the JSON example.
 
-Build the runnable JAR from the repository root with JDK 25 and Maven:
+== Session acknowledgements and event ordering
+
+The publisher accepts `turn_end`, `input_required`, `approval_required` and `session_acknowledged` in `YCA_NOTIFICATION_TYPE`.
+`YCA_NOTIFICATION_TIMESTAMP` (configuration key `yca.notification.timestamp`, CLI option `--yca-notification-timestamp`) optionally supplies a nonnegative epoch-millisecond event timestamp; when absent, the publisher uses its current clock.
+YCA supplies this timestamp for all events so delivery order does not replace event order.
+A `session_acknowledged` event is not displayed: it clears reminders from all sources for that session whose timestamps are less than or equal to the acknowledgement timestamp, preserving newer activity and other sessions.
+The service retains per-session acknowledgement high-water marks to reject delayed events at or below the acknowledged timestamp, even when the acknowledgement arrives before the reminders.
+Both unread reminders and session high-water marks are bounded to 256 entries; when a new session exceeds the high-water-mark limit, the least recently advanced acknowledgement is forgotten and delayed events for that evicted session can appear again.
+All state is in memory and is forgotten on restart.
+Tray *Dismiss* and *Acknowledge unread* still remove only the exact displayed versions, without creating a session high-water mark; *Close* preserves the reminder.
+
+== Build the runnable JAR
+
+Build from the repository root with JDK 25 and Maven:
 
 [source,shell]
 ----

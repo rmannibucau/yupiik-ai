@@ -14,7 +14,8 @@ import java.util.regex.Pattern;
 /** Versioned, deliberately minimal local reminder. Never contains tool arguments or assistant reply excerpts. */
 @JsonModel
 public record Notice(int version, String session, String title, String type, String source, long timestamp) {
-    private static final Set<String> TYPES = Set.of("turn_end", "input_required", "approval_required");
+    private static final Set<String> TYPES =
+            Set.of("turn_end", "input_required", "approval_required", "session_acknowledged");
     private static final Pattern CONTROLS = Pattern.compile("[\\p{Cntrl}\\s]+");
 
     public Notice {
@@ -39,7 +40,7 @@ public record Notice(int version, String session, String title, String type, Str
                 label(configuration.title()),
                 configuration.type(),
                 configuration.source(),
-                clock.millis());
+                configuration.timestamp() == null ? clock.millis() : configuration.timestamp());
     }
 
     private static String label(final String text) {

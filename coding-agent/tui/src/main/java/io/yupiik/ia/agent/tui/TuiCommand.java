@@ -1575,6 +1575,7 @@ public class TuiCommand implements Runnable {
             }
         }
         prompt.answered().set(true);
+        acknowledgeInteraction(state);
         prompt.latch.countDown();
         state.feedbackPrompt = state.feedbackQueue.pollFirst();
     }
@@ -2064,10 +2065,12 @@ public class TuiCommand implements Runnable {
         if (!state.approvals.isEmpty()) {
             final var approval = state.approvals.peek();
             if (key.isConfirm()) {
+                acknowledgeInteraction(state);
                 final var ok = approval.perform();
                 state.approvals.poll();
                 notify(state, ok ? "approved" : "denied");
             } else if (key.isCancel() || key.isKey(KeyCode.ESCAPE)) {
+                acknowledgeInteraction(state);
                 approval.perform();
                 state.approvals.poll();
                 notify(state, "denied");
@@ -2385,6 +2388,7 @@ public class TuiCommand implements Runnable {
                 final var answer = state.input.text();
                 state.input.clear();
                 state.pendingLine = null;
+                acknowledgeInteraction(state);
                 pending.complete(Optional.of(answer));
                 return true;
             }
@@ -2538,6 +2542,7 @@ public class TuiCommand implements Runnable {
     }
 
     private void submit(final String text, final TuiRunner runner, final UiState state, final boolean pinToBottom) {
+        acknowledgeInteraction(state);
         dismissCompletion(state);
         state.inputRoutingPending = true;
         final var routing = ShellInputRouting.resolve(text, slashRegistry, io(runner, state))
@@ -2582,6 +2587,12 @@ public class TuiCommand implements Runnable {
                 runLater(state, apply);
             }
         });
+    }
+
+    private void acknowledgeInteraction(final UiState state) {
+        if (notifications != null) {
+            notifications.onSessionInteraction(state.sessionId);
+        }
     }
 
     /** Already accepted input: queued prompts must never go through slash classification again. */

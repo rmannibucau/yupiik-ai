@@ -25,11 +25,13 @@ import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 import java.util.regex.Pattern;
@@ -69,6 +71,9 @@ public class NotificationService {
     public static final String ENV_TYPE = "YCA_NOTIFICATION_TYPE";
     public static final String ENV_TOOL = "YCA_NOTIFICATION_TOOL";
     public static final String ENV_SOURCE = "YCA_NOTIFICATION_SOURCE";
+    public static final String ENV_TIMESTAMP = "YCA_NOTIFICATION_TIMESTAMP";
+
+    private final AtomicLong eventTimestamp = new AtomicLong();
 
     private final boolean enabled;
     private final NotificationsOnConfiguration on;
@@ -172,6 +177,28 @@ public class NotificationService {
                 "Approval required" + (label.isEmpty() ? "" : " for " + label) + ".\nReturn to YCA to review.");
     }
 
+    /** Clears existing session reminders in custom sinks, without creating a desktop popup. */
+    public void onSessionInteraction(final String sessionId) {
+        if (!enabled || !custom || sessionId == null || sessionId.isBlank()) {
+            return;
+        }
+        deliver(
+                sessionId,
+                "",
+                "",
+                "",
+                Map.of(
+                        ENV_SESSION, sessionId,
+                        ENV_TYPE, "session_acknowledged",
+                        ENV_SOURCE, "main",
+                        ENV_TITLE, "",
+                        ENV_BODY, "",
+                        ENV_MODEL, "",
+                        ENV_PROVIDER, "",
+                        ENV_SUCCESS, "",
+                        ENV_TOOL, ""));
+    }
+
     private void interaction(
             final String sessionId,
             final String sessionTitle,
@@ -223,11 +250,18 @@ public class NotificationService {
             final String body,
             final String icon,
             final Map<String, String> env) {
+        // Stamp before scheduling: publisher processes can start or arrive out of order.
+        // Keep successive events distinct even when the wall clock has not ticked yet.
+        final var timestamp =
+                eventTimestamp.updateAndGet(previous -> Math.max(System.currentTimeMillis(), previous + 1));
+        final var stamped = new HashMap<>(env);
+        stamped.put(ENV_TIMESTAMP, Long.toString(timestamp));
+        final var payload = Map.copyOf(stamped);
         try {
             if (executor == null) {
-                runAndSwallow(() -> deliverNow(sessionId, title, body, icon, env));
+                runAndSwallow(() -> deliverNow(sessionId, title, body, icon, payload));
             } else {
-                executor.execute(() -> runAndSwallow(() -> deliverNow(sessionId, title, body, icon, env)));
+                executor.execute(() -> runAndSwallow(() -> deliverNow(sessionId, title, body, icon, payload)));
             }
         } catch (final Throwable e) {
             LOGGER.log(Level.FINE, "notification could not be scheduled", e);

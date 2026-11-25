@@ -223,6 +223,9 @@ Choose *Acknowledge unread* to clear the remaining displayed synthetic reminders
 This does not answer a real YCA prompt.
 Run these menu/dialog checks on each target desktop, both on the JVM and with its native executable; fake-tray unit tests do not validate native backend behavior.
 For an end-to-end check after restarting YCA, cause a real tool approval or input request, then answer it in YCA itself.
+The session's existing reminders should disappear automatically; sending another message also acknowledges that session, without clearing other sessions.
+The icon stops blinking when no reminders remain, and a new notification makes the session pending again.
+Acknowledgements use the event timestamp captured in YCA, so delayed delivery cannot clear a newer reminder or restore an older one while that session's acknowledgement is retained in the companion's bounded memory.
 
 To check failure reporting, stop the service and repeat the publication:
 

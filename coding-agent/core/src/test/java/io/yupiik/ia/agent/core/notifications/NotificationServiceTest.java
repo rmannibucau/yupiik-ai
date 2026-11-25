@@ -44,6 +44,69 @@ import org.junit.jupiter.api.io.TempDir;
 class NotificationServiceTest {
 
     @Test
+    void sessionInteractionAcknowledgesCustomSinkWithOrderedEventTimestamps() {
+        final var deliveries = new ArrayList<Delivery>();
+        final var service = new NotificationService(
+                TestConfigs.codingAgent(
+                        Map.of("yca.notifications.enabled", "true", "yca.notifications.command", "custom,--flag")),
+                executor(),
+                (argv, env) -> {
+                    deliveries.add(new Delivery(argv, env));
+                    return new FakeProcess();
+                });
+        service.onInputRequired("s1", "title", 1, "btw");
+        service.onSessionInteraction("s1");
+        service.onTurnEnd("s1", "title", "model", "provider", true, "reply");
+        assertEquals(3, deliveries.size());
+        final var ack = deliveries.get(1);
+        assertEquals(List.of("custom", "--flag"), ack.argv());
+        assertEquals("session_acknowledged", ack.env().get(NotificationService.ENV_TYPE));
+        assertEquals("s1", ack.env().get(NotificationService.ENV_SESSION));
+        assertEquals("", ack.env().get(NotificationService.ENV_BODY));
+        assertEquals("", ack.env().get(NotificationService.ENV_SUCCESS));
+        final var before = Long.parseLong(deliveries.getFirst().env().get(NotificationService.ENV_TIMESTAMP));
+        final var acknowledged = Long.parseLong(ack.env().get(NotificationService.ENV_TIMESTAMP));
+        final var after = Long.parseLong(deliveries.getLast().env().get(NotificationService.ENV_TIMESTAMP));
+        assertTrue(before < acknowledged);
+        assertTrue(acknowledged < after);
+        service.onSessionInteraction(null);
+        service.onSessionInteraction(" ");
+        assertEquals(3, deliveries.size());
+    }
+
+    @Test
+    void sessionAcknowledgementRespectsMasterSwitchButNotEventFiltersAndDoesNotPopup() {
+        final var skipped = new ArrayList<Delivery>();
+        for (final var properties : List.of(
+                Map.of("yca.notifications.enabled", "false", "yca.notifications.command", "custom"),
+                Map.of("yca.notifications.enabled", "true"))) {
+            final var service =
+                    new NotificationService(TestConfigs.codingAgent(properties), executor(), (argv, env) -> {
+                        skipped.add(new Delivery(argv, env));
+                        return new FakeProcess();
+                    });
+            service.onSessionInteraction("s1");
+        }
+        assertTrue(skipped.isEmpty(), "Acknowledgements must not create popups or run while disabled");
+        final var deliveries = new ArrayList<Delivery>();
+        final var service = new NotificationService(
+                TestConfigs.codingAgent(Map.of(
+                        "yca.notifications.enabled", "true",
+                        "yca.notifications.command", "custom",
+                        "yca.notifications.on.event.turnEnd", "false",
+                        "yca.notifications.on.event.approval", "false",
+                        "yca.notifications.on.tools.ask_user", "false",
+                        "yca.notifications.on.tools.btw", "false")),
+                executor(),
+                (argv, env) -> {
+                    deliveries.add(new Delivery(argv, env));
+                    return new FakeProcess();
+                });
+        service.onSessionInteraction("s1");
+        assertEquals(1, deliveries.size());
+    }
+
+    @Test
     void sanitizesAsciiControlsWithoutBroadeningUnicodeWhitespaceAndKeepsLabelLimits() {
         final var deliveries = new ArrayList<Delivery>();
         final var service = new NotificationService(

@@ -37,6 +37,7 @@ import io.yupiik.ia.agent.core.shell.ShellEnv;
 import io.yupiik.ia.agent.core.shell.ShellRegistry;
 import io.yupiik.ia.agent.core.shell.TurnRunner;
 import io.yupiik.ia.agent.core.shell.btw.BtwAnswerer;
+import io.yupiik.ia.agent.core.shell.btw.BtwSlashCommands;
 import io.yupiik.ia.agent.core.shell.slash.SlashRegistry;
 import io.yupiik.ia.agent.core.tools.ToolRegistry;
 import io.yupiik.ia.agent.core.wiring.PrecisionDurationMarkerProvider;
@@ -79,6 +80,7 @@ class WebSessionManagerFeedbackGateTest {
     private FakeSseBroker broker;
     private FakeBtwAnswerer answerer;
     private final BlockingQueue<String> alerts = new LinkedBlockingQueue<>();
+    private final BlockingQueue<String> acknowledgements = new LinkedBlockingQueue<>();
 
     @BeforeEach
     void setup(final JsonMapper mapper) {
@@ -121,7 +123,7 @@ class WebSessionManagerFeedbackGateTest {
         this.manager = new WebSessionManager(
                 runtimeFactory,
                 new NoopShellRegistry(),
-                new WebSlashCommands(new SlashRegistry() {}, null, sessionStore),
+                new WebSlashCommands(new SlashRegistry(List.of(new BtwSlashCommands(answerer))), null, sessionStore),
                 new TurnRunner() {},
                 sessionStore,
                 new SessionLifecycle(sessionStore),
@@ -131,6 +133,11 @@ class WebSessionManagerFeedbackGateTest {
                 null,
                 null,
                 new NotificationService(null, null) {
+                    @Override
+                    public void onSessionInteraction(final String sessionId) {
+                        acknowledgements.add(sessionId);
+                    }
+
                     @Override
                     public void onInputRequired(
                             final String session, final String title, final int count, final String source) {
@@ -156,6 +163,56 @@ class WebSessionManagerFeedbackGateTest {
                 broker.close();
             }
         }
+    }
+
+    @Test
+    void answersAcknowledgeBeforeReleasingContinuationsAndInvalidIdsStaySilent() throws Exception {
+        final var session = manager.attach("s1");
+        final var confirmation = session.env().io().confirm("first question");
+        assertEquals("s1:input:1:main", alerts.poll(5, TimeUnit.SECONDS));
+        final var replay = new ConcurrentLinkedQueue<String>();
+        manager.subscribe("s1", bytes -> replay.add(new String(bytes, StandardCharsets.UTF_8)));
+        final var rpc = replay.stream()
+                .filter(frame -> frame.contains("session.question"))
+                .findFirst()
+                .orElseThrow();
+        final var data = rpc.substring(rpc.indexOf("data:") + 5).strip();
+        final var id = String.valueOf(mapper.fromString(Map.class, data).get("id"));
+
+        assertFalse(manager.resolve("missing", id, true));
+        assertFalse(manager.resolve("s1", "invalid", true));
+        assertTrue(acknowledgements.isEmpty());
+        final var next = confirmation.thenCompose(accepted -> {
+            assertTrue(accepted);
+            assertEquals("s1", acknowledgements.poll(), "acknowledge before running answer continuations");
+            return session.env().io().confirm("next question");
+        });
+        assertTrue(manager.resolve("s1", id, true));
+        assertEquals("s1:input:1:main", alerts.poll(5, TimeUnit.SECONDS));
+        assertFalse(manager.resolve("s1", id, false));
+        assertTrue(acknowledgements.isEmpty(), "duplicate answers must not clear the next notification");
+        manager.cancel("s1");
+        assertFalse(next.toCompletableFuture().get(5, TimeUnit.SECONDS));
+        assertFalse(manager.resolve("s1", id, true));
+        assertTrue(acknowledgements.isEmpty(), "cancellation and late answers are not user answers");
+    }
+
+    @Test
+    void busyPromptAndBtwSubmissionAcknowledgeImmediately() throws Exception {
+        manager.attach("s1").env().session().busy(true);
+        manager.attach("s2");
+        assertTrue(manager.submit("s1", "queued", null).get(5, TimeUnit.SECONDS));
+        assertEquals("s1", acknowledgements.poll());
+        assertEquals("accepted", manager.input("s1", "another queued").get(5, TimeUnit.SECONDS));
+        assertEquals("s1", acknowledgements.poll());
+        assertEquals(2, manager.queuedPromptCount("s1"));
+        assertTrue(manager.slash("s1", "/btw side question").get(5, TimeUnit.SECONDS));
+        assertEquals("s1", acknowledgements.poll());
+        assertEquals("accepted", manager.input("s1", "/btw replacement").get(5, TimeUnit.SECONDS));
+        assertEquals("s1", acknowledgements.poll());
+        assertEquals(2, manager.queuedPromptCount("s1"));
+        assertFalse(manager.btwState("s1").cancelled().get());
+        assertTrue(acknowledgements.isEmpty());
     }
 
     @Test

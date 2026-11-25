@@ -13,6 +13,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import java.util.List;
 import java.util.concurrent.Callable;
 import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.IntStream;
 import org.junit.jupiter.api.Test;
 
@@ -89,6 +90,73 @@ class UnreadNotificationsTest {
             }
         }
         assertEquals(12, state.read().size());
+    }
+
+    @Test
+    void sessionAcknowledgementClearsAllSourcesUpToTimestampAndWakesListener() {
+        final var state = new UnreadNotifications();
+        state.publish(notice("one", "main", 1));
+        state.publish(notice("one", "btw", 2));
+        final var other = notice("two", "main", 1);
+        state.publish(other);
+        final var changes = new AtomicInteger();
+        state.onChange(changes::incrementAndGet);
+        state.publish(acknowledgement("one", 2));
+        assertEquals(List.of(other), state.read());
+        assertEquals(1, changes.get());
+        state.publish(notice("one", "main", 1));
+        state.publish(notice("one", "btw", 2));
+        assertEquals(List.of(other), state.read());
+        assertEquals(1, changes.get());
+        state.publish(notice("one", "main", 3));
+        assertEquals(List.of(notice("one", "main", 3), other), state.read());
+        assertEquals(2, changes.get());
+    }
+
+    @Test
+    void acknowledgementsCanArriveBeforeNotificationsAndNeverRegress() {
+        final var state = new UnreadNotifications();
+        state.publish(acknowledgement("one", 2));
+        state.publish(acknowledgement("one", 0));
+        state.publish(acknowledgement("one", 2));
+        state.publish(notice("one", "main", 1));
+        state.publish(notice("one", "btw", 2));
+        assertTrue(state.read().isEmpty());
+        state.publish(notice("one", "main", 3));
+        state.publish(notice("one", "btw", 4));
+        state.publish(acknowledgement("one", 3));
+        assertEquals(List.of(notice("one", "btw", 4)), state.read());
+        state.publish(acknowledgement("one", 4));
+        assertTrue(state.read().isEmpty());
+    }
+
+    @Test
+    void trayDismissDoesNotCreateASessionHighWaterMark() {
+        final var state = new UnreadNotifications();
+        final var selected = notice("one", "main", 2);
+        state.publish(selected);
+        state.acknowledge(List.of(selected));
+        state.publish(notice("one", "btw", 1));
+        assertEquals(List.of(notice("one", "btw", 1)), state.read());
+    }
+
+    @Test
+    void boundsSessionHighWaterMarksAndKeepsRecentlyAdvancedAcknowledgements() {
+        final var state = new UnreadNotifications();
+        for (int i = 0; i < 256; i++) {
+            state.publish(acknowledgement("session-" + i, 1));
+        }
+        state.publish(acknowledgement("session-0", 2));
+        state.publish(acknowledgement("session-256", 1));
+        state.publish(notice("session-0", "main", 2));
+        state.publish(notice("session-1", "main", 1));
+        state.publish(notice("session-2", "btw", 1));
+        state.publish(notice("session-256", "main", 1));
+        assertEquals(List.of(notice("session-1", "main", 1)), state.read());
+    }
+
+    private Notice acknowledgement(final String session, final long timestamp) {
+        return new Notice(1, session, "", "session_acknowledged", "main", timestamp);
     }
 
     private Notice notice(final String session, final String source, final int offset) {

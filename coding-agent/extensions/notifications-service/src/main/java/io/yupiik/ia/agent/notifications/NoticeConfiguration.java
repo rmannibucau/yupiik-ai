@@ -21,4 +21,9 @@ public record NoticeConfiguration(
         String type,
 
         @Property(defaultValue = "\"main\"", documentation = "Notification event source.")
-        String source) {}
+        String source,
+
+        @Property(
+                defaultValue = "null",
+                documentation = "Event timestamp in epoch milliseconds; defaults to the publisher's clock.")
+        Long timestamp) {}

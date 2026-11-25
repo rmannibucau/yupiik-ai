@@ -201,7 +201,13 @@ class TuiCommandRenderTest {
     private Thread uiThread;
     private Duration tickRate = TICK_RATE;
     private final BlockingQueue<String> interactionAlerts = new LinkedBlockingQueue<>();
+    private final BlockingQueue<String> interactionAcknowledgements = new LinkedBlockingQueue<>();
     private final NotificationService notifications = new NotificationService(null, null) {
+        @Override
+        public void onSessionInteraction(final String sessionId) {
+            interactionAcknowledgements.add(sessionId);
+        }
+
         @Override
         public void onInputRequired(final String session, final String title, final int count, final String source) {
             interactionAlerts.add(session + ":input:" + count + ":" + source);
@@ -6777,6 +6783,82 @@ class TuiCommandRenderTest {
                 Thread.getAllStackTraces().keySet().stream()
                         .noneMatch(t -> t.getName().equals("yca-tui-mouse-restore")),
                 "mouse-restore shutdown hook must be removed on clean exit");
+    }
+
+    @Test
+    void interactionAnswersAcknowledgeBeforeReleasingGates() throws Exception {
+        final var command = command(testRegistry(), stubAgentLoop());
+        uiThread = new Thread(command, "tui-notification-acknowledgements");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("yca coding agent");
+        final var tabsField = TuiCommand.class.getDeclaredField("tabManager");
+        tabsField.setAccessible(true);
+        final var state = ((TabManager) tabsField.get(command)).active();
+        try (final var workers = Executors.newVirtualThreadPerTaskExecutor()) {
+            final var input = workers.submit(() -> {
+                final var answer = state.session
+                        .runtime()
+                        .feedback()
+                        .ask(List.of(new Question("q", "Choose one", List.of("a", "b"), false)));
+                assertEquals(
+                        state.sessionId, interactionAcknowledgements.poll(), "acknowledge before releasing feedback");
+                return answer;
+            });
+            assertEquals(state.sessionId + ":input:1:main", interactionAlerts.poll(5, TimeUnit.SECONDS));
+            awaitText("Choose one");
+            assertTrue(interactionAcknowledgements.isEmpty(), "rendering is not an acknowledgement");
+            tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ENTER));
+            tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ENTER));
+            assertEquals(Map.of("q", "a"), input.get(5, TimeUnit.SECONDS));
+
+            for (final var key : List.of(KeyCode.ENTER, KeyCode.ESCAPE)) {
+                final var approval = workers.submit(() -> {
+                    final var answer = state.session
+                            .runtime()
+                            .permissions()
+                            .gate()
+                            .approve("Approve action", "detail", "bash", Map.of());
+                    assertEquals(
+                            state.sessionId,
+                            interactionAcknowledgements.poll(),
+                            "acknowledge before releasing approval");
+                    return answer;
+                });
+                assertEquals(state.sessionId + ":approval:bash:main", interactionAlerts.poll(5, TimeUnit.SECONDS));
+                awaitText("Approve action");
+                tuiRef.get().dispatch(KeyEvent.ofKey(key));
+                assertEquals(ApprovalGate.Result.DENY, approval.get(5, TimeUnit.SECONDS));
+            }
+        }
+        assertTrue(interactionAcknowledgements.isEmpty());
+        quit();
+    }
+
+    @Test
+    void queuedSubmissionAcknowledgesWithoutWaitingForTheTurn() throws Exception {
+        final var command = command(testRegistry(), stubAgentLoop());
+        uiThread = new Thread(command, "tui-queued-notification-acknowledgement");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("yca coding agent");
+        final var tabsField = TuiCommand.class.getDeclaredField("tabManager");
+        tabsField.setAccessible(true);
+        final var state = ((TabManager) tabsField.get(command)).active();
+        final var ready = new CompletableFuture<Void>();
+        tuiRef.get().runLater(() -> {
+            state.model.startUserTurn("running", false);
+            ready.complete(null);
+        });
+        ready.get(5, TimeUnit.SECONDS);
+        tuiRef.get().dispatch(new PasteEvent("queued follow-up"));
+        tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ENTER));
+        assertEquals(state.sessionId, interactionAcknowledgements.poll(5, TimeUnit.SECONDS));
+        awaitText("queued prompt (1 pending)");
+        assertTrue(interactionAcknowledgements.isEmpty(), "queued prompt rendering must not acknowledge again");
+        quit();
     }
 
     @Test

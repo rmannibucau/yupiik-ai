@@ -20,15 +20,30 @@ class NoticeTest {
     void normalizesConfiguredLabels() {
         final var clock = Clock.fixed(Instant.ofEpochMilli(1234), ZoneOffset.UTC);
         final var event = Notice.fromConfiguration(
-                new NoticeConfiguration("session\r\n1", "  Test\t title  ", "approval_required", "btw"), clock);
+                new NoticeConfiguration("session\r\n1", "  Test\t title  ", "approval_required", "btw", null), clock);
         assertEquals(new Notice(1, "session 1", "Test title", "approval_required", "btw", 1234), event);
     }
 
     @Test
     void boundsLabelsAndDoesNotSplitSurrogates() {
         final var event = Notice.fromConfiguration(
-                new NoticeConfiguration("s", "a".repeat(255) + "\uD83D\uDE00", "turn_end", "main"), Clock.systemUTC());
+                new NoticeConfiguration("s", "a".repeat(255) + "\uD83D\uDE00", "turn_end", "main", null),
+                Clock.systemUTC());
         assertEquals(255, event.title().length());
+    }
+
+    @Test
+    void usesProvidedTimestampIncludingZeroForAcknowledgements() {
+        final var clock = Clock.fixed(Instant.ofEpochMilli(1234), ZoneOffset.UTC);
+        for (final var timestamp : List.of(0L, 5678L)) {
+            assertEquals(
+                    new Notice(1, "s", "", "session_acknowledged", "main", timestamp),
+                    Notice.fromConfiguration(
+                            new NoticeConfiguration("s", "", "session_acknowledged", "main", timestamp), clock));
+        }
+        assertThrows(
+                IllegalArgumentException.class,
+                () -> Notice.fromConfiguration(new NoticeConfiguration("s", "", "turn_end", "main", -1L), clock));
     }
 
     @Test

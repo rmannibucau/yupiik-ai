@@ -2081,6 +2081,9 @@ public class AgentTurnExecutor {
             final BooleanSupplier cancelled,
             final Supplier<String> queuedPrompt,
             final String explicitModel) {
+        if (host.notificationService != null && host.subagentId == null) {
+            host.notificationService.onSessionInteraction(sessionId);
+        }
         return doRun(prompt, prompt, agentName, sessionId, history, cancelled, queuedPrompt, explicitModel);
     }
 
