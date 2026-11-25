@@ -40,9 +40,9 @@ describe('SessionMetadata', () => {
       flavor: 'high',
     });
     expect(html).toMatch(/^<dl class="yca-session-metadata">.*<\/dl>$/);
-    expect(rows(html)).toHaveLength(7);
+    expect(rows(html)).toHaveLength(8);
     expect(rows(html).map((value) => value.match(/<dt>(?:<label[^>]*>)?([^<]+)/)?.[1]))
-      .toEqual(['Session', 'Working dir', 'Branch', 'Provider', 'Model', 'Flavor', 'Permissions']);
+      .toEqual(['Session', 'Working dir', 'Branch', 'Provider', 'Model', 'Flavor', 'Permissions', 'Sandbox']);
     for (const value of rows(html)) {
       expect(value).toMatch(/^<dt>.*<\/dt><dd(?: [^>]*)?>.*<\/dd>$/);
     }
@@ -108,7 +108,7 @@ describe('SessionMetadata', () => {
 
   it.each([undefined, ''])('omits empty optional rows (%s) and defaults permissions to ask', (empty) => {
     const html = render({ gitBranch: empty, flavor: empty, permissionMode: empty });
-    expect(rows(html)).toHaveLength(5);
+    expect(rows(html)).toHaveLength(6);
     expect(html).not.toContain('<dt>Branch</dt>');
     expect(html).not.toContain('<dt>Flavor</dt>');
     expect(row(html, 'Working dir')).toContain('value=""');
@@ -117,6 +117,22 @@ describe('SessionMetadata', () => {
     expect(options(row(html, 'Permissions'))).toEqual(['ask', 'auto_edit', 'yolo', 'full_yolo']);
     expect(row(html, 'Permissions')).toContain('<option value="ask" selected="">');
     expect(row(html, 'Permissions')).toContain('background:var(--yca-muted)');
+  });
+
+  it.each([
+    ['ask', true, 'Enabled', 'success'],
+    ['auto_edit', false, 'Disabled', 'yolo'],
+    ['yolo', true, 'Enabled', 'success'],
+    ['yolo', false, 'Disabled', 'yolo'],
+    ['ask', undefined, 'Unknown', 'muted'],
+    ['full_yolo', true, 'Bypassed (full_yolo)', 'yolo'],
+    ['full_yolo', false, 'Bypassed (full_yolo)', 'yolo'],
+    ['full_yolo', undefined, 'Bypassed (full_yolo)', 'yolo'],
+  ] as const)('shows effective sandbox state for %s with enabled=%s', (permissionMode, sandboxEnabled, status, color) => {
+    const sandbox = row(render({ permissionMode, sandboxEnabled }), 'Sandbox');
+    expect(sandbox).toContain(`>${status}</dd>`);
+    expect(sandbox).toContain(`color:var(--yca-${color})`);
+    expect(sandbox).not.toContain('<select');
   });
 
   it.each([

@@ -4518,14 +4518,19 @@ public class TuiCommand implements Runnable {
                 Span.styled(permissions.mode().name().toLowerCase(Locale.ROOT), Style.EMPTY.fg(modeColor()))));
         final var permissionMode = permissions.permissionMode().name().toLowerCase(Locale.ROOT);
         final var fullYolo = permissions.permissionMode() == PermissionMode.FULL_YOLO;
+        final var sandboxEnabled = state.session.runtime().sandbox().enabled();
         final var unattended = fullYolo || permissions.permissionMode() == PermissionMode.YOLO;
-        final var permissionColor =
-                fullYolo || !state.session.runtime().sandbox().enabled() ? palette.yolo() : palette.warning();
+        final var permissionColor = fullYolo || !sandboxEnabled ? palette.yolo() : palette.warning();
         text.add(Line.from(
                 Span.styled("permissions ", label),
                 Span.styled(
                         unattended ? permissionMode + " ⚠" : permissionMode,
                         unattended ? Style.EMPTY.fg(Color.hex(permissionColor)).bold() : value)));
+        text.add(Line.from(
+                Span.styled("sandbox ", label),
+                Span.styled(
+                        fullYolo ? "bypassed" : sandboxEnabled ? "enabled" : "disabled",
+                        Style.EMPTY.fg(Color.hex(sandboxEnabled ? palette.success() : palette.yolo())))));
         if (fullYolo) {
             text.add(Line.from(Span.styled("not recommended", Style.EMPTY.fg(Color.hex(palette.yolo())))));
         }

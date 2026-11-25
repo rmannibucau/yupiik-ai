@@ -6454,6 +6454,8 @@ class TuiCommandRenderTest {
             uiThread.start();
             awaitTui();
             awaitText("permissions ask");
+            awaitText(enabled ? "sandbox enabled" : "sandbox disabled");
+            assertEquals(rowOf("permissions ask") + 1, rowOf(enabled ? "sandbox enabled" : "sandbox disabled"));
             tuiRef.get().dispatch(new PasteEvent("/permissions " + mode));
             tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ENTER));
             final var text = "permissions " + mode + " ⚠";
@@ -6463,6 +6465,10 @@ class TuiCommandRenderTest {
             assertEquals(red, rgb.r());
             assertEquals(green, rgb.g());
             assertEquals(blue, rgb.b());
+            final var sandboxText =
+                    "full_yolo".equals(mode) ? "sandbox bypassed" : enabled ? "sandbox enabled" : "sandbox disabled";
+            awaitText(sandboxText);
+            assertEquals(rowOf(text) + 1, rowOf(sandboxText));
             if ("full_yolo".equals(mode)) {
                 awaitText("not recommended");
             }
@@ -6470,6 +6476,8 @@ class TuiCommandRenderTest {
             tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ENTER));
             awaitText("permissions ask");
             awaitTextGone("not recommended");
+            awaitText(enabled ? "sandbox enabled" : "sandbox disabled");
+            awaitTextGone("sandbox bypassed");
             quit();
         }
 

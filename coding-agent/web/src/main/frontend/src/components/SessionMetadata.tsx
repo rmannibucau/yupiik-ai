@@ -23,6 +23,9 @@ export function SessionMetadata({
 }: SessionMetadataProps) {
   const id = useId();
   const unattended = permissionMode === 'yolo' || permissionMode === 'full_yolo';
+  const sandboxBypassed = permissionMode === 'full_yolo';
+  const sandboxActive = sandboxEnabled === true && !sandboxBypassed;
+  const sandboxStatus = sandboxBypassed ? 'Bypassed (full_yolo)' : sandboxEnabled === true ? 'Enabled' : sandboxEnabled === false ? 'Disabled' : 'Unknown';
   const permissionColor = permissionMode === 'full_yolo' || (permissionMode === 'yolo' && sandboxEnabled !== true)
     ? 'var(--yca-yolo)'
     : permissionMode === 'yolo'
@@ -143,6 +146,14 @@ export function SessionMetadata({
             }}
           >{unattended ? '!' : null}</span>
         </dd>
+      </div>
+      <div className="yca-metadata-row">
+        <dt>Sandbox</dt>
+        <dd
+          className="yca-metadata-value"
+          title="Effective session sandbox state; trusted integrations run outside this boundary"
+          style={{ color: sandboxActive ? 'var(--yca-success)' : sandboxEnabled === undefined && !sandboxBypassed ? 'var(--yca-muted)' : 'var(--yca-yolo)' }}
+        >{sandboxStatus}</dd>
       </div>
     </dl>
   );
