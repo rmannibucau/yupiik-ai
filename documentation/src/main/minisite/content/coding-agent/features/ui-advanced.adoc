@@ -21,7 +21,17 @@ Markdown primitives retain YCA callouts, reference scrubbing, grammar aliases an
 `MarkdownContent` supplies text locally with smoothing disabled, including outside a chat runtime.
 Tool Elements are presentation, not execution: raw arguments/output, bounded paging and pending/interrupted/failed states remain available.
 Requested patches never imply applied changes, and `write_file` content never becomes a fabricated diff.
-`DiffViewer` displays literal supplied lines rather than computing or reconstructing a patch.
+`DiffViewer` is the app-owned boundary: `react-diff-view` provides side-by-side layout, while Simple retains the literal-line renderer.
+The Diff selector defaults to Auto, which follows tool disclosure and uses side-by-side layout for complete supported patches.
+Diff layout never overrides tool visibility: Hidden removes the tool card and Collapsed defers its contents until opened.
+Numbered unified requests remain explicitly labeled as requests; unnumbered OpenCode patches and unsupported or oversized previews retain the simple view.
+Live applied-file sections use only execution-time `ToolFilesChanged` captures, including partial changes from failed tools.
+No additional filesystem reads are performed to fill missing content, and missing captures never imply an empty previous file.
+Display redaction suppresses the entire before/after pair if either side changes; sanitized file metadata remains available.
+These captures are not persisted or reconstructed from historical tool arguments, so a freshly restored session retains the request/output views without historical applied-file diffs.
+Code blocks and split diffs share the registered Refractor core grammars and the existing theme's syntax/status variables.
+Split previews are bounded to 100,000 characters and 2,000 lines; computed diffs have a 100 ms work budget, with captured text available through bounded pages when a preview cannot be generated.
+Sparse patches referencing lines beyond the highlighting budget retain side-by-side layout without syntax colors, avoiding allocation proportional to the referenced line number.
 Tools and Thoughts use Hidden/Collapsed/Expanded controls, defaulting to Collapsed; manual card disclosure survives hide/show.
 Thought visibility remains presentation-only, with visible modes using `/thinking show` and Hidden using `/thinking hide`.
 
@@ -114,3 +124,12 @@ These registry URLs are mutable; the recorded hashes identify the source used, i
 The manifest covers ApprovalCard, OptionList, ElicitationForm, receipt-focus, useIsomorphicLayoutEffect and range from the `elements-approval-card`, `elements-option-list`, `elements-elicitation-form`, `elements-receipt-focus` and `elements-range` registries at `https://r.assistant-ui.com/`.
 OptionList adds controlled value/change/disabled props for grouped atomic submission, and ElicitationForm adds accept/decline labels.
 Local theme/icon adapters and scoped CSS map upstream presentation to YCA without changing execution contracts.
+
+== Static-asset compression
+
+The web server negotiates gzip for compressible bundled static assets using `Accept-Encoding`, including quality weights and explicit rejection.
+Identity remains available for clients that do not request gzip; binary font and image assets are served unchanged.
+Asset responses vary on `Accept-Encoding`, and identity and gzip representations have distinct strong ETags.
+HEAD and conditional GET use the selected representation's metadata without sending a response body.
+Compressed bytes are cached by content digest with a limit of 64 entries and 8 MiB per handler.
+JSON-RPC and SSE streaming responses are not compressed by this static-asset handler.

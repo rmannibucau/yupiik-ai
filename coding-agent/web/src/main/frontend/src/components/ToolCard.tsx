@@ -1,6 +1,7 @@
 import { memo, useId, useMemo, useState } from 'react';
 import { ToolCall, ToolDisclosure } from '../assistant/tools/ToolCall';
-import { DiffViewer } from '../assistant/tools/DiffViewer';
+import { DiffViewer, type DiffMode } from '../assistant/tools/DiffViewer';
+import { canRenderDiff, fileChangePatch, type FileChange } from '../lib/fileChanges';
 import type { Block } from '../api/eventLog';
 import { isToolVisuallyFailed } from '../lib/toolPresentation';
 import { guessPathLanguage } from '../lib/toolOutput';
@@ -24,23 +25,52 @@ const RESULT_LABELS: Record<BuiltinName, string> = {
 };
 
 /** A bounded window, not a permanent truncation. Even the final character remains reachable. */
-export function ProgressiveText({ text, label, language, diff = false }: {
-  text: string; label: string; language?: string; diff?: boolean;
+export function ProgressiveText({ text, label, language, diff = false, diffMode = 'simple', path, oldSource }: {
+  text: string; label: string; language?: string; diff?: boolean; diffMode?: DiffMode; path?: string; oldSource?: string;
 }) {
   const [page, setPage] = useState(0);
   const id = useId();
-  const window = textPage(text, page);
+  const fullDiff = diff && diffMode !== 'simple' && canRenderDiff(text);
+  const window = fullDiff ? { text, start: 0, end: text.length, more: false } : textPage(text, page);
   const startsAtLine = window.start === 0 || text[window.start - 1] === '\n';
   return <div className="yca-tool-text">
     {text.length === 0 ? <p className="yca-tool-muted">Empty string (0 characters)</p> : (
-      diff ? <DiffViewer id={id} tabIndex={0} role="region" className="yca-code-block yca-tool-diff" aria-label={label} text={window.text} startsAtLine={startsAtLine} /> : <div id={id} tabIndex={0} role="region" aria-label={label}><CodeBlock code={window.text} language={language} className="yca-tool-code" /></div>
+      diff ? <DiffViewer id={id} tabIndex={0} role="region" className="yca-code-block yca-tool-diff" aria-label={label} text={window.text} startsAtLine={startsAtLine} mode={fullDiff ? diffMode : 'simple'} path={path} oldSource={oldSource} /> : <div id={id} tabIndex={0} role="region" aria-label={label}><CodeBlock code={window.text} language={language} className="yca-tool-code" /></div>
     )}
-    {text.length > TEXT_PAGE_SIZE && <div className="yca-tool-paging">
+    {!fullDiff && text.length > TEXT_PAGE_SIZE && <div className="yca-tool-paging">
       <button type="button" disabled={window.start === 0} aria-label={`Show previous ${label}`} aria-controls={id} onClick={() => setPage(Math.max(0, Math.floor(window.start / TEXT_PAGE_SIZE) - 1))}>Show previous</button>
       <span aria-live="polite">Characters {window.start + 1}-{window.end} of {text.length}</span>
       <button type="button" disabled={!window.more} aria-label={`Show more ${label}`} aria-controls={id} onClick={() => setPage(Math.floor(window.start / TEXT_PAGE_SIZE) + 1)}>Show more</button>
     </div>}
   </div>;
+}
+
+function AppliedFile({ file, mode }: { file: FileChange; mode: DiffMode }) {
+  const patch = useMemo(() => fileChangePatch(file), [file]);
+  return <section className="yca-tool-patch-file">
+    <h5>{file.kind}: {file.path}</h5>
+    {patch ? <ProgressiveText text={patch} label={`Applied diff for ${file.path}`} diff diffMode={mode} path={file.path} oldSource={file.oldText ?? ''} />
+      : file.newText !== undefined ? <>
+        <p className="yca-tool-muted">Diff preview unavailable or too large; captured text follows.</p>
+        {file.oldText !== null && <ExactText label="Captured before" text={file.oldText!} />}
+        <ExactText label="Captured after" text={file.newText} />
+      </> : <p className="yca-tool-muted">Applied change; before/after text was not captured or is unavailable for display.</p>}
+  </section>;
+}
+
+function AppliedChanges({ files, mode }: { files: FileChange[]; mode: DiffMode }) {
+  const [page, setPage] = useState(0);
+  const start = Math.min(page * 5, Math.max(0, Math.ceil(files.length / 5) - 1) * 5);
+  return <section aria-label="Applied file changes">
+    <h4>Applied file changes</h4>
+    <p className="yca-tool-muted">Captured during execution, not inferred from the request. Partial changes can remain even if the tool failed.</p>
+    {files.slice(start, start + 5).map((file, index) => <AppliedFile key={`${start + index}:${file.path}`} file={file} mode={mode} />)}
+    {files.length > 5 && <div className="yca-tool-paging">
+      <button type="button" disabled={start === 0} onClick={() => setPage(Math.max(0, page - 1))}>Previous changed files</button>
+      <span aria-live="polite">Files {start + 1}-{Math.min(start + 5, files.length)} of {files.length}</span>
+      <button type="button" disabled={start + 5 >= files.length} onClick={() => setPage(page + 1)}>More changed files</button>
+    </div>}
+  </section>;
 }
 
 function ExactText({ label, text, language }: { label: string; text: string; language?: string }) {
@@ -50,7 +80,7 @@ function ExactText({ label, text, language }: { label: string; text: string; lan
   </section>;
 }
 
-function PatchRequest({ patch }: { patch: string }) {
+function PatchRequest({ patch, diffMode }: { patch: string; diffMode: DiffMode }) {
   const preview = useMemo(() => parsePatch(patch), [patch]);
   const [page, setPage] = useState(0);
   const start = Math.min(page * 5, Math.max(0, Math.ceil(preview.files.length / 5) - 1) * 5);
@@ -59,7 +89,9 @@ function PatchRequest({ patch }: { patch: string }) {
     {preview.warning && <p className="yca-tool-warning">{preview.warning}</p>}
     {preview.files.slice(start, start + 5).map((file, index) => <section className="yca-tool-patch-file" key={start + index}>
       <h5>{file.operation}: {file.path}{file.destination !== undefined ? ` -> ${file.destination}` : ''} <span className="yca-diff-add">+{file.added}</span> <span className="yca-diff-remove">-{file.removed}</span></h5>
-      <ProgressiveText text={file.diff} label={`Requested patch for ${file.path}`} diff />
+      <ProgressiveText text={diffMode !== 'simple' && /^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@/.test(file.diff)
+        ? `diff --git a/file b/file\n--- ${file.operation === 'add' ? '/dev/null' : 'a/file'}\n+++ ${file.operation === 'delete' ? '/dev/null' : 'b/file'}\n${file.diff}` : file.diff}
+        label={`Requested patch for ${file.path}`} diff diffMode={diffMode} path={file.path} />
     </section>)}
     {preview.files.length > 5 && <div className="yca-tool-paging">
       <button type="button" disabled={start === 0} onClick={() => setPage(Math.max(0, Math.floor(start / 5) - 1))}>Show previous files</button>
@@ -69,7 +101,7 @@ function PatchRequest({ patch }: { patch: string }) {
   </>;
 }
 
-function RequestDetails({ name, raw }: { name: string; raw?: string }) {
+function RequestDetails({ name, raw, diffMode }: { name: string; raw?: string; diffMode: DiffMode }) {
   const args = useMemo(() => parseToolArgs(raw), [raw]);
   if (!args) {
     return <p className="yca-tool-muted">{raw === undefined ? 'Arguments unavailable in this event.' : 'Arguments are malformed, non-object, or too large for a structured preview. Use raw arguments.'}</p>;
@@ -89,7 +121,7 @@ function RequestDetails({ name, raw }: { name: string; raw?: string }) {
     <dl className="yca-tool-fields">{fields.map((key) => {
       const value = args[key];
       if (name === 'apply_patch' && key === 'patch' && typeof value === 'string') {
-        return <div key={key}><dt>patch</dt><dd><PatchRequest patch={value} /></dd></div>;
+        return <div key={key}><dt>patch</dt><dd><PatchRequest patch={value} diffMode={diffMode} /></dd></div>;
       }
       if (validEdit && (key === 'oldString' || key === 'newString') && typeof value === 'string') {
         return <div key={key}><dt>{key}</dt><dd><ExactText label={key === 'oldString' ? 'Before: Exact text to find (remove matched text)' : value === '' ? 'Replacement: delete matched text' : 'After: Requested replacement'} text={value} language={fileLanguage} /></dd></div>;
@@ -103,8 +135,8 @@ function RequestDetails({ name, raw }: { name: string; raw?: string }) {
   </>;
 }
 
-export const ToolCard = memo(function ToolCard({ block, collapsed, onToggle }: {
-  block: ToolBlock; collapsed: boolean; onToggle: () => void;
+export const ToolCard = memo(function ToolCard({ block, collapsed, onToggle, diffMode = 'auto' }: {
+  block: ToolBlock; collapsed: boolean; onToggle: () => void; diffMode?: DiffMode;
 }) {
   const failed = isToolVisuallyFailed(block);
   const status = block.state === 'running' ? 'working' : block.state === 'interrupted' ? 'interrupted' : block.pending ? 'pending' : failed ? 'failed' : 'completed';
@@ -115,14 +147,15 @@ export const ToolCard = memo(function ToolCard({ block, collapsed, onToggle }: {
   const final = block.state === 'done' && !block.pending;
   const resultLabel = isBuiltin(block.name) ? RESULT_LABELS[block.name] : 'External tool output';
   return <ToolCall label={block.name} query={summary} status={status} open={!collapsed} onOpenChange={onToggle}
-    request={<RequestDetails name={block.name} raw={block.args} />}
+    request={<RequestDetails name={block.name} raw={block.args} diffMode={diffMode} />}
     result={<>
       <h4>{final ? 'Result' : 'Result preview'} <span className="yca-tool-muted">{resultLabel}</span></h4>
       {!final && <p className="yca-tool-muted">{block.state === 'interrupted' ? 'Execution interrupted; output may be incomplete.' : block.pending ? 'Still pending; this is not a final result.' : 'Running; output may be incomplete.'}</p>}
       {failed && <p className="yca-tool-warning">Tool failed. The request above is intent, not confirmation that changes were applied.</p>}
       {output !== '' ? (block.name === 'skill' && final && block.success === true
         ? <SkillResult content={output} />
-        : <ProgressiveText label={resultLabel} text={presentation.text} language={presentation.language} diff={presentation.diff} />) : <p className="yca-tool-muted">{block.output !== undefined ? 'Empty output.' : 'No output available.'}</p>}
+        : <ProgressiveText label={resultLabel} text={presentation.text} language={presentation.language} diff={presentation.diff} diffMode={diffMode} />) : <p className="yca-tool-muted">{block.output !== undefined ? 'Empty output.' : 'No output available.'}</p>}
+      {block.files && block.files.length > 0 && <AppliedChanges files={block.files} mode={diffMode} />}
     </>}
   >
     <ToolDisclosure label="Raw arguments"><ProgressiveText label="Raw arguments" text={block.args ?? 'Arguments unavailable in this event.'} /></ToolDisclosure>

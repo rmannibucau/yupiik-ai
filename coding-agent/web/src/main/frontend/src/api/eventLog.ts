@@ -1,4 +1,5 @@
 import { eventKey, type WebEvent } from './useSessionStream';
+import { parseFileChanges, type FileChange } from '../lib/fileChanges';
 
 /**
  * The transcript blocks derived from the raw SSE event log. Pure data: the same events always
@@ -36,6 +37,8 @@ export type Block = { id?: string; startedAt?: number; speakerLabel?: string } &
       // distinct from both a success and a hard failure
       pending?: boolean;
       toolOrdinal?: number;
+      subagentId?: string;
+      files?: FileChange[];
     }
   | {
       // A spawned sub-agent card: 'running' while the child works (async, outlives the parent
@@ -312,6 +315,7 @@ export function eventsToBlocks(events: WebEvent[], idFor?: (event: WebEvent, kin
         state: 'running',
         args,
         toolOrdinal: typeof ord === 'number' && ord > 0 ? ord : undefined,
+        ...(ev.subagentId ? { subagentId: ev.subagentId } : {}),
       });
       runningTools.set(name, [...(runningTools.get(name) ?? EMPTY_TOOL_STACK), idx]);
     } else if (ev.type === 'tool-stream') {
@@ -323,6 +327,22 @@ export function eventsToBlocks(events: WebEvent[], idFor?: (event: WebEvent, kin
       if (toolBlock && toolBlock.kind === 'tool') {
         toolBlock.content += (ev.data?.fragment as string) ?? '';
         toolBlock.content += '\n';
+      }
+    } else if (ev.type === 'tool-files-changed') {
+      settle();
+      // Mutation events precede tool-finished. Never attach an unmatched ordinal
+      // or another agent's file contents to a same-name card.
+      const stack = runningTools.get(ev.message ?? '') ?? EMPTY_TOOL_STACK;
+      const ordinal = ev.data?.ordinal;
+      const target = stack.findLast((index) => {
+        const card = blocks[index];
+        return card.kind === 'tool' && (card.subagentId ?? '') === (ev.subagentId ?? '')
+          && (!(typeof ordinal === 'number' && ordinal > 0) || card.toolOrdinal === ordinal);
+      });
+      const card = target === undefined ? undefined : blocks[target];
+      const files = parseFileChanges(ev.data?.files);
+      if (card?.kind === 'tool' && files.length > 0) {
+        card.files = files;
       }
     } else if (ev.type === 'tool-finished') {
       settle();

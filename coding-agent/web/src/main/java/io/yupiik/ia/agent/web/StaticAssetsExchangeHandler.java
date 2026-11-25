@@ -21,22 +21,25 @@ import io.yupiik.fusion.http.server.api.Request;
 import io.yupiik.fusion.http.server.api.Response;
 import io.yupiik.fusion.http.server.spi.Endpoint;
 import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.net.URLConnection;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.ArrayDeque;
 import java.util.HexFormat;
+import java.util.LinkedHashMap;
 import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.CompletionStage;
 import java.util.regex.Pattern;
+import java.util.zip.GZIPOutputStream;
 
 /**
  * Serves the bundled browser UI from {@code META-INF/resources/**} with a
- * proper cache story (strong ETag + {@code Last-Modified}, immutable cache for
+ * proper cache story (representation-specific strong ETags, immutable cache for
  * hash-fingerprinted assets, no-cache for the SPA shell), a path-escape guard,
- * HEAD support and an SPA fallback to {@code index.html} for bookmarkable
+ * negotiated gzip, HEAD support and an SPA fallback to {@code index.html} for bookmarkable
  * deep links.
  */
 public class StaticAssetsExchangeHandler implements Endpoint {
@@ -48,6 +51,13 @@ public class StaticAssetsExchangeHandler implements Endpoint {
     private static final String CSP_HTML = "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:";
 
     private final String boundHost;
+    // Cache only compressed representations, keyed by content, never attacker-controlled paths.
+    // No classloader or open stream is retained; rereading the source also detects changed resources.
+    private static final int MAX_GZIP_ENTRIES = 64;
+    private static final int MAX_GZIP_BYTES = 8 * 1024 * 1024;
+    private static final Pattern QUALITY = Pattern.compile("(?:0(?:\\.[0-9]{0,3})?|1(?:\\.0{0,3})?)");
+    private final Map<String, Representation> gzipCache = new LinkedHashMap<>();
+    private int gzipCacheBytes;
 
     public StaticAssetsExchangeHandler() {
         this(null);
@@ -134,7 +144,7 @@ public class StaticAssetsExchangeHandler implements Endpoint {
         return !name.contains(".");
     }
 
-    private static CompletionStage<Response> serve(final String resource, final Request request) {
+    private CompletionStage<Response> serve(final String resource, final Request request) {
         try (final var stream = Thread.currentThread().getContextClassLoader().getResourceAsStream(resource)) {
             if (stream == null) {
                 // SPA fallback for deep links served on extension-less paths
@@ -147,7 +157,7 @@ public class StaticAssetsExchangeHandler implements Endpoint {
         }
     }
 
-    private static CompletionStage<Response> serveIndex(final Request request) {
+    private CompletionStage<Response> serveIndex(final Request request) {
         final var resource = RESOURCES_PREFIX + "index.html";
         try (final var stream = Thread.currentThread().getContextClassLoader().getResourceAsStream(resource)) {
             if (stream == null) {
@@ -168,42 +178,142 @@ public class StaticAssetsExchangeHandler implements Endpoint {
         return completedFuture(Response.of().status(500).body("internal error").build());
     }
 
-    private static CompletionStage<Response> responseFor(
-            final byte[] bytes, final String resource, final Request request) {
-        final var etag = '"' + HexFormat.of().formatHex(digest(bytes)) + '"';
-        if (etag.equals(request.header("if-none-match"))) {
-            return completedFuture(Response.of()
-                    .status(304)
-                    .header("etag", etag)
-                    .header("x-content-type-options", X_CONTENT_TYPE_OPTIONS)
-                    .build());
-        }
+    private CompletionStage<Response> responseFor(final byte[] bytes, final String resource, final Request request)
+            throws IOException {
         final var contentType = contentType(resource);
+        final var encoding = encodingFor(request, isCompressible(contentType));
+        if (encoding == null) {
+            return completedFuture(
+                    Response.of().status(406).header("vary", "Accept-Encoding").build());
+        }
+        final var identity = new Representation(bytes, etag(bytes));
+        final var representation = "gzip".equals(encoding) ? gzip(identity) : identity;
+        final var notModified = matchesEtag(request, representation.etag());
         final var builder = Response.of()
-                .status(200)
+                .status(notModified ? 304 : 200)
                 .header("content-type", contentType)
-                .header("etag", etag)
+                .header("etag", representation.etag())
+                .header("vary", "Accept-Encoding")
                 .header("x-content-type-options", X_CONTENT_TYPE_OPTIONS);
+        if ("gzip".equals(encoding)) {
+            builder.header("content-encoding", "gzip");
+        }
         if ("text/html".equals(contentType)) {
             builder.header("content-security-policy", CSP_HTML);
         }
         final var immutable = isImmutable(resource);
         builder.header("cache-control", immutable ? "public,max-age=31536000,immutable" : "no-cache");
-        if ("HEAD".equalsIgnoreCase(request.method())) {
-            builder.header("content-length", bytes.length);
-        } else {
+        if (!notModified) {
+            builder.header("content-length", representation.bytes().length);
+        }
+        if (!notModified && !"HEAD".equalsIgnoreCase(request.method())) {
             // byte-faithful: the body is served as raw bytes (no charset round-trip), so binary assets
             // (woff2, png, svg...) reach the browser exactly as stored. The JRE adapter aggregates
             // OutputStreamPublisher bodies into a counted response, so Content-Length is still sent.
             builder.bytesBody(out -> {
                 try (out;
-                        final var in = new ByteArrayInputStream(bytes)) {
+                        final var in = new ByteArrayInputStream(representation.bytes())) {
                     in.transferTo(out);
                 }
             });
         }
         return completedFuture(builder.build());
     }
+
+    private static boolean isCompressible(final String type) {
+        return type.startsWith("text/")
+                || "application/javascript".equals(type)
+                || "application/json".equals(type)
+                || "application/xml".equals(type)
+                || "image/svg+xml".equals(type);
+    }
+
+    private static String encodingFor(final Request request, final boolean compressible) {
+        double gzip = -1;
+        double identity = -1;
+        double wildcard = -1;
+        for (final var entry : request.headers().entrySet()) {
+            if (!"accept-encoding".equalsIgnoreCase(entry.getKey())) {
+                continue;
+            }
+            for (final var value : entry.getValue()) {
+                for (final var coding : value.split(",")) {
+                    final var parts = coding.trim().split(";", -1);
+                    final var name = parts[0].trim();
+                    double quality = 1;
+                    // Invalid weights are not permission to send an otherwise rejected coding.
+                    if (parts.length > 1) {
+                        final var parameter = parts[1].trim().split("=", -1);
+                        quality = parts.length == 2
+                                        && parameter.length == 2
+                                        && "q".equalsIgnoreCase(parameter[0].trim())
+                                        && QUALITY.matcher(parameter[1].trim()).matches()
+                                ? Double.parseDouble(parameter[1].trim())
+                                : 0;
+                    }
+                    if ("gzip".equalsIgnoreCase(name)) {
+                        gzip = gzip < 0 ? quality : Math.min(gzip, quality);
+                    } else if ("identity".equalsIgnoreCase(name)) {
+                        identity = identity < 0 ? quality : Math.min(identity, quality);
+                    } else if ("*".equals(name)) {
+                        wildcard = wildcard < 0 ? quality : Math.min(wildcard, quality);
+                    }
+                }
+            }
+        }
+        final var gzipQuality = gzip < 0 ? Math.max(0, wildcard) : gzip;
+        // Implicit identity is a fallback, not a preference over an explicitly accepted coding.
+        final var identityQuality = identity < 0 ? (wildcard == 0 ? 0 : 1) : identity;
+        if (compressible && gzipQuality > 0 && (identity < 0 || gzipQuality >= identityQuality)) {
+            return "gzip";
+        }
+        return identityQuality > 0 ? "identity" : null;
+    }
+
+    private static boolean matchesEtag(final Request request, final String etag) {
+        for (final var entry : request.headers().entrySet()) {
+            if ("if-none-match".equalsIgnoreCase(entry.getKey())) {
+                for (final var value : entry.getValue()) {
+                    for (final var candidate : value.split(",")) {
+                        final var tag = candidate.trim();
+                        if ("*".equals(tag) || etag.equals(tag) || ("W/" + etag).equals(tag)) {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+        return false;
+    }
+
+    private synchronized Representation gzip(final Representation identity) throws IOException {
+        final var cached = gzipCache.get(identity.etag());
+        if (cached != null) {
+            return cached;
+        }
+        final var output = new ByteArrayOutputStream();
+        try (final var gzip = new GZIPOutputStream(output)) {
+            gzip.write(identity.bytes());
+        }
+        final var bytes = output.toByteArray();
+        final var representation = new Representation(bytes, etag(bytes));
+        if (bytes.length <= MAX_GZIP_BYTES) {
+            while (gzipCache.size() >= MAX_GZIP_ENTRIES || gzipCacheBytes + bytes.length > MAX_GZIP_BYTES) {
+                final var iterator = gzipCache.values().iterator();
+                gzipCacheBytes -= iterator.next().bytes().length;
+                iterator.remove();
+            }
+            gzipCache.put(identity.etag(), representation);
+            gzipCacheBytes += bytes.length;
+        }
+        return representation;
+    }
+
+    private static String etag(final byte[] bytes) {
+        return '"' + HexFormat.of().formatHex(digest(bytes)) + '"';
+    }
+
+    private record Representation(byte[] bytes, String etag) {}
 
     /**
      * Decodes only the escapes that matter for path traversal ({@code %2e} = '.', {@code %2f} = '/',

@@ -54,6 +54,37 @@ beforeEach(() => {
 afterEach(() => { act(() => root.unmount()); host.remove(); vi.unstubAllGlobals(); });
 
 describe('mounted external-store chat integration', () => {
+  it('keeps applied diff layout independent of tool visibility without inferring changes from arguments', async () => {
+    state.events = [
+      event('tool-started', 'edit_file', { ordinal: 9, args: '{"path":"Demo.java","oldString":"requested","newString":"intent"}' }),
+      event('tool-files-changed', 'edit_file', { ordinal: 9, files: [{ path: 'Demo.java', kind: 'update', oldText: 'class Before {}\n', newText: 'class After {}\n' }] }),
+      event('tool-finished', 'edit_file', { ordinal: 9, output: 'Updated', success: true }),
+    ];
+    render(); await settle();
+    expect(host.querySelector('[aria-label="Applied file changes"]')).toBeNull();
+    act(() => host.querySelector<HTMLButtonElement>('.yca-tool-header')!.click());
+    await act(async () => { await import('../assistant/tools/SplitDiff'); });
+    await vi.waitFor(async () => {
+      await settle();
+      expect(host.querySelector('.diff-code-delete')?.textContent).toBe('class Before {}');
+    });
+    expect(host.querySelector('.diff-code-insert')?.textContent).toBe('class After {}');
+    const select = host.querySelector<HTMLSelectElement>('[aria-label="Diff mode"]')!;
+    expect(select.value).toBe('auto');
+    act(() => { select.value = 'simple'; select.dispatchEvent(new Event('change', { bubbles: true })); });
+    expect(host.querySelector('.diff-split')).toBeNull();
+    expect(host.querySelector('pre[aria-label="Applied diff for Demo.java"]')?.textContent).toContain('-class Before {}\n+class After {}');
+    state.events = [...state.events, event('settings', '', { showToolOutput: 'hidden' })];
+    render(); await settle();
+    expect(host.querySelector('.yca-tool-card')).toBeNull();
+    act(() => { select.value = 'side-by-side'; select.dispatchEvent(new Event('change', { bubbles: true })); });
+    expect(host.querySelector('.diff-split')).toBeNull();
+    state.events = [...state.events, event('settings', '', { showToolOutput: 'shown' })];
+    render(); await settle();
+    expect(host.querySelector('.diff-code-insert')?.textContent).toBe('class After {}');
+    expect(host.querySelector('[aria-label="Applied file changes"]')?.textContent).not.toContain('requested');
+  });
+
   it('carries sandbox metadata to the permission warning and reloads it after selecting full_yolo', async () => {
     state.metadata = { permissionMode: 'YOLO', sandboxEnabled: true };
     render(); await settle();

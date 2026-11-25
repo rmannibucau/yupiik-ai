@@ -18,7 +18,7 @@ describe('eventsToBlocks', () => {
       content: '[Worker] mcp_example #42 diagnostic:\nprivate failure\nsecond line',
     });
     expect(blocks.find(b => b.kind === 'tool')).toMatchObject({ state: 'done', output: 'MCP failed', success: false });
-    expect(blocks.filter(b => b.kind === 'text').map(b => b.content).join('')).not.toContain('private failure');
+    expect(blocks.flatMap(b => b.kind === 'text' ? [b.content] : []).join('')).not.toContain('private failure');
   });
 
   it('freezes captured feedback labels across deltas and final reconciliation without using them as identity', () => {
@@ -662,5 +662,75 @@ describe('latestDrainBoundary', () => {
       ev({ type: 'turn-done', sessionId: 's1' }),
     ]);
     expect(sig).toBe('turn-done:s1');
+  });
+});
+
+describe('captured tool file changes', () => {
+  const files = [{ path: 'actual.java', kind: 'update', oldText: 'before\n', newText: 'after\n' }];
+  const started = (ordinal: number, subagentId?: string) => ev({
+    type: 'tool-started', sessionId: 's', subagentId, message: 'edit_file',
+    data: { ordinal, args: '{"path":"requested-not-actual.java"}' },
+  });
+  const changed = (ordinal: number, subagentId?: string, message = 'edit_file') => ev({
+    type: 'tool-files-changed', sessionId: 's', subagentId, message, data: { ordinal, files },
+  });
+
+  it('attaches captures before completion and retains them with the actual result', () => {
+    const events = [started(1), changed(1)];
+    const running = eventsToBlocks(events);
+    expect(running).toHaveLength(1);
+    expect(running[0]).toMatchObject({ kind: 'tool', state: 'running', files });
+    events.push(ev({ type: 'tool-finished', sessionId: 's', message: 'edit_file', data: { ordinal: 1, output: 'actual result', success: true } }));
+    expect(eventsToBlocks(events)[0]).toMatchObject({ state: 'done', files, output: 'actual result', success: true });
+    expect(running[0]).toMatchObject({ state: 'running', files });
+  });
+
+  it('matches ordinal, name and agent scope, not the newest same-name card', () => {
+    const blocks = eventsToBlocks([
+      started(1), started(2), started(1, 'child'), started(1, 'other-child'),
+      changed(1), changed(1, 'child'),
+    ]);
+    expect(blocks).toHaveLength(4);
+    expect(blocks[0]).toMatchObject({ toolOrdinal: 1, files });
+    expect(blocks[1]).not.toHaveProperty('files');
+    expect(blocks[2]).toMatchObject({ subagentId: 'child', files });
+    expect(blocks[3]).not.toHaveProperty('files');
+  });
+
+  it.each([
+    [99, undefined, 'edit_file'],
+    [1, 'unknown-child', 'edit_file'],
+    [1, undefined, 'write_file'],
+  ] as const)('ignores unmatched captures (%s, %s, %s)', (ordinal, scope, name) => {
+    const blocks = eventsToBlocks([started(1), changed(ordinal, scope, name)]);
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0]).not.toHaveProperty('files');
+  });
+
+  it('ignores orphaned mutations and mutations after completion', () => {
+    expect(eventsToBlocks([changed(1)])).toEqual([]);
+    const blocks = eventsToBlocks([
+      started(1),
+      ev({ type: 'tool-finished', sessionId: 's', message: 'edit_file', data: { ordinal: 1, output: 'done' } }),
+      changed(1),
+    ]);
+    expect(blocks[0]).toMatchObject({ state: 'done', output: 'done' });
+    expect(blocks[0]).not.toHaveProperty('files');
+  });
+
+  it('retains metadata-only paths literally and drops malformed entries without inventing captures', () => {
+    const path = '../<img src=x onerror=alert(1)>\n--- a/forged';
+    const blocks = eventsToBlocks([
+      started(1),
+      ev({ type: 'tool-files-changed', sessionId: 's', message: 'edit_file', data: { ordinal: 1, files: [
+        null, { path: 42, kind: 'update' }, { path, kind: 'update' },
+        { path: 'incomplete', kind: 'create', newText: 'not an actual capture' },
+      ] } }),
+    ]);
+    const card = blocks[0];
+    if (card.kind !== 'tool') {
+      throw new Error('Expected tool card');
+    }
+    expect(card.files).toEqual([{ path, kind: 'update' }, { path: 'incomplete', kind: 'create' }]);
   });
 });

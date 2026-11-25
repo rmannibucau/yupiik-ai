@@ -49,8 +49,8 @@ public class WebShellFrontend implements ShellFrontend {
 
     @Override
     public void onEvent(final AgentEvent event) {
-        if (event instanceof AgentEvent.ToolDiagnostic) {
-            // Live display only: never fold private diagnostics into a transcript.
+        if (event instanceof AgentEvent.ToolDiagnostic || event instanceof AgentEvent.ToolFilesChanged) {
+            // Live display only: never fold private diagnostics or file content into a transcript.
             broker.pushAgentEvent(sessionId, event);
             return;
         }

@@ -18,7 +18,9 @@ package io.yupiik.ia.agent.web;
 import io.yupiik.fusion.framework.build.api.json.JsonModel;
 import io.yupiik.ia.agent.core.agent.AgentEvent;
 import java.util.LinkedHashMap;
+import java.util.Locale;
 import java.util.Map;
+import java.util.function.UnaryOperator;
 
 /** Flat, JSON-safe projection of an {@link AgentEvent} streamed to the browser over SSE. */
 @JsonModel
@@ -31,13 +33,43 @@ public record WebEventDto(
         Map<String, Object> data) {
 
     public static WebEventDto of(final AgentEvent event) {
+        return of(event, UnaryOperator.identity());
+    }
+
+    public static WebEventDto of(final AgentEvent event, final UnaryOperator<String> displayPolicy) {
         return new WebEventDto(
                 typeOf(event),
                 event.sessionId(),
                 event.subagentId(),
                 event.subagentName(),
-                messageOf(event),
-                dataOf(event));
+                event instanceof AgentEvent.ToolFilesChanged t ? displayPolicy.apply(t.name()) : messageOf(event),
+                event instanceof AgentEvent.ToolFilesChanged t ? filesData(t, displayPolicy) : dataOf(event));
+    }
+
+    /** Live-only captured data: redacted text must never be presented as an exact applied diff. */
+    private static Map<String, Object> filesData(
+            final AgentEvent.ToolFilesChanged event, final UnaryOperator<String> displayPolicy) {
+        return Map.of(
+                "ordinal", event.ordinal(),
+                "files",
+                        event.files().stream()
+                                .map(file -> {
+                                    final var data = new LinkedHashMap<String, Object>();
+                                    data.put(
+                                            "path",
+                                            displayPolicy.apply(file.path().toString()));
+                                    data.put("kind", file.kind().name().toLowerCase(Locale.ROOT));
+                                    final var content = file.content();
+                                    if (content != null
+                                            && (content.oldText() == null
+                                                    || content.oldText().equals(displayPolicy.apply(content.oldText())))
+                                            && content.newText().equals(displayPolicy.apply(content.newText()))) {
+                                        data.put("oldText", content.oldText());
+                                        data.put("newText", content.newText());
+                                    }
+                                    return data;
+                                })
+                                .toList());
     }
 
     private static String typeOf(final AgentEvent event) {
@@ -81,7 +113,7 @@ public record WebEventDto(
             case AgentEvent.ToolStream t -> t.name();
             case AgentEvent.ToolDiagnostic t -> t.name();
             case AgentEvent.ToolFinished t -> t.name();
-            case AgentEvent.ToolFilesChanged _ -> null; // UI-only file data is not part of this transport.
+            case AgentEvent.ToolFilesChanged t -> t.name();
             case AgentEvent.UsageUpdated t -> t.model();
             case AgentEvent.LlmRequestCompleted t -> t.model();
             case AgentEvent.Status t -> t.message();

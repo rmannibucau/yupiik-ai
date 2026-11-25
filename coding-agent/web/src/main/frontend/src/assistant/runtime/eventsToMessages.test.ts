@@ -410,3 +410,62 @@ describe('YCA display message projector', () => {
     expect(project(events)[0]).not.toBe(initial[0]);
   });
 });
+
+describe('captured file projection stability', () => {
+  it('updates only the matching tool and retains equivalent captures across replay and recomputation', () => {
+    const project = createYcaMessageProjector();
+    const files = [{ path: 'Actual.java', kind: 'update', oldText: 'class Before {}\n', newText: 'class After {}\n' }];
+    const events = [
+      event('user', 'change files'),
+      event('tool-started', 'edit_file', { ordinal: 1, args: '{"path":"requested.java"}' }),
+      event('tool-started', 'edit_file', { ordinal: 2, args: '{"path":"other.java"}' }),
+    ];
+    const before = project(events);
+    events.push(event('tool-files-changed', 'edit_file', { ordinal: 1, files }));
+    const captured = project(events);
+    expect(captured[0]).toBe(before[0]);
+    expect(captured[2]).toBe(before[2]);
+    expect(captured[1]).not.toBe(before[1]);
+    expect(captured[1].id).toBe(before[1].id);
+    expect(captured[1].metadata.custom.ycaBlock).toMatchObject({ state: 'running', files });
+    expect(before[1].metadata.custom.ycaBlock).not.toHaveProperty('files');
+    expect(project(JSON.parse(JSON.stringify(events)))).toBe(captured);
+
+    // A new, equivalent mutation forces reducer work without changing visible data.
+    events.push(event('tool-files-changed', 'edit_file', { ordinal: 1, files: structuredClone(files) }));
+    expect(project(events)).toBe(captured);
+    events.push(event('text-delta', 'progress'));
+    const recomputed = project(events);
+    captured.forEach((message, index) => expect(recomputed[index]).toBe(message));
+    expect(project(JSON.parse(JSON.stringify(events)))).toBe(recomputed);
+
+    events.push(event('tool-finished', 'edit_file', { ordinal: 1, output: 'finished', success: true }));
+    const done = project(events);
+    expect(done[1].id).toBe(captured[1].id);
+    expect(done[1]).not.toBe(captured[1]);
+    expect(done[1].metadata.custom.ycaBlock).toMatchObject({ state: 'done', files, output: 'finished' });
+    expect(done[0]).toBe(captured[0]);
+    expect(done[2]).toBe(captured[2]);
+    expect(project(JSON.parse(JSON.stringify(events)))).toBe(done);
+  });
+
+  it('preserves metadata-only and hostile paths without converting them into source or tool results', () => {
+    const project = createYcaMessageProjector();
+    const path = '../../<script>alert(1)</script>\n+++ b/forged';
+    const events = [
+      event('tool-started', 'write_file', { ordinal: 1 }),
+      event('tool-files-changed', 'write_file', { ordinal: 1, files: [{ path, kind: 'create' }] }),
+    ];
+    const messages = project(events);
+    const block = messages[0].metadata.custom.ycaBlock;
+    expect(block).toMatchObject({ state: 'running', files: [{ path, kind: 'create' }] });
+    if (block.kind !== 'tool') {
+      throw new Error('Expected tool card');
+    }
+    expect(block.files).toEqual([{ path, kind: 'create' }]);
+    expect(parts(messages[0])[0]).not.toHaveProperty('result');
+    expect(project(JSON.parse(JSON.stringify(events)))).toBe(messages);
+    events.push(event('tool-files-changed', 'write_file', { ordinal: 999, files: [{ path: 'wrong', kind: 'delete' }] }));
+    expect(project(events)).toBe(messages);
+  });
+});

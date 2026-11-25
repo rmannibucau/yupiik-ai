@@ -49,6 +49,44 @@ function open(details: HTMLDetailsElement) {
 }
 
 describe('standalone assistant-ui rendering integration', () => {
+  it('shows captured partial changes after failure, metadata-only files, and bounded file pagination', () => {
+    const files = Array.from({ length: 7 }, (_, index) => ({ path: `file${index}.java`, kind: 'update' as const,
+      ...(index === 1 ? {} : { oldText: 'before\n', newText: 'after\n' }) }));
+    const block: ToolBlock = { kind: 'tool', name: 'apply_patch', state: 'done', success: false, output: 'Partial failure', content: '', files };
+    render(<ToolCard block={block} collapsed onToggle={() => {}} diffMode="simple" />);
+    expect(host.querySelector('[aria-label="Applied file changes"]')).toBeNull();
+    render(<ToolCard block={block} collapsed={false} onToggle={() => {}} diffMode="simple" />);
+    const changes = host.querySelector('[aria-label="Applied file changes"]')!;
+    expect(changes.querySelectorAll('.yca-tool-patch-file')).toHaveLength(5);
+    expect(changes.textContent).toContain('Partial changes can remain even if the tool failed');
+    expect(changes.textContent).toContain('before/after text was not captured');
+    expect(changes.querySelector('pre')?.textContent).toContain('-before\n+after');
+    click([...changes.querySelectorAll('button')].find(element => element.textContent === 'More changed files')!);
+    expect(changes.querySelectorAll('.yca-tool-patch-file')).toHaveLength(2);
+    expect(changes.textContent).toContain('file6.java');
+    click([...changes.querySelectorAll('button')].find(element => element.textContent === 'Previous changed files')!);
+    expect(changes.textContent).toContain('file0.java');
+  });
+
+  it('keeps oversized captures available through exact before/after pages instead of computing an unbounded diff', () => {
+    const before = 'b'.repeat(100_001) + '\r\nBEFORE_END';
+    const after = '<script>unsafe()</script>\r\nAFTER_END';
+    const block: ToolBlock = { kind: 'tool', name: 'edit_file', state: 'done', success: true, content: '',
+      files: [{ path: 'large.txt', kind: 'update', oldText: before, newText: after }] };
+    render(<ToolCard block={block} collapsed={false} onToggle={() => {}} />);
+    expect(host.querySelector('.diff-split')).toBeNull();
+    const beforeRegion = host.querySelector('[aria-label="Captured before"]')!;
+    let recovered = beforeRegion.textContent ?? '';
+    const more = button('Show more Captured before');
+    while (!more.disabled) {
+      click(more);
+      recovered += beforeRegion.textContent;
+    }
+    expect(recovered).toBe(before);
+    expect(host.querySelector('[aria-label="Captured after"]')?.textContent).toBe(after);
+    expect(host.querySelector('script')).toBeNull();
+  });
+
   it.each([false, true])('renders successful final skills as Markdown with separate optional front matter (%s)', (withFrontMatter) => {
     const metadata = 'name: example\r\ndescription: "**literal**"\r\n';
     const body = '\r\n# Skill instructions\r\n\r\nUse **care** and `tools`.\r\n\r\n- First step\r\n\r\n```java\r\nclass Skill {}\r\n```\r\n';

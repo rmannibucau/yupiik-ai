@@ -81,9 +81,21 @@ function projectBlock(block: Block): YcaThreadMessage {
 }
 
 function sameBlock(previous: Block, next: Block): boolean {
-  // Blocks are flat scalar records. Do not stringify markdown/stdout on every streaming update.
+  // Never stringify markdown, stdout or captured source on streaming updates.
   let previousSize = 0;
   for (const key in previous) {
+    if (key === 'files' && previous.kind === 'tool' && next.kind === 'tool') {
+      const left = previous.files;
+      const right = next.files;
+      if (left !== right && (!left || !right || left.length !== right.length || left.some((file, index) => {
+        const other = right[index];
+        return file.path !== other.path || file.kind !== other.kind || file.oldText !== other.oldText || file.newText !== other.newText;
+      }))) {
+        return false;
+      }
+      previousSize++;
+      continue;
+    }
     if (previous[key as keyof Block] !== next[key as keyof Block]) {
       return false;
     }

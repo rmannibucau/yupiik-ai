@@ -2,6 +2,7 @@ import { ContextBar, formatQuotaReset, quotaWindowLabel } from '../components/Us
 import { createContext, forwardRef, memo, useCallback, useContext, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useParams } from 'react-router';
 import { ToolCard } from '../components/ToolCard';
+import type { DiffMode } from '../assistant/tools/DiffViewer';
 import { VisibilityMenu, type Visibility } from '../components/VisibilityMenu';
 import { MarkdownContent } from '../components/MarkdownContent';
 import { SessionMetadata } from '../components/SessionMetadata';
@@ -183,6 +184,7 @@ export function ChatPage({
   );
   // global tool visibility: 'shown' | 'collapsed' | 'hidden' (mirrors TUI /tool-output states)
   const [toolVisibility, setToolVisibility] = useState<Visibility>('collapsed');
+  const [diffMode, setDiffMode] = useState<DiffMode>('auto');
   // Disclosure is display-only; /thinking still owns backend show/hide and never drops the log.
   const [thoughtVisibility, setThoughtVisibility] = useState<Visibility>('collapsed');
   const [metrics, setMetrics] = useState({ perTurn: true, session: true, full: false });
@@ -881,6 +883,14 @@ export function ChatPage({
           const command = { hidden: 'hide', collapsed: 'collapse', shown: 'show' }[value];
           void call('session.slash', { id: sessionId, text: `/tool-output ${command}` }).catch(() => undefined);
         }} />
+        <label className="flex items-center gap-1">Diff
+          <select aria-label="Diff mode" value={diffMode} onChange={(event) => setDiffMode(event.target.value as DiffMode)}
+            style={{ background: 'var(--yca-panel)', color: 'var(--yca-text)' }}>
+            <option value="auto">Auto</option>
+            <option value="side-by-side">Side-by-side</option>
+            <option value="simple">Simple</option>
+          </select>
+        </label>
         <VisibilityMenu label="Thoughts" key={`thoughts-${sessionId}`} value={thoughtVisibility} onChange={value => {
           setThoughtVisibility(value);
           void call('session.slash', { id: sessionId, text: `/thinking ${value === 'hidden' ? 'hide' : 'show'}` }).catch(() => undefined);
@@ -925,7 +935,8 @@ export function ChatPage({
           <EventLog
             ref={eventLogRef}
             toolVisibility={toolVisibility}
-              thoughtVisibility={thoughtVisibility}
+            diffMode={diffMode}
+            thoughtVisibility={thoughtVisibility}
             windowBlocks={windowBlocks}
             hasServerHistory={moreReplayExists}
             onLoadServerEarlier={loadServerEarlier}
@@ -1608,6 +1619,7 @@ export function latestTranscriptMessage(events: ReadonlyArray<{ type: string; me
 
 export type EventLogHandle = { loadEarlier: () => void; canLoadEarlier: () => boolean };
 const GlobalToolCollapse = createContext(true);
+const GlobalDiffMode = createContext<DiffMode>('auto');
 const GlobalThoughtCollapse = createContext(true);
 const DisclosureOverrides = createContext<Map<string, unknown> | null>(null);
 const MESSAGE_COMPONENTS = { Message: RuntimeMessage };
@@ -1618,6 +1630,7 @@ export const EventLog = memo(
     EventLogHandle,
     {
       toolVisibility: 'shown' | 'collapsed' | 'hidden';
+      diffMode?: DiffMode;
       thoughtVisibility: Visibility;
       windowBlocks: number;
       hasServerHistory: boolean;
@@ -1626,7 +1639,7 @@ export const EventLog = memo(
     }
   >(
     function EventLog(
-      { toolVisibility, thoughtVisibility, windowBlocks, hasServerHistory, onLoadServerEarlier, onPauseFollow },
+      { toolVisibility, diffMode = 'auto', thoughtVisibility, windowBlocks, hasServerHistory, onLoadServerEarlier, onPauseFollow },
       ref,
     ) {
       // The runtime can add a synthetic empty assistant placeholder while running. YCA's
@@ -1742,6 +1755,7 @@ export const EventLog = memo(
       return (
         <DisclosureOverrides.Provider value={disclosureOverrides.current}>
         <GlobalToolCollapse.Provider value={toolVisibility === 'collapsed'}>
+        <GlobalDiffMode.Provider value={diffMode}>
         <GlobalThoughtCollapse.Provider value={thoughtVisibility === 'collapsed'}>
         <div ref={rootRef} className="space-y-2">
           {(extended || hasServerHistory) && (
@@ -1758,6 +1772,7 @@ export const EventLog = memo(
       )}
     </div>
     </GlobalThoughtCollapse.Provider>
+    </GlobalDiffMode.Provider>
     </GlobalToolCollapse.Provider>
     </DisclosureOverrides.Provider>
   );
@@ -1778,6 +1793,7 @@ function RuntimeBlockPart() {
 }
 
 const BlockView = memo(function BlockView({ block, globalCollapsed }: { block: Block; globalCollapsed: boolean }) {
+  const diffMode = useContext(GlobalDiffMode);
   const thoughtsCollapsed = useContext(GlobalThoughtCollapse);
   // per-card override on top of the global show/collapse-all header switch (tools are collapsed by
   // default, matching the TUI's default tool-output posture). null = follow the global toggle.
@@ -1838,7 +1854,7 @@ const BlockView = memo(function BlockView({ block, globalCollapsed }: { block: B
     );
   }
   if (block.kind === 'tool') {
-    return <ToolCard block={block} collapsed={collapsed} onToggle={toggleCard} />;
+    return <ToolCard block={block} collapsed={collapsed} onToggle={toggleCard} diffMode={diffMode} />;
   }
   if (block.kind === 'error') {
     return <div className="rounded border px-3 py-1 text-[15px]" style={{ borderColor: 'var(--yca-error)', color: 'var(--yca-error)' }}>{block.content}</div>;

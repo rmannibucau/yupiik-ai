@@ -20,6 +20,7 @@ import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.fusion.framework.build.api.event.OnEvent;
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.agent.AgentEvent;
+import io.yupiik.ia.agent.core.security.SecretRedactor;
 import io.yupiik.ia.agent.core.todo.TodoItem;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
@@ -39,9 +40,15 @@ import java.util.concurrent.ConcurrentHashMap;
 public class SseBroker {
     private final ConcurrentHashMap<String, Set<SseSubscription>> subscriptions = new ConcurrentHashMap<>();
     private final JsonMapper mapper;
+    private final SecretRedactor redactor;
 
     public SseBroker(final JsonMapper mapper) {
+        this(mapper, null);
+    }
+
+    public SseBroker(final JsonMapper mapper, final SecretRedactor redactor) {
         this.mapper = mapper;
+        this.redactor = redactor;
     }
 
     /** @return the set of live subscriptions for a session, or a fresh empty set. */
@@ -95,7 +102,12 @@ public class SseBroker {
 
     /** Flattens an agent event and broadcasts it to the session. */
     public void pushAgentEvent(final String sessionId, final AgentEvent event) {
-        broadcastRaw(sessionId, frame("agent", WebEventDto.of(event)), isDroppable(event));
+        broadcastRaw(
+                sessionId,
+                frame(
+                        "agent",
+                        WebEventDto.of(event, text -> redactor == null ? text : redactor.redact(text, sessionId))),
+                isDroppable(event));
     }
 
     /**
