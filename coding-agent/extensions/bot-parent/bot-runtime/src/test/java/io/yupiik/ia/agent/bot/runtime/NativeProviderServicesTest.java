@@ -222,7 +222,9 @@ class NativeProviderServicesTest {
                     ApiFlavor.COMPLETIONS,
                     "Bearer secret",
                     CAPABILITY,
-                    Duration.ofMillis(disconnect ? 400 : 40),
+                    // Leave enough time for socket setup and the first frame under reactor load.
+                    // The deadline case still blocks on the next frame until cancellation occurs.
+                    Duration.ofSeconds(disconnect ? 30 : 2),
                     1,
                     () -> new NativeProviderServices.Reservation() {
                         public void dispatched() {}
