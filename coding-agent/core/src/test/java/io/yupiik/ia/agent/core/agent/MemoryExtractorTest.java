@@ -1309,7 +1309,8 @@ class MemoryExtractorTest {
                 baseline.logging(),
                 baseline.hooks(),
                 baseline.notifications(),
-                baseline.secrets());
+                baseline.secrets(),
+                null);
     }
 
     private static CodingAgentConfiguration withStorageHomeWorkingDirProjectDir(
@@ -1353,6 +1354,7 @@ class MemoryExtractorTest {
                 baseline.logging(),
                 baseline.hooks(),
                 baseline.notifications(),
-                baseline.secrets());
+                baseline.secrets(),
+                null);
     }
 }

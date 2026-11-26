@@ -98,6 +98,7 @@ class WebSessionManagerPromptTest {
             super(Map.of(
                     "yca.storageHome", storageHome.toString(),
                     "yca.home", storageHome.resolve("home").toString(),
+                    "yca.view.diffViewMode", "SIMPLE",
                     "yca.workingDir", storageHome.resolve("launch").toString(),
                     "yca.projectDir", storageHome.resolve("server-project").toString()));
         }
@@ -174,6 +175,7 @@ class WebSessionManagerPromptTest {
                     }
                 };
         this.manager = new WebSessionManager(
+                configuration,
                 runtimeFactory,
                 new NoopShellRegistry(),
                 new WebSlashCommands(new SlashRegistry() {}, null, sessionStore),
@@ -774,8 +776,9 @@ class WebSessionManagerPromptTest {
     @Test
     void reconnectSnapshotRestoresDisplaySettings() {
         final var session = manager.attach("s1").env().session();
+        assertEquals(DiffViewMode.SIMPLE, session.diffViewMode());
         assertEquals(
-                "auto",
+                "simple",
                 manager.snapshotFor("s1").stream()
                         .filter(event -> "settings".equals(event.type()))
                         .findFirst()

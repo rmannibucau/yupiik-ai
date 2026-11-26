@@ -86,7 +86,6 @@ describe('DiffViewer modes and literal fallback', () => {
 
   it.each([
     ['paged continuation', patch, false],
-    ['OpenCode patch', '*** Begin Patch\n*** Add File: x\n+new\n*** End Patch', true],
     ['missing header', '@@ -1 +1 @@\n-old\n+new\n', true],
     ['incomplete hunk', '--- a/file\n+++ b/file\n@@ -1,2 +1,2 @@\n-old\n+new\n', true],
     ['invalid hunk', 'diff --git a/file b/file\n--- a/file\n+++ b/file\n@@ nonsense @@\n+new\n', true],
@@ -128,6 +127,62 @@ describe('DiffViewer modes and literal fallback', () => {
     await render({ text: 'partial text', mode: 'auto' });
     expect(host.querySelector('pre')?.textContent).toBe('partial text');
     expect(host.querySelector('table')).toBeNull();
+  });
+
+  it('measures a previously hidden container instead of relying on the viewport width', async () => {
+    vi.mocked(HTMLElement.prototype.getBoundingClientRect).mockReturnValue({ width: 0 } as DOMRect);
+    await render({ text: patch, mode: 'side-by-side' });
+    expect(host.querySelector('table')).toBeNull();
+    act(() => resize(1000));
+    await split();
+    act(() => resize(600));
+    expect(host.querySelector('pre')?.textContent).toBe(patch);
+  });
+
+  it.each(['auto', 'side-by-side'] as const)('renders OpenCode patch bodies without inventing file coordinates in %s mode', async (mode) => {
+    const text = '*** Begin Patch\n*** Update File: Example.java\n@@ class Example\n context\n-first\n-second\n+one\n+two\n@@\n--- literal removed content\n+++ literal added content\n*** End of File\n*** End Patch';
+    await render({ text, mode });
+    const view = await split();
+    expect(view.textContent).toContain('Snippet preview; file line numbers unavailable.');
+    expect(view.textContent).toContain('@@ class Example');
+    expect(view.textContent).toContain('End of file anchor.');
+    expect(view.querySelector('.diff-gutter')).toBeNull();
+    expect([...view.querySelectorAll('.diff-code-delete')].map(node => node.textContent)).toEqual(['first', 'second', '-- literal removed content']);
+    expect([...view.querySelectorAll('.diff-code-insert')].map(node => node.textContent)).toEqual(['one', 'two', '++ literal added content']);
+    const paired = view.querySelector('.diff-code-delete')!.closest('tr')!;
+    expect(paired.querySelector('.diff-code-insert')?.textContent).toBe('one');
+    act(() => resize(500));
+    expect(host.querySelector('pre')?.textContent).toBe(text);
+    act(() => resize(1000));
+    await split();
+  });
+
+  it.each([
+    '@@ context\n-old\n+new\nunsupported syntax',
+    '@@ context\n\\ No newline at end of string\n-old\n+new',
+    '@@ context\n-old\n+new\n*** End of File\n+unexpected',
+    '@@ context\n context only',
+    '-old\n+new\n' + 'x'.repeat(100_001),
+    '-old\n+new\n' + ' context\n'.repeat(2000),
+  ])('keeps unsupported or unbounded snippet input literal: %.40s', async (text) => {
+    await render({ text, mode: 'side-by-side', unnumbered: true });
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 20)); });
+    expect(host.querySelector('pre')?.textContent).toBe(text);
+    expect(host.querySelector('table')).toBeNull();
+  });
+
+  it.each([
+    { text: '+\tnew  \n', added: '\tnew  ', removed: undefined },
+    { text: '-\told  \n', added: undefined, removed: '\told  ' },
+    // react-diff-view renders a space placeholder to keep empty code cells visible.
+    { text: '-\n+\n', added: ' ', removed: ' ' },
+    { text: '@@\r\n-old\r\n+new\r\n', added: 'new', removed: 'old' },
+  ])('renders bounded insertion/deletion/blank snippets without coordinates: $text', async ({ text, added, removed }) => {
+    await render({ text, mode: 'side-by-side', unnumbered: true });
+    const view = await split();
+    expect(view.querySelector('.diff-code-insert')?.textContent).toBe(added);
+    expect(view.querySelector('.diff-code-delete')?.textContent).toBe(removed);
+    expect(view.querySelector('.diff-gutter')).toBeNull();
   });
 });
 
@@ -228,18 +283,20 @@ describe('ToolCard captured diff integration', () => {
     expect(view.querySelector('.token.keyword')?.textContent).toBe('class');
   });
 
-  it('keeps collapsed contents unmounted until the controlled card opens', async () => {
+  it('keeps auto diffs mounted while request and result details follow the controlled disclosure', async () => {
     await act(async () => {
       root.render(<ToolCard block={block} collapsed onToggle={() => {}} />);
       await import('./SplitDiff');
     });
-    expect(host.querySelector('[aria-label="Applied file changes"]')).toBeNull();
-    expect(host.querySelector('[data-slot="diff-viewer"]')).toBeNull();
-    expect(host.textContent).not.toContain('class Before');
+    await split();
+    expect(host.querySelector('[aria-label="Applied file changes"]')).not.toBeNull();
+    expect(host.querySelector('[aria-label="Tool request"], [aria-label="Tool result"], details')).toBeNull();
+    expect(host.textContent).toContain('class Before');
     await act(async () => { root.render(<ToolCard block={block} collapsed={false} onToggle={() => {}} />); });
     await split();
     await act(async () => { root.render(<ToolCard block={block} collapsed onToggle={() => {}} />); });
-    expect(host.querySelector('[data-slot="diff-viewer"]')).toBeNull();
+    await split();
+    expect(host.querySelector('[aria-label="Tool request"], [aria-label="Tool result"], details')).toBeNull();
   });
 
   it('honors explicit simple mode for applied captures', async () => {
@@ -250,12 +307,12 @@ describe('ToolCard captured diff integration', () => {
     expect(host.querySelector('table')).toBeNull();
   });
 
-  it.each(['simple', 'side-by-side'] as const)('reveals only applied diffs with collapsed details in %s mode', async (diffMode) => {
+  it.each(['auto', 'simple', 'side-by-side'] as const)('reveals only applied diffs with collapsed details in %s mode', async (diffMode) => {
     await act(async () => {
       root.render(<ToolCard block={block} collapsed onToggle={() => {}} diffMode={diffMode} />);
       await import('./SplitDiff');
     });
-    if (diffMode === 'side-by-side') {
+    if (diffMode !== 'simple') {
       await split();
     }
     expect(host.querySelector('[aria-label="Applied file changes"]')).not.toBeNull();
@@ -273,17 +330,40 @@ describe('ToolCard captured diff integration', () => {
         kind: 'tool', name: 'edit_file', state: 'done', content: '', output: 'PRIVATE_RESULT', success: false,
         args: JSON.stringify({ path: 'Example.java', oldString: '\told  \n', newString: '\tnew  ', replaceAll: true }),
       }} collapsed onToggle={() => {}} diffMode={diffMode} />);
+      await import('./SplitDiff');
     });
+    if (diffMode !== 'simple') {
+      const view = await split();
+      expect(view.querySelector('.diff-code-delete')?.textContent).toBe('\told  ');
+      expect(view.querySelector('.diff-code-insert')?.textContent).toBe('\tnew  ');
+      expect(view.querySelector('.diff-gutter')).toBeNull();
+      expect(view.textContent).toContain('After: no final newline.');
+    }
     const preview = host.querySelector('[aria-label="Requested replacement"]');
-    if (diffMode === 'auto') {
-      expect(preview).toBeNull();
-    } else {
-      expect(preview?.textContent).toContain('all occurrences');
-      expect(preview?.textContent).toContain('not applied file changes or file line numbers');
+    expect(preview?.textContent).toContain('all occurrences');
+    expect(preview?.textContent).toContain('not applied file changes or file line numbers');
+    if (diffMode === 'simple') {
       expect(preview?.textContent).toContain('-\told  \n+\tnew  \n\\ No newline at end of string');
     }
     expect(host.textContent).not.toContain('PRIVATE_RESULT');
     expect(host.querySelector('[aria-label="Tool request"], [aria-label="Tool result"], details')).toBeNull();
+  });
+
+  it.each(['auto', 'side-by-side'] as const)('keeps OpenCode request intent split and separately labeled in %s mode', async (diffMode) => {
+    const patch = '*** Begin Patch\n*** Add File: Example.java\n+class Added {}\n*** Update File: Other.java\n@@ class Existing\n-class Before {}\n+class After {}\n*** End Patch';
+    await act(async () => {
+      root.render(<ToolCard block={{ kind: 'tool', name: 'apply_patch', state: 'done', success: false, content: 'PRIVATE_RESULT', args: JSON.stringify({ patch }) }} collapsed onToggle={() => {}} diffMode={diffMode} />);
+      await import('./SplitDiff');
+    });
+    await split();
+    await vi.waitFor(() => expect(host.querySelectorAll('table')).toHaveLength(2));
+    expect(host.querySelector('[aria-label="Requested patch for Example.java"] .diff-code-insert')?.textContent).toBe('class Added {}');
+    expect(host.querySelector('[aria-label="Requested patch for Other.java"] .diff-code-delete')?.textContent).toBe('class Before {}');
+    expect(host.querySelector('.diff-gutter')).toBeNull();
+    expect(host.querySelector('.token.keyword')?.textContent).toBe('class');
+    expect(host.textContent).toContain('Requested patch, not an applied diff.');
+    expect(host.textContent).not.toContain('PRIVATE_RESULT');
+    expect(host.querySelector('[aria-label="Applied file changes"]')).toBeNull();
   });
 
   it('renders metadata-only and hostile paths as text without inventing an empty-file diff', async () => {

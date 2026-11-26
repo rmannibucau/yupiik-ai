@@ -147,6 +147,7 @@ export type PatchFile = {
   added: number;
   removed: number;
   diff: string;
+  unnumbered?: true;
 };
 export type PatchPreview = { files: PatchFile[]; warning?: string };
 
@@ -187,7 +188,7 @@ export function parsePatch(patch: string): PatchPreview {
     if (operation) {
       flush();
       openCode = true;
-      file = { path: operation[2], operation: operation[1] === 'Add' ? 'add' : operation[1] === 'Delete' ? 'delete' : 'update', added: 0, removed: 0, diff: '' };
+      file = { path: operation[2], operation: operation[1] === 'Add' ? 'add' : operation[1] === 'Delete' ? 'delete' : 'update', added: 0, removed: 0, diff: '', unnumbered: true };
       inHunk = operation[1] === 'Add';
       continue;
     }

@@ -1708,8 +1708,7 @@ class TuiCommandRenderTest {
                         state.runCollapsed.clear();
                         final var frame = renderTurnFrame(command, state, source, 120);
                         final var text = String.join("\n", frame.rows());
-                        final var visible = visibility == ToolOutputVisibility.SHOWN
-                                || (visibility == ToolOutputVisibility.COLLAPSED && mode != DiffViewMode.AUTO);
+                        final var visible = visibility != ToolOutputVisibility.HIDDEN;
                         assertEquals(visible, text.contains("Applied changes"), visibility + "/" + mode + ": " + text);
                         assertEquals(visible, text.contains("actual-before"), text);
                         assertFalse(text.contains(" - common-before"), text);
@@ -1725,6 +1724,20 @@ class TuiCommandRenderTest {
                                             renderTurnFrame(command, state, source, 120)
                                                     .rows())
                                     .contains("actual-after"));
+                        }
+                        if (visibility == ToolOutputVisibility.SHOWN) {
+                            if (source.equals(one)) {
+                                state.collapsedTools.add(1L);
+                            } else {
+                                state.runCollapsed.put(
+                                        frame.runHeaders().getFirst().id(), true);
+                            }
+                            final var collapsedText = String.join(
+                                    "\n",
+                                    renderTurnFrame(command, state, source, 120).rows());
+                            assertTrue(collapsedText.contains("actual-after"), mode + ": " + collapsedText);
+                            assertFalse(collapsedText.contains("result-details"), collapsedText);
+                            state.collapsedTools.clear();
                         }
                     }
                 }
@@ -7487,9 +7500,99 @@ class TuiCommandRenderTest {
         }
 
         @Test
+        void autoDiffDefaultAppliesToStartupAndNewTabs() throws Exception {
+            assertDiffDefaultForStartupAndNewTab(DiffViewMode.AUTO);
+        }
+
+        @Test
         void tuiConfDefaultsAutoOpenBrowserToTrue() {
             final var conf = new TuiCommand.TuiConf("", "", KeyBindingPreset.STANDARD, false, "dark");
             assertTrue(conf.autoOpenBrowser(), "tui.autoOpenBrowser must default to true");
+        }
+    }
+
+    private void assertDiffDefaultForStartupAndNewTab(final DiffViewMode expected) throws Exception {
+        final var command = command(testRegistry(), stubAgentLoop());
+        uiThread = new Thread(command, "tui-diff-default-test");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("yca coding agent");
+        final var tabsField = TuiCommand.class.getDeclaredField("tabManager");
+        tabsField.setAccessible(true);
+        final var tabs = (TabManager) tabsField.get(command);
+        final var first = tabs.active();
+        assertEquals(expected, first.diffViewMode);
+        assertEquals(expected, first.session.diffViewMode());
+
+        // A tab-local override must not become the default of subsequently opened tabs.
+        final var override = expected == DiffViewMode.SIMPLE ? DiffViewMode.SIDE_BY_SIDE : DiffViewMode.SIMPLE;
+        final var changed = new CompletableFuture<Void>();
+        tuiRef.get().runLater(() -> {
+            first.diffViewMode = override;
+            first.session.diffViewMode(override);
+            changed.complete(null);
+        });
+        changed.get(TIMEOUT_MS, TimeUnit.MILLISECONDS);
+        tuiRef.get().dispatch(KeyEvent.ofChar('n', KeyModifiers.CTRL));
+        // The close marker is already visible with one tab; wait for Ctrl+N's state transition.
+        final var deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(TIMEOUT_MS);
+        while (tabs.size() != 2 || tabs.active() == first) {
+            assertTrue(
+                    System.nanoTime() < deadline,
+                    () -> "second tab did not become active; tab count: " + tabs.size() + "; last screen:\n"
+                            + backend.text());
+            awaitTextFrame();
+        }
+        assertEquals(2, tabs.size());
+        final var second = tabs.active();
+        Assertions.assertNotSame(first, second);
+        assertEquals(expected, second.diffViewMode);
+        assertEquals(expected, second.session.diffViewMode());
+        assertEquals(override, first.diffViewMode);
+        assertEquals(override, first.session.diffViewMode());
+        quit();
+    }
+
+    @Nested
+    @FusionSupport(modules = ConfiguredDiffModule.class)
+    class ConfiguredDiff {
+        @TempDir
+        private static Path storage;
+
+        private static MockLlmServer primary;
+
+        @BeforeEach
+        void setup(final JsonMapper mapper, @Fusion final CodingAgentConfiguration configuration) {
+            assertEquals(DiffViewMode.SIMPLE, configuration.view().diffViewMode());
+            start(mapper, configuration, primary, null);
+        }
+
+        @AfterAll
+        static void closeServers() {
+            if (primary != null) {
+                primary.close();
+            }
+        }
+
+        @Test
+        void configuredDiffDefaultAppliesToStartupAndNewTabs() throws Exception {
+            assertDiffDefaultForStartupAndNewTab(DiffViewMode.SIMPLE);
+        }
+    }
+
+    public static class ConfiguredDiffModule extends TuiConfigurationTestModule {
+        public ConfiguredDiffModule() throws IOException {
+            super(properties());
+        }
+
+        private static Map<String, String> properties() throws IOException {
+            assertNotNull(ConfiguredDiff.storage, "JUnit must initialize the scenario directory before Fusion");
+            ConfiguredDiff.primary = new MockLlmServer();
+            return Map.of(
+                    "yca.storageHome", ConfiguredDiff.storage.toString(),
+                    "yca.provider.providers.0.baseUrl", ConfiguredDiff.primary.baseUrl(),
+                    "yca.view.diffViewMode", "SIMPLE");
         }
     }
 

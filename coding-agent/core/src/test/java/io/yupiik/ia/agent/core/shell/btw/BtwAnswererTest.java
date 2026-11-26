@@ -1024,7 +1024,8 @@ class BtwAnswererTest {
                 configured.logging(),
                 configured.hooks(),
                 configured.notifications(),
-                configured.secrets());
+                configured.secrets(),
+                null);
     }
 
     private SystemPromptBuilder rootBuilder(final Path root) {
@@ -1408,7 +1409,8 @@ class BtwAnswererTest {
                 baseline.logging(),
                 baseline.hooks(),
                 baseline.notifications(),
-                baseline.secrets());
+                baseline.secrets(),
+                null);
     }
 
     public static class ToolsEnabledFeedbackUsesOwningServiceScenarioModule extends ConfigurationTestModule {

@@ -474,7 +474,8 @@ class SlackContextAgentLoopTest {
                             baselineAgent.logging(),
                             baselineAgent.hooks(),
                             baselineAgent.notifications(),
-                            baselineAgent.secrets());
+                            baselineAgent.secrets(),
+                            null);
                     final var clock = Clock.systemUTC();
                     final var providers = new ProviderManager(configuration, json);
                     try (final var chat = new ChatClient(configuration, json, providers, clock, http)) {

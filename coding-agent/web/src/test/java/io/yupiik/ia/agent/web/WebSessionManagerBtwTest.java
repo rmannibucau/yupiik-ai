@@ -120,6 +120,7 @@ class WebSessionManagerBtwTest {
                 null, // SecretRedactor
                 null); // NotificationService
         this.manager = new WebSessionManager(
+                configuration,
                 runtimeFactory,
                 new NoopShellRegistry(),
                 new WebSlashCommands(new SlashRegistry() {}, null, sessionStore),

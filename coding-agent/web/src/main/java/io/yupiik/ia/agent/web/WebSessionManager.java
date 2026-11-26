@@ -18,6 +18,7 @@ package io.yupiik.ia.agent.web;
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.agent.AgentEvent;
+import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.llm.ChatClient;
 import io.yupiik.ia.agent.core.llm.Message;
 import io.yupiik.ia.agent.core.llm.Usage;
@@ -27,6 +28,7 @@ import io.yupiik.ia.agent.core.question.FeedbackGate;
 import io.yupiik.ia.agent.core.question.UserFeedbackService;
 import io.yupiik.ia.agent.core.session.SessionStore;
 import io.yupiik.ia.agent.core.shell.ConversationTranscript;
+import io.yupiik.ia.agent.core.shell.DiffViewMode;
 import io.yupiik.ia.agent.core.shell.SessionLifecycle;
 import io.yupiik.ia.agent.core.shell.SessionRuntime;
 import io.yupiik.ia.agent.core.shell.SessionRuntimeFactory;
@@ -99,12 +101,14 @@ public class WebSessionManager implements AutoCloseable {
     private final SpeakerLabels speakerLabels;
     private final ChatClient chatClient;
     private final NotificationService notifications;
+    private final CodingAgentConfiguration configuration;
 
     private final ConcurrentHashMap<String, WebSession> sessions = new ConcurrentHashMap<>();
     private final AtomicLong rpcId = new AtomicLong();
     private volatile Boolean sandboxOverride;
 
     public WebSessionManager(
+            final CodingAgentConfiguration configuration,
             final SessionRuntimeFactory sessionRuntimeFactory,
             final ShellRegistry shellRegistry,
             final WebSlashCommands slashRegistry,
@@ -115,6 +119,7 @@ public class WebSessionManager implements AutoCloseable {
             final JsonMapper mapper,
             final BtwAnswerer btwAnswerer) {
         this(
+                configuration,
                 sessionRuntimeFactory,
                 shellRegistry,
                 slashRegistry,
@@ -129,6 +134,7 @@ public class WebSessionManager implements AutoCloseable {
     }
 
     public WebSessionManager(
+            final CodingAgentConfiguration configuration,
             final SessionRuntimeFactory sessionRuntimeFactory,
             final ShellRegistry shellRegistry,
             final WebSlashCommands slashRegistry,
@@ -141,6 +147,7 @@ public class WebSessionManager implements AutoCloseable {
             final SpeakerLabels speakerLabels,
             final ChatClient chatClient) {
         this(
+                configuration,
                 sessionRuntimeFactory,
                 shellRegistry,
                 slashRegistry,
@@ -156,6 +163,7 @@ public class WebSessionManager implements AutoCloseable {
     }
 
     public WebSessionManager(
+            final CodingAgentConfiguration configuration,
             final SessionRuntimeFactory sessionRuntimeFactory,
             final ShellRegistry shellRegistry,
             final WebSlashCommands slashRegistry,
@@ -169,6 +177,7 @@ public class WebSessionManager implements AutoCloseable {
             final ChatClient chatClient,
             final NotificationService notifications) {
         this.notifications = notifications;
+        this.configuration = configuration;
         this.sessionRuntimeFactory = sessionRuntimeFactory;
         this.shellRegistry = shellRegistry;
         this.slashRegistry = slashRegistry;
@@ -221,7 +230,13 @@ public class WebSessionManager implements AutoCloseable {
         final var runtime = sessionRuntimeFactory.create(sessionId, workdir, sandboxOverride);
         final var transcript = new ConversationTranscript();
         final var frontend = new WebShellFrontend(sessionId, broker, transcript, mapper);
-        final var session = new ShellSession().sessionId(sessionId).runtime(runtime);
+        final var session = new ShellSession()
+                .sessionId(sessionId)
+                .runtime(runtime)
+                .diffViewMode(
+                        configuration.view() == null || configuration.view().diffViewMode() == null
+                                ? DiffViewMode.AUTO
+                                : configuration.view().diffViewMode());
         if (speakerLabels != null) {
             transcript.setFeedbackLabelResolver((identity, user, at) -> {
                 final var settings = session.chatSettings();

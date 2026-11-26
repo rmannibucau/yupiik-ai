@@ -54,7 +54,7 @@ describe('standalone assistant-ui rendering integration', () => {
       ...(index === 1 ? {} : { oldText: 'before\n', newText: 'after\n' }) }));
     const block: ToolBlock = { kind: 'tool', name: 'apply_patch', state: 'done', success: false, output: 'Partial failure', content: '', files };
     render(<ToolCard block={block} collapsed onToggle={() => {}} diffMode="auto" />);
-    expect(host.querySelector('[aria-label="Applied file changes"]')).toBeNull();
+    expect(host.querySelector('[aria-label="Applied file changes"]')).not.toBeNull();
     render(<ToolCard block={block} collapsed={false} onToggle={() => {}} diffMode="simple" />);
     const changes = host.querySelector('[aria-label="Applied file changes"]')!;
     expect(changes.querySelectorAll('.yca-tool-patch-file')).toHaveLength(5);

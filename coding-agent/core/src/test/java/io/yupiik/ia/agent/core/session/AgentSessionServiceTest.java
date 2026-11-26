@@ -725,7 +725,8 @@ class AgentSessionServiceTest {
                     baseline.logging(),
                     baseline.hooks(),
                     baseline.notifications(),
-                    baseline.secrets());
+                    baseline.secrets(),
+                    null);
             final var memoryStore = new MemoryStore(config);
             final var service =
                     new AgentSessionService(null, null, null, null, memoryStore, null, null, null, config, null);
@@ -790,7 +791,8 @@ class AgentSessionServiceTest {
                     baseline.logging(),
                     baseline.hooks(),
                     baseline.notifications(),
-                    baseline.secrets());
+                    baseline.secrets(),
+                    null);
             final var store = new MemoryStore(config);
             Files.createDirectories(store.globalFile().getParent());
             Files.writeString(store.globalFile(), "- shared\n");
@@ -879,7 +881,8 @@ class AgentSessionServiceTest {
                     baseline.logging(),
                     baseline.hooks(),
                     baseline.notifications(),
-                    baseline.secrets());
+                    baseline.secrets(),
+                    null);
             final var service = new AgentSessionService(
                     null, null, null, null, new MemoryStore(config), null, null, null, config, null);
             assertEquals("- explicit\n", service.memory(root).project());
@@ -1276,7 +1279,8 @@ class AgentSessionServiceTest {
                 baseline.logging(),
                 baseline.hooks(),
                 baseline.notifications(),
-                baseline.secrets());
+                baseline.secrets(),
+                null);
     }
 
     private CodingAgentConfiguration agentsConfig(final String... names) {
@@ -1319,7 +1323,8 @@ class AgentSessionServiceTest {
                 baseline.logging(),
                 baseline.hooks(),
                 baseline.notifications(),
-                baseline.secrets());
+                baseline.secrets(),
+                null);
     }
 
     private AgentProvider agentProvider(final String... names) {

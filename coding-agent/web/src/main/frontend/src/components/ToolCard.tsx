@@ -25,8 +25,8 @@ const RESULT_LABELS: Record<BuiltinName, string> = {
 };
 
 /** A bounded window, not a permanent truncation. Even the final character remains reachable. */
-export function ProgressiveText({ text, label, language, diff = false, diffMode = 'simple', path, oldSource }: {
-  text: string; label: string; language?: string; diff?: boolean; diffMode?: DiffMode; path?: string; oldSource?: string;
+export function ProgressiveText({ text, label, language, diff = false, diffMode = 'simple', path, oldSource, unnumbered = false }: {
+  text: string; label: string; language?: string; diff?: boolean; diffMode?: DiffMode; path?: string; oldSource?: string; unnumbered?: boolean;
 }) {
   const [page, setPage] = useState(0);
   const id = useId();
@@ -35,7 +35,7 @@ export function ProgressiveText({ text, label, language, diff = false, diffMode 
   const startsAtLine = window.start === 0 || text[window.start - 1] === '\n';
   return <div className="yca-tool-text">
     {text.length === 0 ? <p className="yca-tool-muted">Empty string (0 characters)</p> : (
-      diff ? <DiffViewer id={id} tabIndex={0} role="region" className="yca-code-block yca-tool-diff" aria-label={label} text={window.text} startsAtLine={startsAtLine} mode={fullDiff ? diffMode : 'simple'} path={path} oldSource={oldSource} /> : <div id={id} tabIndex={0} role="region" aria-label={label}><CodeBlock code={window.text} language={language} className="yca-tool-code" /></div>
+      diff ? <DiffViewer id={id} tabIndex={0} role="region" className="yca-code-block yca-tool-diff" aria-label={label} text={window.text} startsAtLine={startsAtLine} mode={fullDiff ? diffMode : 'simple'} path={path} oldSource={oldSource} unnumbered={unnumbered} /> : <div id={id} tabIndex={0} role="region" aria-label={label}><CodeBlock code={window.text} language={language} className="yca-tool-code" /></div>
     )}
     {!fullDiff && text.length > TEXT_PAGE_SIZE && <div className="yca-tool-paging">
       <button type="button" disabled={window.start === 0} aria-label={`Show previous ${label}`} aria-controls={id} onClick={() => setPage(Math.max(0, Math.floor(window.start / TEXT_PAGE_SIZE) - 1))}>Show previous</button>
@@ -90,9 +90,9 @@ function PatchRequest({ patch, diffMode }: { patch: string; diffMode: DiffMode }
     {preview.warning && <p className="yca-tool-warning">{preview.warning}</p>}
     {preview.files.slice(start, start + 5).map((file, index) => <section className="yca-tool-patch-file" key={start + index}>
       <h5>{file.operation}: {file.path}{file.destination !== undefined ? ` -> ${file.destination}` : ''} <span className="yca-diff-add">+{file.added}</span> <span className="yca-diff-remove">-{file.removed}</span></h5>
-      <ProgressiveText text={diffMode !== 'simple' && /^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@/.test(file.diff)
+      <ProgressiveText text={diffMode !== 'simple' && !file.unnumbered && /^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@/.test(file.diff)
         ? `diff --git a/file b/file\n--- ${file.operation === 'add' ? '/dev/null' : 'a/file'}\n+++ ${file.operation === 'delete' ? '/dev/null' : 'b/file'}\n${file.diff}` : file.diff}
-        label={`Requested patch for ${file.path}`} diff diffMode={diffMode} path={file.path} />
+        label={`Requested patch for ${file.path}`} diff diffMode={diffMode} path={file.path} unnumbered={file.unnumbered} />
     </section>)}
     {preview.files.length > 5 && <div className="yca-tool-paging">
       <button type="button" disabled={start === 0} onClick={() => setPage(Math.max(0, Math.floor(start / 5) - 1))}>Show previous files</button>
@@ -160,13 +160,13 @@ export const ToolCard = memo(function ToolCard({ block, collapsed, onToggle, dif
   const final = block.state === 'done' && !block.pending;
   const resultLabel = isBuiltin(block.name) ? RESULT_LABELS[block.name] : 'External tool output';
   const args = useMemo(() => parseToolArgs(block.args), [block.args]);
-  // Explicit layouts reveal only known diff sections, never the rest of the request/result.
+  // Collapsed tools reveal only known diff sections, never the rest of the request/result.
   const validEdit = block.name === 'edit_file' && args !== undefined && args !== null && isValidEditRequest(args);
   const hasDiff = presentation.diff || (block.files?.length ?? 0) > 0 || validEdit || (block.name === 'apply_patch' && typeof args?.patch === 'string');
-  const diffPreview = collapsed && diffMode !== 'auto' && hasDiff ? <>
+  const diffPreview = collapsed && hasDiff ? <>
     {validEdit && args && <section aria-label="Requested replacement">
       <p className="yca-tool-muted">Requested exact replacement: {args.replaceAll === true ? 'all occurrences' : 'one unique match'}. Snippets only, not applied file changes or file line numbers.</p>
-      <ProgressiveText label={`Requested replacement for ${args.path}`} diff diffMode={diffMode}
+      <ProgressiveText label={`Requested replacement for ${args.path}`} diff diffMode={diffMode} unnumbered path={args.path as string}
         text={`@@ Requested snippets @@\n${replacementSide('-', args.oldString as string)}${replacementSide('+', args.newString as string)}`} />
     </section>}
     {block.name === 'apply_patch' && typeof args?.patch === 'string' && <section aria-label="Requested patch">

@@ -9483,7 +9483,8 @@ class AgentLoopTest {
                 baseline.logging(),
                 baseline.hooks(),
                 baseline.notifications(),
-                baseline.secrets());
+                baseline.secrets(),
+                null);
     }
 
     private static CodingAgentConfiguration withProjectDir(
@@ -9524,7 +9525,8 @@ class AgentLoopTest {
                 baseline.logging(),
                 baseline.hooks(),
                 baseline.notifications(),
-                baseline.secrets());
+                baseline.secrets(),
+                null);
     }
 
     private static CodingAgentConfiguration withWorkingDir(
@@ -9565,7 +9567,8 @@ class AgentLoopTest {
                 baseline.logging(),
                 baseline.hooks(),
                 baseline.notifications(),
-                baseline.secrets());
+                baseline.secrets(),
+                null);
     }
 
     private static PruningConfiguration withIngestionOutputCapChars(
@@ -9631,7 +9634,8 @@ class AgentLoopTest {
                 baseline.logging(),
                 baseline.hooks(),
                 baseline.notifications(),
-                baseline.secrets());
+                baseline.secrets(),
+                null);
     }
 
     private static PruningConfiguration withNudgeMinTokens(

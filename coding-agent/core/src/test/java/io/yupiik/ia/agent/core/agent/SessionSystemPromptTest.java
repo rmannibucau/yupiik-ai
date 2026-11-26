@@ -371,7 +371,8 @@ class SessionSystemPromptTest {
                 baseline.logging(),
                 baseline.hooks(),
                 baseline.notifications(),
-                baseline.secrets());
+                baseline.secrets(),
+                null);
     }
 
     private static CodingAgentConfiguration withStorageHomeHome(
@@ -412,6 +413,7 @@ class SessionSystemPromptTest {
                 baseline.logging(),
                 baseline.hooks(),
                 baseline.notifications(),
-                baseline.secrets());
+                baseline.secrets(),
+                null);
     }
 }

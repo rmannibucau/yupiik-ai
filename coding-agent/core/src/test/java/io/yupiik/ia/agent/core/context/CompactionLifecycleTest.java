@@ -620,7 +620,8 @@ class CompactionLifecycleTest {
                 baseline.logging(),
                 baseline.hooks(),
                 baseline.notifications(),
-                baseline.secrets());
+                baseline.secrets(),
+                null);
     }
 
     public static class DefaultLifecycleModule extends ConfigurationTestModule {

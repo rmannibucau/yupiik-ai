@@ -29,8 +29,10 @@ import io.yupiik.fusion.framework.api.container.configuration.ConfigurationImpl;
 import io.yupiik.fusion.framework.api.container.configuration.ConfigurationRegistration;
 import io.yupiik.fusion.framework.api.main.ArgsConfigSource;
 import io.yupiik.fusion.framework.api.scope.DefaultScoped;
+import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.fusion.testing.Fusion;
 import io.yupiik.fusion.testing.FusionSupport;
+import io.yupiik.ia.agent.core.shell.DiffViewMode;
 import io.yupiik.ia.agent.core.wiring.CombinedConfigurationSource;
 import io.yupiik.ia.agent.core.wiring.YcaConfigurationProducer;
 import io.yupiik.ia.agent.core.wiring.YcaPrefixShortcutConfigurationSource;
@@ -49,6 +51,47 @@ import org.junit.jupiter.params.provider.ValueSource;
 
 /** Exercises file resolution, inheritance, and root binding through isolated Fusion sources. */
 class YcaConfigurationProducerTest {
+    @Nested
+    @FusionSupport(modules = DiffDefault.Module.class)
+    class DiffDefault {
+        @TempDir
+        static Path temp;
+
+        public static class Module extends SourceModule {
+            public Module() {
+                source = configSource(baseArgs(temp));
+            }
+        }
+
+        @Test
+        void defaultsToAuto(@Fusion final CodingAgentConfiguration root) {
+            assertEquals(DiffViewMode.AUTO, root.view().diffViewMode());
+        }
+    }
+
+    @Nested
+    @FusionSupport(modules = GlobalDiffDefault.Module.class)
+    class GlobalDiffDefault {
+        @TempDir
+        static Path temp;
+
+        public static class Module extends SourceModule {
+            public Module() throws IOException {
+                write(Path.of(globalConfigPath(temp)), "{\"yca\":{\"view\":{\"diffViewMode\":\"side-by-side\"}}}");
+                source = configSource(baseArgs(temp));
+            }
+        }
+
+        @Test
+        void bindsTypedGlobalDefaultAndJsonCodec(
+                @Fusion final CodingAgentConfiguration root, @Fusion final JsonMapper mapper) {
+            assertEquals(DiffViewMode.SIDE_BY_SIDE, root.view().diffViewMode());
+            for (final var mode : DiffViewMode.values()) {
+                assertEquals(mode, mapper.fromString(DiffViewMode.class, mapper.toString(mode)));
+            }
+        }
+    }
+
     private static ConfigurationSource configSource(final List<String> args) {
         final var producer = new YcaConfigurationProducer(new ArgsConfigSource(args));
         final var prefixSource = new YcaPrefixShortcutConfigurationSource(new ArgsConfigSource(args));

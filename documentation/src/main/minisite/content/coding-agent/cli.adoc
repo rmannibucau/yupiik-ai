@@ -96,7 +96,8 @@ Verbose verbosity displays complete requested details and tool output; raw verbo
 Details preserve string newlines and whitespace, and external tools fall back to nested, pretty-printed JSON.
 
 The interactive CLI defaults to `/diff-view auto`: visible file diffs use a syntax-highlighted old/new split when the terminal is wide enough, otherwise a simple unified layout.
-Use `/diff-view side-by-side` or `/diff-view simple` to show diff sections even while ordinary tool bodies remain collapsed; Hidden still suppresses all diffs.
+All diff modes show diff sections even while ordinary tool bodies remain collapsed; Hidden still suppresses all diffs.
+Set the shared global `yca.view.diffViewMode` enum (`AUTO`, `SIDE_BY_SIDE` or `SIMPLE`) to choose the initial mode; `/diff-view` overrides it for the session.
 Explicit Side-by-side also falls back on narrow terminals, and already printed output is not redrawn on resize.
 See xref:features/ui.adoc#_file_diff_views[File diff views] for the disclosure matrix and the distinction between requested and captured applied changes.
 

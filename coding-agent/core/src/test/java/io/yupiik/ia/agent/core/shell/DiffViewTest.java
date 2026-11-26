@@ -86,8 +86,7 @@ class DiffViewTest {
                 frontend.diffViewMode(mode);
                 frontend.showToolOutput(visibility);
                 frontend.onEvent(capture(new FileMutation.Content("old\n", "new\n")));
-                final var expected =
-                        visibility != ToolOutputVisibility.HIDDEN && (mode != DiffViewMode.AUTO || visibility.shown());
+                final var expected = visibility != ToolOutputVisibility.HIDDEN;
                 assertEquals(expected, sink.text().contains("-old"), mode + "/" + visibility + sink.text());
             }
         }

@@ -57,38 +57,39 @@ class WebPermissionMetadataTest {
                         workdir,
                         permissions,
                         workdir.resolve("scratch"));
-                final var manager = new WebSessionManager(null, null, null, null, null, null, null, mapper, null) {
-                    private final SessionRuntime runtime = new SessionRuntime(
-                            new AgentLoop(workdir, sandbox) {
-                                @Override
-                                public ChatSettings chatSettings() {
-                                    return ChatSettings.EMPTY;
+                final var manager =
+                        new WebSessionManager(configuration, null, null, null, null, null, null, null, mapper, null) {
+                            private final SessionRuntime runtime = new SessionRuntime(
+                                    new AgentLoop(workdir, sandbox) {
+                                        @Override
+                                        public ChatSettings chatSettings() {
+                                            return ChatSettings.EMPTY;
+                                        }
+                                    },
+                                    permissions,
+                                    null,
+                                    null,
+                                    null,
+                                    null,
+                                    null,
+                                    null,
+                                    workdir,
+                                    sandbox);
+
+                            @Override
+                            public SessionRuntime runtime(final String id) {
+                                return runtime;
+                            }
+
+                            @Override
+                            public void close() {
+                                try {
+                                    runtime.close();
+                                } finally {
+                                    super.close();
                                 }
-                            },
-                            permissions,
-                            null,
-                            null,
-                            null,
-                            null,
-                            null,
-                            null,
-                            workdir,
-                            sandbox);
-
-                    @Override
-                    public SessionRuntime runtime(final String id) {
-                        return runtime;
-                    }
-
-                    @Override
-                    public void close() {
-                        try {
-                            runtime.close();
-                        } finally {
-                            super.close();
-                        }
-                    }
-                }) {
+                            }
+                        }) {
             final var service =
                     new AgentSessionService(null, null, null, null, null, null, null, null, configuration, null);
             final var rpc = new WebJsonRpc(

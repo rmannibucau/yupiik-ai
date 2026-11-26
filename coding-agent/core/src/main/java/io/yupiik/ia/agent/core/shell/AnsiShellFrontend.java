@@ -192,8 +192,7 @@ public class AnsiShellFrontend implements ShellFrontend {
     }
 
     private boolean showDiff() {
-        return showToolOutput != ToolOutputVisibility.HIDDEN
-                && (showToolOutput.shown() || diffViewMode != DiffViewMode.AUTO);
+        return showToolOutput != ToolOutputVisibility.HIDDEN;
     }
 
     private String redactDiff(final String text, final String sessionId) {

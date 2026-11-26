@@ -242,7 +242,8 @@ class McpFailureAdvisoryTest {
                     baseline.logging(),
                     baseline.hooks(),
                     baseline.notifications(),
-                    baseline.secrets());
+                    baseline.secrets(),
+                    null);
             try (final var http =
                     new HttpClientProducer().httpClient(configuration, new NativeProviderConfiguration(null, null))) {
                 final var manager = new McpManager(configuration, mapper, List.of(), http, new ProcessService());

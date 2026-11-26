@@ -655,7 +655,8 @@ class McpManagerTest {
                 base.logging(),
                 base.hooks(),
                 base.notifications(),
-                null); // secrets (default redaction)
+                null, // secrets (default redaction)
+                null);
     }
 
     private static void respond(

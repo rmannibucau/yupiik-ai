@@ -1822,7 +1822,8 @@ class SubagentRoutePrivacyTest {
                 baseline.logging(),
                 baseline.hooks(),
                 baseline.notifications(),
-                baseline.secrets());
+                baseline.secrets(),
+                null);
     }
 
     private ProviderConfiguration withProviderPolicy(

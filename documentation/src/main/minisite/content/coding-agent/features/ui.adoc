@@ -75,8 +75,22 @@ Presentation truncation is separate from the xref:output.adoc[output optimizatio
 The CLI, TUI and web interface default to `auto` diff mode.
 Use `/diff-view auto`, `/diff-view side-by-side` or `/diff-view simple` to select a mode for the current session; `/diff-view` reports the current mode.
 The web Diff selector controls the same session setting.
+Set `yca.view.diffViewMode` in the global configuration to choose the initial mode for all three interfaces, rather than maintaining separate TUI and web defaults.
+The typed enum accepts `AUTO` (default), `SIDE_BY_SIDE` and `SIMPLE`; configuration strings also accept `auto`, `side-by-side` and `simple`.
+Runtime session overrides do not rewrite the global configuration.
 
-`auto` follows tool disclosure and selects a side-by-side old/new layout when enough width is available, otherwise a simple unified layout.
+[source,json]
+----
+{
+  "yca": {
+    "view": {
+      "diffViewMode": "AUTO"
+    }
+  }
+}
+----
+
+`auto` shows diff sections even when ordinary tool details are collapsed and selects a side-by-side old/new layout when enough width is available, otherwise a simple unified layout.
 `side-by-side` requests the split layout but still falls back safely in narrow views or for unsupported patches.
 `simple` keeps the unified layout.
 Terminal split views require at least 110 content columns, excluding surrounding card borders and indentation.
@@ -86,7 +100,7 @@ The TUI reflows diffs on resize; the CLI remains append-only and uses the availa
 |===
 |Tool visibility |`auto` |`side-by-side` or `simple`
 |Hidden |No inline diff |No inline diff
-|Collapsed |Diff deferred until the tool is opened |Diff visible; ordinary request and result bodies remain collapsed
+|Collapsed |Diff visible, responsive layout; ordinary request and result bodies remain collapsed |Diff visible; ordinary request and result bodies remain collapsed
 |Shown |Diff visible, responsive layout |Diff visible, selected layout
 |===
 

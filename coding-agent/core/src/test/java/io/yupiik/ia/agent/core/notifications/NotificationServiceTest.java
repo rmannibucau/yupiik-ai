@@ -659,6 +659,7 @@ class NotificationServiceTest {
                 baseline.logging(),
                 baseline.hooks(),
                 notifications,
-                baseline.secrets());
+                baseline.secrets(),
+                null);
     }
 }

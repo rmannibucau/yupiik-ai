@@ -123,6 +123,7 @@ class WebSessionManagerCloseTest {
         this.turnRunner = new CancelCapturingTurnRunner();
         this.broker = new SseBroker(this.mapper);
         this.manager = new WebSessionManager(
+                configuration,
                 runtimeFactory,
                 new NoopShellRegistry(),
                 new WebSlashCommands(new SlashRegistry() {}, null, sessionStore),

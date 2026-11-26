@@ -125,6 +125,7 @@ class WebSessionManagerFeedbackGateTest {
                 null, // SecretRedactor
                 null); // NotificationService
         this.manager = new WebSessionManager(
+                configuration,
                 runtimeFactory,
                 new NoopShellRegistry(),
                 new WebSlashCommands(new SlashRegistry(List.of(new BtwSlashCommands(answerer))), null, sessionStore),

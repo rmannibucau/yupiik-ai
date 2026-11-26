@@ -191,7 +191,8 @@ class ToolExecutionServiceTest {
                         baseline.logging(),
                         baseline.hooks(),
                         baseline.notifications(),
-                        baseline.secrets());
+                        baseline.secrets(),
+                        null);
                 final var service = new ToolExecutionService(
                         configuration,
                         new Emitter() {
@@ -289,7 +290,8 @@ class ToolExecutionServiceTest {
                 baseline.logging(),
                 baseline.hooks(),
                 baseline.notifications(),
-                baseline.secrets());
+                baseline.secrets(),
+                null);
     }
 
     private EmbeddedTool tool(final String name, final String output) {

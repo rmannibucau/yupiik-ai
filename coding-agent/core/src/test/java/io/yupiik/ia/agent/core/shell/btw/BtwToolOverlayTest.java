@@ -594,7 +594,8 @@ class BtwToolOverlayTest {
                 baseline.logging(),
                 baseline.hooks(),
                 baseline.notifications(),
-                baseline.secrets());
+                baseline.secrets(),
+                null);
     }
 
     public static class ExplicitToolsStaySessionLocalAcrossABAAndConcurrentABScenarioModule

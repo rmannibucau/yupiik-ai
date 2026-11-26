@@ -280,7 +280,8 @@ class WebSearchToolTest {
                 baseline.logging(),
                 baseline.hooks(),
                 baseline.notifications(),
-                baseline.secrets());
+                baseline.secrets(),
+                null);
     }
 
     private static String parallelPayload() {

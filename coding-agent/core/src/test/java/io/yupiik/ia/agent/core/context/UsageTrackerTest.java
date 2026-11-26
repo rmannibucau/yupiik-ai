@@ -1230,7 +1230,8 @@ class UsageTrackerTest {
                 baseline.logging(),
                 baseline.hooks(),
                 baseline.notifications(),
-                baseline.secrets());
+                baseline.secrets(),
+                null);
     }
 
     public static class ConfiguredWindowWinsModule extends ConfigurationTestModule {

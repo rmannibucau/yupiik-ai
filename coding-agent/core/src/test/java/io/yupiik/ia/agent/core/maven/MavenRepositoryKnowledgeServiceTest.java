@@ -1537,7 +1537,8 @@ public class MavenRepositoryKnowledgeServiceTest {
                 baseline.logging(),
                 baseline.hooks(),
                 baseline.notifications(),
-                baseline.secrets());
+                baseline.secrets(),
+                null);
     }
 
     public static final class StubLlm implements KnowledgeLlm {

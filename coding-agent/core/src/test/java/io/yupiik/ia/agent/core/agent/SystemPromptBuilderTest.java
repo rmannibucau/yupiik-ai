@@ -1339,7 +1339,8 @@ class SystemPromptBuilderTest {
                 baseline.logging(),
                 baseline.hooks(),
                 baseline.notifications(),
-                baseline.secrets());
+                baseline.secrets(),
+                null);
     }
 
     private static CodingAgentConfiguration withStorageHomeWorkingDir(
@@ -1380,7 +1381,8 @@ class SystemPromptBuilderTest {
                 baseline.logging(),
                 baseline.hooks(),
                 baseline.notifications(),
-                baseline.secrets());
+                baseline.secrets(),
+                null);
     }
 
     private static CodingAgentConfiguration withWorkingDirProjectDir(
@@ -1421,7 +1423,8 @@ class SystemPromptBuilderTest {
                 baseline.logging(),
                 baseline.hooks(),
                 baseline.notifications(),
-                baseline.secrets());
+                baseline.secrets(),
+                null);
     }
 
     private static CodingAgentConfiguration withStorageHomeWorkingDirProjectDir(
@@ -1465,7 +1468,8 @@ class SystemPromptBuilderTest {
                 baseline.logging(),
                 baseline.hooks(),
                 baseline.notifications(),
-                baseline.secrets());
+                baseline.secrets(),
+                null);
     }
 
     private static ManageContextToolConfiguration withEnabled(
@@ -1529,7 +1533,8 @@ class SystemPromptBuilderTest {
                 baseline.logging(),
                 baseline.hooks(),
                 baseline.notifications(),
-                baseline.secrets());
+                baseline.secrets(),
+                null);
     }
 
     private static CompressConfiguration withEnabled(final CompressConfiguration baseline, final boolean enabled) {
@@ -1590,7 +1595,8 @@ class SystemPromptBuilderTest {
                 baseline.logging(),
                 baseline.hooks(),
                 baseline.notifications(),
-                baseline.secrets());
+                baseline.secrets(),
+                null);
     }
 
     private static ProviderConfiguration withOutputTokens(
@@ -1676,7 +1682,8 @@ class SystemPromptBuilderTest {
                 baseline.logging(),
                 baseline.hooks(),
                 baseline.notifications(),
-                baseline.secrets());
+                baseline.secrets(),
+                null);
     }
 
     private static CodingAgentConfiguration withHome(final CodingAgentConfiguration baseline, final String home) {
@@ -1716,6 +1723,7 @@ class SystemPromptBuilderTest {
                 baseline.logging(),
                 baseline.hooks(),
                 baseline.notifications(),
-                baseline.secrets());
+                baseline.secrets(),
+                null);
     }
 }

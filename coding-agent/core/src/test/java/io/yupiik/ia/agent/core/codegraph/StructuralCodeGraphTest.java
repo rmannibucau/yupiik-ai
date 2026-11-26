@@ -292,7 +292,8 @@ class StructuralCodeGraphTest {
                 baseline.logging(),
                 baseline.hooks(),
                 baseline.notifications(),
-                baseline.secrets());
+                baseline.secrets(),
+                null);
     }
 
     @Nested

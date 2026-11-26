@@ -36,6 +36,7 @@ import io.yupiik.ia.agent.core.shell.AnsiShellFrontend;
 import io.yupiik.ia.agent.core.shell.AnsiShellIO;
 import io.yupiik.ia.agent.core.shell.ConversationCoordinator;
 import io.yupiik.ia.agent.core.shell.ConversationTranscript;
+import io.yupiik.ia.agent.core.shell.DiffViewMode;
 import io.yupiik.ia.agent.core.shell.InterruptCoordinator;
 import io.yupiik.ia.agent.core.shell.SessionLifecycle;
 import io.yupiik.ia.agent.core.shell.SessionRuntime;
@@ -208,6 +209,10 @@ public class CliCommand implements Runnable {
         this.speakerLabels = speakerLabels;
         this.stdio = stdio;
         session.metrics(configuration.metrics());
+        session.diffViewMode(
+                configuration.view() == null || configuration.view().diffViewMode() == null
+                        ? DiffViewMode.AUTO
+                        : configuration.view().diffViewMode());
         final var parsedToolOutput = ToolOutputVisibility.parse(conf.showToolOutput());
         final var showToolOutput = parsedToolOutput == null ? ToolOutputVisibility.COLLAPSED : parsedToolOutput;
         session.showThinking(conf.showThinking()).showToolOutput(showToolOutput);
@@ -225,6 +230,7 @@ public class CliCommand implements Runnable {
                 showToolOutput,
                 externalOutput);
         this.frontend.autoOpenBrowser(conf.autoOpenBrowser());
+        this.frontend.diffViewMode(session.diffViewMode());
         this.interactionStart = () -> {
             interactionActive.set(true);
             frontend.suspendOutput();
@@ -1059,6 +1065,7 @@ public class CliCommand implements Runnable {
                 .runtime(session.runtime())
                 .showThinking(session.showThinking())
                 .showToolOutput(session.showToolOutput())
+                .diffViewMode(session.diffViewMode())
                 .metrics(session.metrics());
         final var transcript = new ConversationTranscript();
         refreshLabels(session, transcript);

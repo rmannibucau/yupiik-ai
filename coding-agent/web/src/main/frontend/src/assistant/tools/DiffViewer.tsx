@@ -12,10 +12,11 @@ type DiffViewerProps = HTMLAttributes<HTMLElement> & {
   mode?: DiffMode;
   path?: string;
   oldSource?: string;
+  unnumbered?: boolean;
 };
 
 /** App-owned boundary. Disclosure belongs to the caller; layout follows the available container. */
-export function DiffViewer({ mode = 'auto', path, oldSource, ...props }: DiffViewerProps) {
+export function DiffViewer({ mode = 'auto', path, oldSource, unnumbered = false, ...props }: DiffViewerProps) {
   const container = useRef<HTMLDivElement>(null);
   const [wide, setWide] = useState(false);
   useLayoutEffect(() => {
@@ -41,10 +42,10 @@ export function DiffViewer({ mode = 'auto', path, oldSource, ...props }: DiffVie
   }, []);
   const simple = <SimpleDiff {...props} />;
   const complete = props.startsAtLine !== false && canRenderDiff(props.text)
-    && /^(?:diff --git [^\n]+\r?\n|--- [^\n]+\r?\n\+\+\+ )/.test(props.text);
+    && (unnumbered || /^(?:diff --git [^\n]+\r?\n|--- [^\n]+\r?\n\+\+\+ |\*\*\* (?:Begin Patch|(?:Add|Delete|Update) File:))/.test(props.text));
   return <div ref={container} style={{ minWidth: 0, width: '100%' }}>
     {mode === 'simple' || !wide || !complete ? simple
-      : <Suspense fallback={simple}><SplitDiff {...props} path={path} oldSource={oldSource} fallback={simple} /></Suspense>}
+      : <Suspense fallback={simple}><SplitDiff {...props} path={path} oldSource={oldSource} unnumbered={unnumbered} fallback={simple} /></Suspense>}
   </div>;
 }
 

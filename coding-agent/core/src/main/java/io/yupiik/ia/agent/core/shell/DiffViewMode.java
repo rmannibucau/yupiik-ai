@@ -15,9 +15,11 @@
  */
 package io.yupiik.ia.agent.core.shell;
 
+import io.yupiik.fusion.framework.build.api.json.JsonModel;
 import java.util.Locale;
 
 /** Diff layout selection, independent of tool-output disclosure. */
+@JsonModel
 public enum DiffViewMode {
     AUTO("auto"),
     SIDE_BY_SIDE("side-by-side"),
@@ -31,6 +33,17 @@ public enum DiffViewMode {
 
     public String value() {
         return value;
+    }
+
+    public static DiffViewMode fromConfigurationString(final String raw) {
+        if (raw == null || raw.isBlank()) {
+            return AUTO;
+        }
+        final var parsed = parse(raw.replace('_', '-'));
+        if (parsed == null) {
+            throw new IllegalArgumentException("Unsupported diff view mode: " + raw);
+        }
+        return parsed;
     }
 
     /** Returns null for null or unsupported input. */

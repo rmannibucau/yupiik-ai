@@ -1019,6 +1019,11 @@ public class TuiCommand implements Runnable {
      */
     private UiState newTab(final TuiRunner tui, final String sessionId) {
         final var state = new UiState(thinkTags, clock, tuiConfiguration.toolOutput());
+        state.diffViewMode =
+                configuration.view() == null || configuration.view().diffViewMode() == null
+                        ? DiffViewMode.AUTO
+                        : configuration.view().diffViewMode();
+        state.session.diffViewMode(state.diffViewMode);
         state.sessionId = sessionId;
         state.showThinking = conf.showThinking();
         state.runner = tui;
@@ -6101,7 +6106,7 @@ public class TuiCommand implements Runnable {
                 }
             }
         }
-        if (collapsed && state.diffViewMode != DiffViewMode.AUTO) {
+        if (collapsed) {
             for (final var member : run.members()) {
                 for (final var diffLine : toolDiffLines(member.card(), state, Math.max(1, innerW - 2))) {
                     final var line = indentLine(diffLine, "  ");
@@ -6262,9 +6267,7 @@ public class TuiCommand implements Runnable {
             rows.add(plainText(line));
             final var compactLines = new ArrayList<Line>();
             compactLines.add(line);
-            if (state.diffViewMode != DiffViewMode.AUTO) {
-                compactLines.addAll(toolDiffLines(card, state, Math.max(1, width)));
-            }
+            compactLines.addAll(toolDiffLines(card, state, Math.max(1, width)));
             final var compact = new CompactText(compactLines);
             rows.addAll(compactLines.subList(1, compactLines.size()).stream()
                     .map(TuiCommand::plainText)

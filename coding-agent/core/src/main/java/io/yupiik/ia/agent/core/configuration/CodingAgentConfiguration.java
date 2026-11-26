@@ -167,7 +167,10 @@ public record CodingAgentConfiguration(
         NotificationsConfiguration notifications,
 
         @Property(documentation = "Secret redaction: detect local secrets and keep them off the LLM wire.")
-        SecretRedactionConfiguration secrets) {
+        SecretRedactionConfiguration secrets,
+
+        @Property(documentation = "Shared presentation settings for CLI, TUI and web.")
+        ViewConfiguration view) {
 
     /** Whether the typed input is a resume alias (see {@code yca.resumeAliases}). */
     public boolean isResumeAlias(final String input) {

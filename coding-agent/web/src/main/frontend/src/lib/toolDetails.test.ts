@@ -135,6 +135,7 @@ describe('requested patch previews', () => {
       { path: 'before', operation: 'move', destination: 'after', added: 1, removed: 1 },
     ]);
     expect(preview.files[0].diff).toContain(' keep \n-\told  \n+\tnew  ');
+    expect(preview.files.every(file => !file.unnumbered)).toBe(true);
   });
 
   it('does not mistake unified hunk content for another file header', () => {
@@ -156,6 +157,7 @@ describe('requested patch previews', () => {
     const preview = parsePatch(patch);
     expect(preview.warning).toBeUndefined();
     expect(preview.files).toHaveLength(3);
+    expect(preview.files.every(file => file.unnumbered)).toBe(true);
     expect(preview.files[0]).toMatchObject({ operation: 'add', added: 2, removed: 0 });
     expect(preview.files[1]).toMatchObject({ operation: 'delete', added: 0, removed: 0 });
     expect(preview.files[2]).toMatchObject({ operation: 'move', destination: 'moved', added: 2, removed: 2 });

@@ -62,7 +62,7 @@ describe('mounted external-store chat integration', () => {
       event('tool-finished', 'edit_file', { ordinal: 9, output: 'Updated', success: true }),
     ];
     render(); await settle();
-    expect(host.querySelector('[aria-label="Applied file changes"]')).toBeNull();
+    expect(host.querySelector('[aria-label="Applied file changes"]')).not.toBeNull();
     act(() => host.querySelector<HTMLButtonElement>('.yca-tool-header')!.click());
     await act(async () => { await import('../assistant/tools/SplitDiff'); });
     await vi.waitFor(async () => {
@@ -109,12 +109,10 @@ describe('mounted external-store chat integration', () => {
     expect(host.querySelector('[aria-label="Tool request"], [aria-label="Tool result"], details')).toBeNull();
     expect(host.textContent).not.toContain('PRIVATE_RESULT');
     expect(host.textContent).not.toContain('PRIVATE_EXTERNAL');
-    expect(host.querySelector('[data-slot="diff-viewer"]') !== null).toBe(diffViewMode !== 'auto');
-    if (diffViewMode !== 'auto') {
-      expect(host.querySelector('[aria-label="Requested patch"]')).not.toBeNull();
-      expect(host.querySelector('[aria-label="Applied file changes"]')).not.toBeNull();
-      expect(host.querySelector('[aria-label="External tool output"]')).not.toBeNull();
-    }
+    expect(host.querySelector('[data-slot="diff-viewer"]')).not.toBeNull();
+    expect(host.querySelector('[aria-label="Requested patch"]')).not.toBeNull();
+    expect(host.querySelector('[aria-label="Applied file changes"]')).not.toBeNull();
+    expect(host.querySelector('[aria-label="External tool output"]')).not.toBeNull();
     state.events = [...state.events, event('settings', '', { showToolOutput: 'hidden' })];
     render(); await settle();
     expect(host.querySelector('.yca-tool-card, [data-slot="diff-viewer"]')).toBeNull();
