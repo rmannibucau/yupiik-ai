@@ -282,6 +282,20 @@ public class JLinePromptImpl implements Prompt {
     public PromptOutput externalOutput() {
         return new PromptOutput() {
             @Override
+            public int columns() {
+                try {
+                    final var terminal = reader.getTerminal();
+                    final var width = terminal == null ? 0 : terminal.getWidth();
+                    if (width > 0) {
+                        return width;
+                    }
+                } catch (final RuntimeException ignored) {
+                    // A closed terminal must not prevent output; use the raw backend fallback.
+                }
+                return PromptOutput.super.columns();
+            }
+
+            @Override
             public boolean active() {
                 return isReaderLive();
             }

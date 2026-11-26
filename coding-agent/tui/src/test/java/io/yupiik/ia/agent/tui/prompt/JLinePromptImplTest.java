@@ -22,6 +22,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.ia.agent.core.cli.prompt.PromptInterruptException;
+import io.yupiik.ia.agent.core.cli.prompt.PromptOutput;
 import java.io.ByteArrayOutputStream;
 import java.io.PrintStream;
 import java.io.PrintWriter;
@@ -78,6 +79,33 @@ class JLinePromptImplTest {
 
     private String stderr() {
         return err.toString(StandardCharsets.UTF_8);
+    }
+
+    @Test
+    void externalOutputUsesCurrentTerminalWidthAndFallsBackAfterTerminalFailure() {
+        final var width = new AtomicInteger(160);
+        final var terminal = (Terminal) Proxy.newProxyInstance(
+                Terminal.class.getClassLoader(), new Class<?>[] {Terminal.class}, (proxy, method, args) -> {
+                    if (method.getName().equals("getWidth")) {
+                        if (width.get() < 0) {
+                            throw new IllegalStateException("closed terminal");
+                        }
+                        return width.get();
+                    }
+                    return null;
+                });
+        final var reader = (LineReader) Proxy.newProxyInstance(
+                LineReader.class.getClassLoader(),
+                new Class<?>[] {LineReader.class},
+                (proxy, method, args) -> method.getName().equals("getTerminal") ? terminal : null);
+        final var output = new JLinePromptImpl(reader, null).externalOutput();
+        assertEquals(160, output.columns());
+        width.set(72);
+        assertEquals(72, output.columns());
+        width.set(0);
+        assertEquals(PromptOutput.raw().columns(), output.columns());
+        width.set(-1);
+        assertEquals(PromptOutput.raw().columns(), output.columns());
     }
 
     @Test

@@ -146,6 +146,7 @@ class AnsiShellFrontendTest {
             final ToolOutputVisibility showToolOutput) {
         return new AnsiShellFrontend(
                 colorizer,
+                null,
                 new Symbols(false),
                 new ToolPresenter(mapper),
                 CliVerbosity.COMPACT,
@@ -157,6 +158,7 @@ class AnsiShellFrontendTest {
     private AnsiShellFrontend frontend(final CliVerbosity verbosity, final boolean tty, final boolean showThinking) {
         return new AnsiShellFrontend(
                 new MarkdownColorizer(false),
+                null,
                 new Symbols(false),
                 new ToolPresenter(mapper),
                 verbosity,
@@ -347,6 +349,7 @@ class AnsiShellFrontendTest {
         final var seen = new ArrayList<String>();
         final var frontend = new AnsiShellFrontend(
                 new MarkdownColorizer(false),
+                null,
                 new Symbols(false),
                 new ToolPresenter(mapper),
                 CliVerbosity.COMPACT,
@@ -390,6 +393,7 @@ class AnsiShellFrontendTest {
         final var seen = new ArrayList<String>();
         final var frontend = new AnsiShellFrontend(
                 new MarkdownColorizer(false),
+                null,
                 new Symbols(false),
                 new ToolPresenter(mapper),
                 CliVerbosity.COMPACT,
@@ -426,6 +430,7 @@ class AnsiShellFrontendTest {
         // the whole frontend silent
         final var frontend = new AnsiShellFrontend(
                 new MarkdownColorizer(false),
+                null,
                 new Symbols(false),
                 new ToolPresenter(mapper),
                 CliVerbosity.COMPACT,
@@ -455,6 +460,7 @@ class AnsiShellFrontendTest {
         final var release = new CountDownLatch(1);
         final var frontend = new AnsiShellFrontend(
                 new MarkdownColorizer(false),
+                null,
                 new Symbols(false),
                 new ToolPresenter(mapper),
                 CliVerbosity.COMPACT,

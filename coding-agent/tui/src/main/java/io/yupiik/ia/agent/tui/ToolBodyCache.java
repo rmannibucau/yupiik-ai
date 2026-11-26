@@ -16,6 +16,7 @@
 package io.yupiik.ia.agent.tui;
 
 import dev.tamboui.text.Line;
+import io.yupiik.ia.agent.core.shell.DiffViewMode;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -30,7 +31,15 @@ final class ToolBodyCache {
     private final Map<Key, Value> entries = new LinkedHashMap<>(16, 0.75f, true);
     private long weight;
 
-    record Key(String name, String command, String args, String output, int width, boolean diff, int limit) {}
+    record Key(
+            String name,
+            String command,
+            String args,
+            String output,
+            int width,
+            boolean diff,
+            int limit,
+            DiffViewMode mode) {}
 
     private record Value(List<Line> lines, long weight) {}
 

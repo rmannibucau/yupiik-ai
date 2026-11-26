@@ -19,6 +19,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import dev.tamboui.text.Line;
+import io.yupiik.ia.agent.core.shell.DiffViewMode;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
@@ -26,6 +27,20 @@ import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.Test;
 
 class ToolBodyCacheTest {
+    @Test
+    void diffModeIsPartOfBodyIdentity() {
+        final var cache = new ToolBodyCache();
+        final var simple =
+                new ToolBodyCache.Key("apply_patch", null, null, "patch", 120, true, 20, DiffViewMode.SIMPLE);
+        final var split =
+                new ToolBodyCache.Key("apply_patch", null, null, "patch", 120, true, 20, DiffViewMode.SIDE_BY_SIDE);
+        assertEquals(List.of(Line.from("simple")), cache.get(simple, () -> List.of(Line.from("simple"))));
+        assertEquals(List.of(Line.from("split")), cache.get(split, () -> List.of(Line.from("split"))));
+        assertEquals(List.of(Line.from("simple")), cache.get(simple, () -> {
+            throw new AssertionError("mode-specific body was not reused");
+        }));
+    }
+
     @Test
     void reusesImmutableLayoutAndInvalidatesWidthAndSource() {
         final var cache = new ToolBodyCache();
@@ -107,6 +122,6 @@ class ToolBodyCacheTest {
     }
 
     private ToolBodyCache.Key key(final String command, final String output, final int width) {
-        return new ToolBodyCache.Key("bash", command, null, output, width, false, Integer.MAX_VALUE);
+        return new ToolBodyCache.Key("bash", command, null, output, width, false, Integer.MAX_VALUE, DiffViewMode.AUTO);
     }
 }

@@ -113,6 +113,7 @@ class CliCommandTest {
             final String presentation, final ToolOutputVisibility showToolOutput, final JsonMapper mapper) {
         final var frontend = new AnsiShellFrontend(
                 new MarkdownColorizer(false),
+                null,
                 new Symbols(false),
                 new ToolPresenter(mapper),
                 CliVerbosity.parse(presentation),

@@ -804,7 +804,8 @@ class TuiCommandHeadlessTest {
                     new SubagentRegistry(d.configuration(), d.providerManager()),
                     new ScrollService(d.tuiConfiguration()),
                     scheduler.instance(),
-                    formatMapper);
+                    formatMapper,
+                    null);
         }
     }
 

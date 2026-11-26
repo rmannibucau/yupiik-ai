@@ -53,7 +53,7 @@ describe('standalone assistant-ui rendering integration', () => {
     const files = Array.from({ length: 7 }, (_, index) => ({ path: `file${index}.java`, kind: 'update' as const,
       ...(index === 1 ? {} : { oldText: 'before\n', newText: 'after\n' }) }));
     const block: ToolBlock = { kind: 'tool', name: 'apply_patch', state: 'done', success: false, output: 'Partial failure', content: '', files };
-    render(<ToolCard block={block} collapsed onToggle={() => {}} diffMode="simple" />);
+    render(<ToolCard block={block} collapsed onToggle={() => {}} diffMode="auto" />);
     expect(host.querySelector('[aria-label="Applied file changes"]')).toBeNull();
     render(<ToolCard block={block} collapsed={false} onToggle={() => {}} diffMode="simple" />);
     const changes = host.querySelector('[aria-label="Applied file changes"]')!;

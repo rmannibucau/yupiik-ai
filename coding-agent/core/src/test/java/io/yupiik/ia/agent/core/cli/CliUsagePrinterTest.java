@@ -77,6 +77,7 @@ class CliUsagePrinterTest {
         final var symbols = new Symbols(true);
         final var frontend = new AnsiShellFrontend(
                 new MarkdownColorizer(false),
+                null,
                 symbols,
                 new ToolPresenter(mapper),
                 CliVerbosity.COMPACT,

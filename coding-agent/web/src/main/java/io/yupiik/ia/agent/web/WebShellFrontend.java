@@ -18,6 +18,7 @@ package io.yupiik.ia.agent.web;
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.agent.AgentEvent;
 import io.yupiik.ia.agent.core.shell.ConversationTranscript;
+import io.yupiik.ia.agent.core.shell.DiffViewMode;
 import io.yupiik.ia.agent.core.shell.ShellFrontend;
 import io.yupiik.ia.agent.core.shell.ToolOutputVisibility;
 import java.util.LinkedHashMap;
@@ -190,6 +191,11 @@ public class WebShellFrontend implements ShellFrontend {
                                                 ? "collapsed"
                                                 : value.name().toLowerCase())))
                         + AGENT_END);
+    }
+
+    @Override
+    public void diffViewMode(final DiffViewMode value) {
+        settings(Map.of("diffViewMode", (value == null ? DiffViewMode.AUTO : value).value()));
     }
 
     public void settings(final Map<String, Object> values) {

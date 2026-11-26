@@ -18,11 +18,12 @@ package io.yupiik.ia.agent.tui;
 import dev.tamboui.text.Line;
 import dev.tamboui.text.Span;
 import io.yupiik.ia.agent.core.cli.ToolPresenter;
+import io.yupiik.ia.agent.core.shell.DiffViewMode;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
-/** Best-effort request details for the full-output modal, never the compact inline card. */
+/** Best-effort request details and explicitly labeled replacement previews. */
 public class ToolArgsPreview {
     private final ToolOutputFormat toolOutputFormat;
     private final SyntaxHighlighter syntaxHighlighter;
@@ -41,7 +42,8 @@ public class ToolArgsPreview {
     }
 
     /** Returns null only when there are no arguments to display. Rendering failures retain the raw request. */
-    public List<Line> preview(final String name, final String argsJson, final int width, final Palette palette) {
+    public List<Line> preview(
+            final String name, final String argsJson, final int width, final Palette palette, final DiffViewMode mode) {
         if (argsJson == null || argsJson.isBlank()) {
             return null;
         }
@@ -51,8 +53,8 @@ public class ToolArgsPreview {
                     ? null
                     : switch (name == null ? "" : name) {
                         case "write_file" -> writeFile(args, width, palette);
-                        case "edit_file" -> editFile(args, width, palette);
-                        case "apply_patch" -> applyPatch(args, width, palette);
+                        case "edit_file" -> editFile(args, width, palette, mode);
+                        case "apply_patch" -> applyPatch(args, width, palette, mode);
                         default -> null;
                     };
             if (filePreview != null) {
@@ -86,9 +88,32 @@ public class ToolArgsPreview {
         return lines;
     }
 
-    private List<Line> editFile(final Map<String, Object> args, final int width, final Palette palette) {
+    /** Only genuine patch/replacement previews, never ordinary arguments or write-file content. */
+    public List<Line> diffPreview(
+            final String name, final String argsJson, final int width, final Palette palette, final DiffViewMode mode) {
+        if (argsJson == null || argsJson.isBlank()) {
+            return null;
+        }
+        try {
+            final var args = toolOutputFormat.parseArguments(argsJson);
+            if (args == null) {
+                return null;
+            }
+            return switch (name == null ? "" : name) {
+                case "edit_file" -> editFile(args, width, palette, mode);
+                case "apply_patch" -> applyPatch(args, width, palette, mode);
+                default -> null;
+            };
+        } catch (final RuntimeException invalid) {
+            return null;
+        }
+    }
+
+    private List<Line> editFile(
+            final Map<String, Object> args, final int width, final Palette palette, final DiffViewMode mode) {
         if (!(args.get("path") instanceof final String path)
                 || !(args.get("oldString") instanceof final String oldString)
+                || oldString.isEmpty()
                 || !(args.get("newString") instanceof final String newString)
                 || (args.containsKey("replaceAll") && !(args.get("replaceAll") instanceof Boolean))) {
             return null;
@@ -107,23 +132,28 @@ public class ToolArgsPreview {
                 .append('\n');
         appendSide(patch, '-', oldString);
         appendSide(patch, '+', newString);
-        lines.addAll(fullDiff(patch.toString(), width, palette));
+        lines.addAll(fullDiff(patch.toString(), width, palette, mode, SyntaxHighlighter.guessLanguage(path)));
         return lines;
     }
 
-    private List<Line> applyPatch(final Map<String, Object> args, final int width, final Palette palette) {
+    private List<Line> applyPatch(
+            final Map<String, Object> args, final int width, final Palette palette, final DiffViewMode mode) {
         if (!(args.get("patch") instanceof final String patch) || patch.isBlank()) {
             return null;
         }
         final var lines = new ArrayList<Line>();
         lines.add(Line.from(Span.styled("Requested changes", palette.bold(palette.primary()))));
-        lines.addAll(fullDiff(patch, width, palette));
+        lines.addAll(fullDiff(patch, width, palette, mode, null));
         return lines;
     }
 
-    private List<Line> fullDiff(final String patch, final int width, final Palette palette) {
-        // Do not change DiffRenderer's inline clipping policy: only the modal wraps full lines.
-        return MarkdownLines.wrapCode(diffRenderer.render(patch, Integer.MAX_VALUE, palette), Math.max(1, width));
+    private List<Line> fullDiff(
+            final String patch,
+            final int width,
+            final Palette palette,
+            final DiffViewMode mode,
+            final String language) {
+        return diffRenderer.render(patch, Math.max(1, width), palette, mode, syntaxHighlighter, language);
     }
 
     private ArrayList<Line> heading(final String path, final Palette palette) {

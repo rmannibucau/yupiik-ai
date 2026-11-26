@@ -16,6 +16,7 @@
 package io.yupiik.ia.agent.core.shell;
 
 import io.yupiik.ia.agent.core.agent.AgentEvent;
+import io.yupiik.ia.agent.core.cli.CliDiffRenderer;
 import io.yupiik.ia.agent.core.cli.CliVerbosity;
 import io.yupiik.ia.agent.core.cli.MarkdownColorizer;
 import io.yupiik.ia.agent.core.cli.Spinner;
@@ -25,6 +26,7 @@ import io.yupiik.ia.agent.core.cli.ToolPresenter;
 import io.yupiik.ia.agent.core.cli.prompt.PromptOutput;
 import io.yupiik.ia.agent.core.context.ContextCompression;
 import io.yupiik.ia.agent.core.context.MarkdownFence;
+import io.yupiik.ia.agent.core.security.SecretRedactor;
 import io.yupiik.ia.agent.core.todo.TodoItem;
 import io.yupiik.ia.agent.core.util.OpenBrowser;
 import java.util.ArrayDeque;
@@ -46,6 +48,8 @@ public class AnsiShellFrontend implements ShellFrontend {
     private static final int DIFF_MAX_LINES = 5;
 
     private final MarkdownColorizer colorizer;
+    private final SecretRedactor secretRedactor;
+    private volatile DiffViewMode diffViewMode = DiffViewMode.AUTO;
     private final Symbols symbols;
     private final ToolPresenter presenter;
     private final CliVerbosity verbosity;
@@ -146,17 +150,19 @@ public class AnsiShellFrontend implements ShellFrontend {
 
     public AnsiShellFrontend(
             final MarkdownColorizer colorizer,
+            final SecretRedactor secretRedactor,
             final Symbols symbols,
             final ToolPresenter presenter,
             final CliVerbosity verbosity,
             final boolean tty,
             final boolean showThinking,
             final ToolOutputVisibility showToolOutput) {
-        this(colorizer, symbols, presenter, verbosity, tty, showThinking, showToolOutput, null);
+        this(colorizer, secretRedactor, symbols, presenter, verbosity, tty, showThinking, showToolOutput, null);
     }
 
     public AnsiShellFrontend(
             final MarkdownColorizer colorizer,
+            final SecretRedactor secretRedactor,
             final Symbols symbols,
             final ToolPresenter presenter,
             final CliVerbosity verbosity,
@@ -165,6 +171,7 @@ public class AnsiShellFrontend implements ShellFrontend {
             final ToolOutputVisibility showToolOutput,
             final PromptOutput promptOutput) {
         this.colorizer = colorizer;
+        this.secretRedactor = secretRedactor;
         this.symbols = symbols;
         this.presenter = presenter;
         this.verbosity = verbosity;
@@ -177,6 +184,78 @@ public class AnsiShellFrontend implements ShellFrontend {
 
     public TurnStats stats() {
         return stats;
+    }
+
+    @Override
+    public void diffViewMode(final DiffViewMode value) {
+        diffViewMode = Objects.requireNonNull(value, "diffViewMode");
+    }
+
+    private boolean showDiff() {
+        return showToolOutput != ToolOutputVisibility.HIDDEN
+                && (showToolOutput.shown() || diffViewMode != DiffViewMode.AUTO);
+    }
+
+    private String redactDiff(final String text, final String sessionId) {
+        if (secretRedactor == null) {
+            return text;
+        }
+        try {
+            return secretRedactor.redact(text, sessionId);
+        } catch (final RuntimeException unavailable) {
+            return text == null ? null : "(redacted content unavailable)";
+        }
+    }
+
+    private void renderDiff(final List<String> lines, final String language, final String prefix) {
+        for (final var line : CliDiffRenderer.render(
+                lines, language, diffViewMode, promptOutput.columns() - prefix.length() - 4, tty, colorizer)) {
+            printlnErr(prefix + "    " + line);
+        }
+    }
+
+    private void onFilesChanged(final AgentEvent.ToolFilesChanged event, final String prefix) {
+        if (!showDiff()) {
+            return;
+        }
+        stopSpinner();
+        closeThinkingRound();
+        renderLock.lock();
+        try {
+            ensureStderrNewline();
+            final var files = event.files();
+            for (var i = 0; i < Math.min(20, files.size()); i++) {
+                final var file = files.get(i);
+                final var path = redactDiff(file.path().toString(), event.sessionId());
+                // Render metadata through the same control-escaping path as the code.
+                renderDiff(List.of("applied " + file.kind().name().toLowerCase(Locale.ROOT) + ": " + path), "", prefix);
+                final var content = file.content();
+                if (content == null) {
+                    renderDiff(List.of("(content unavailable)"), "", prefix);
+                } else if ((content.oldText() != null && content.oldText().length() > DiffLayout.MAX_CHARS)
+                        || content.newText().length() > DiffLayout.MAX_CHARS) {
+                    renderDiff(List.of("(diff omitted: content limit)"), "", prefix);
+                } else {
+                    try {
+                        final var before = redactDiff(content.oldText(), event.sessionId());
+                        final var after = redactDiff(content.newText(), event.sessionId());
+                        if (!Objects.equals(before, content.oldText()) || !Objects.equals(after, content.newText())) {
+                            renderDiff(List.of("(exact diff unavailable: redacted content unavailable)"), "", prefix);
+                        } else {
+                            renderDiff(DiffLayout.between(before, after), path, prefix);
+                        }
+                    } catch (final RuntimeException unavailable) {
+                        // Redaction failure must not expose raw content or fail a completed write.
+                        renderDiff(List.of("(diff unavailable)"), "", prefix);
+                    }
+                }
+            }
+            if (files.size() > 20) {
+                printlnErr(prefix + "    ... remaining files omitted");
+            }
+        } finally {
+            renderLock.unlock();
+        }
     }
 
     /** Rebinds the seam-scrub source once the owning session runtime is available (live refs). */
@@ -544,6 +623,8 @@ public class AnsiShellFrontend implements ShellFrontend {
             stopSpinner();
             closeThinkingRound();
             onToolStarted(t);
+        } else if (event instanceof final AgentEvent.ToolFilesChanged t) {
+            onFilesChanged(t, prefix);
         } else if (event instanceof final AgentEvent.ToolStream t) {
             final var call = toolCalls.find(t.name(), t.ordinal(), t.sessionId(), t.subagentId());
             if (showToolOutput.shown() && verbosity != CliVerbosity.COMPACT) {
@@ -700,6 +781,9 @@ public class AnsiShellFrontend implements ShellFrontend {
         } else if (event instanceof AgentEvent.ToolDiagnostic t) {
             subagentId = t.subagentId();
             subagentName = t.subagentName();
+        } else if (event instanceof AgentEvent.ToolFilesChanged t) {
+            subagentId = t.subagentId();
+            subagentName = t.subagentName();
         } else if (event instanceof AgentEvent.Compacted(var _, var _, var _, String id, String name, var _, var _)) {
             subagentId = id;
             subagentName = name;
@@ -770,14 +854,26 @@ public class AnsiShellFrontend implements ShellFrontend {
             ensureStderrNewline();
             printlnErr(MarkdownColorizer.bold(
                     prefix + call.header() + " started" + call.summary(presenter, showToolOutput)));
+            final var preview = showDiff() && call.args() != null && call.args().length() <= DiffLayout.MAX_CHARS
+                    ? presenter.diff(
+                            t.name(),
+                            redactDiff(call.args(), t.sessionId()),
+                            verbosity == CliVerbosity.COMPACT ? DIFF_MAX_LINES : DiffLayout.MAX_OUTPUT_LINES)
+                    : List.<String>of();
+            if (!preview.isEmpty()) {
+                printlnErr(prefix + "  request preview (not applied):");
+                renderDiff(preview, "", prefix);
+            }
             if (showToolOutput.shown()) {
+                if (!preview.isEmpty() && verbosity != CliVerbosity.RAW) {
+                    return;
+                }
                 printlnErr(prefix + "  request:");
                 if (verbosity == CliVerbosity.RAW) {
                     printlnErr(prefix + "    " + t.args());
                 } else {
                     final var limit = verbosity == CliVerbosity.COMPACT ? DIFF_MAX_LINES : Integer.MAX_VALUE;
-                    final var diff = presenter.diff(t.name(), call.args(), limit);
-                    final var details = diff.isEmpty() ? presenter.request(t.name(), call.args(), limit) : diff;
+                    final var details = presenter.request(t.name(), call.args(), limit);
                     for (final var line : details) {
                         printlnErr(prefix + "    "
                                 + (line.startsWith("+")
@@ -822,7 +918,24 @@ public class AnsiShellFrontend implements ShellFrontend {
                 if (!execution.isEmpty()) {
                     printlnErr(MarkdownColorizer.warning(prefix + call.header() + " " + execution));
                 }
-                if (showToolOutput.shown() || failure) {
+                final var patchOutput = t.output() != null
+                        && (t.output().startsWith("--- ")
+                                || t.output().startsWith("diff --git ")
+                                || t.output().startsWith("*** Begin Patch"));
+                final var patch = showDiff() && patchOutput;
+                if (patch) {
+                    printlnErr(prefix + "  result patch (reported output, not verified):");
+                    renderDiff(
+                            t.output().length() <= DiffLayout.MAX_CHARS
+                                    ? List.of(redactDiff(t.output(), t.sessionId())
+                                            .split("\n", -1))
+                                    : List.of("(diff omitted: content limit)"),
+                            "",
+                            prefix);
+                }
+                if (!patch
+                        && !(patchOutput && showToolOutput == ToolOutputVisibility.HIDDEN)
+                        && (showToolOutput.shown() || failure)) {
                     final var output = call.remaining(t.output());
                     if (!output.isEmpty()) {
                         printlnErr(prefix + "  result:");

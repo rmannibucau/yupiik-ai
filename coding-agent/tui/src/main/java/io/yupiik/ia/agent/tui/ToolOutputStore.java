@@ -15,10 +15,15 @@
  */
 package io.yupiik.ia.agent.tui;
 
+import io.yupiik.ia.agent.core.tools.FileMutation;
+import java.nio.file.Path;
 import java.util.ArrayDeque;
+import java.util.ArrayList;
 import java.util.Deque;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
+import java.util.function.UnaryOperator;
 
 /**
  * Captures bounded output of running and finished tool calls, keyed by the
@@ -64,6 +69,85 @@ public final class ToolOutputStore {
     private long latest = -1;
     private long maxOrdinalSeen = -1;
     private long revision;
+    private final Map<Long, List<FileMutation>> captures = new HashMap<>();
+    private long captureChars;
+
+    /** Retains only exact display-safe captures; oversized/redacted content stays unavailable. */
+    public void recordFiles(
+            final long ordinal, final List<FileMutation> files, final UnaryOperator<String> displayPolicy) {
+        if (!entries.containsKey(ordinal)) {
+            return;
+        }
+        final var previous = captures.remove(ordinal);
+        captureChars -= captureWeight(previous);
+        final var retained = new ArrayList<FileMutation>();
+        long chars = 0;
+        for (final var file : files) {
+            if (retained.size() >= maxEntries) {
+                break;
+            }
+            final var path = displayPath(file.path(), displayPolicy);
+            if (chars + path.toString().length() > maxOutputChars) {
+                break;
+            }
+            var content = file.content();
+            final var weight = content == null
+                    ? 0L
+                    : (long) (content.oldText() == null ? 0 : content.oldText().length())
+                            + content.newText().length();
+            if (!displaySafe(content, weight + chars + path.toString().length(), displayPolicy)) {
+                content = null;
+            }
+            retained.add(new FileMutation(path, file.kind(), content));
+            chars += path.toString().length() + (content == null ? 0 : weight);
+        }
+        captures.put(ordinal, List.copyOf(retained));
+        captureChars += chars;
+        revision++;
+        evict();
+    }
+
+    private static Path displayPath(final Path path, final UnaryOperator<String> displayPolicy) {
+        try {
+            return Path.of(displayPolicy.apply(path.toString())).toAbsolutePath();
+        } catch (final RuntimeException unavailable) {
+            return path.getRoot().resolve("redacted-path");
+        }
+    }
+
+    private boolean displaySafe(
+            final FileMutation.Content content, final long weight, final UnaryOperator<String> displayPolicy) {
+        if (content == null || weight > maxOutputChars) {
+            return false;
+        }
+        try {
+            return (content.oldText() == null || content.oldText().equals(displayPolicy.apply(content.oldText())))
+                    && content.newText().equals(displayPolicy.apply(content.newText()));
+        } catch (final RuntimeException unavailable) {
+            return false;
+        }
+    }
+
+    public List<FileMutation> files(final long ordinal) {
+        return captures.getOrDefault(ordinal, List.of());
+    }
+
+    private static long captureWeight(final List<FileMutation> files) {
+        if (files == null) {
+            return 0;
+        }
+        long chars = 0;
+        for (final var file : files) {
+            chars += file.path().toString().length();
+            if (file.content() != null) {
+                chars += (file.content().oldText() == null
+                                ? 0L
+                                : file.content().oldText().length())
+                        + file.content().newText().length();
+            }
+        }
+        return chars;
+    }
 
     /** Includes updates of an existing ordinal, not just insertions. */
     long revision() {
@@ -144,9 +228,10 @@ public final class ToolOutputStore {
     private void evict() {
         // FIFO eviction bound by the entry count and, when configured, by the total
         // retained characters: the oldest entries drop first until the budget fits.
-        while (order.size() > maxEntries || (maxTotalChars > 0 && totalChars > maxTotalChars)) {
+        while (order.size() > maxEntries || (maxTotalChars > 0 && totalChars + captureChars > maxTotalChars)) {
             final var evicted = order.removeFirst();
             final var entryEvicted = entries.remove(evicted);
+            captureChars -= captureWeight(captures.remove(evicted));
             if (entryEvicted != null) {
                 totalChars -= entryEvicted.length();
             }
@@ -163,6 +248,8 @@ public final class ToolOutputStore {
     public void clear() {
         revision++;
         entries.clear();
+        captures.clear();
+        captureChars = 0;
         order.clear();
         totalChars = 0;
         latest = -1;
@@ -276,6 +363,6 @@ public final class ToolOutputStore {
 
     /** @return total characters currently retained across all entries (truncation markers included). */
     public long totalChars() {
-        return totalChars;
+        return totalChars + captureChars;
     }
 }

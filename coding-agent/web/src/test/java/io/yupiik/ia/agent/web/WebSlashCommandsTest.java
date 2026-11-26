@@ -36,6 +36,7 @@ import io.yupiik.ia.agent.core.question.FeedbackGate;
 import io.yupiik.ia.agent.core.session.AgentSessionService;
 import io.yupiik.ia.agent.core.session.SessionStore;
 import io.yupiik.ia.agent.core.shell.ConversationTranscript;
+import io.yupiik.ia.agent.core.shell.DiffViewMode;
 import io.yupiik.ia.agent.core.shell.SessionRuntime;
 import io.yupiik.ia.agent.core.shell.ShellEnv;
 import io.yupiik.ia.agent.core.shell.ShellIO;
@@ -320,6 +321,7 @@ class WebSlashCommandsTest {
         env.session()
                 .showThinking(false)
                 .showToolOutput(ToolOutputVisibility.HIDDEN)
+                .diffViewMode(DiffViewMode.SIMPLE)
                 .metrics(new MetricsConfiguration(false, false, MetricsDisplayMode.FULL));
         dispatch("/help");
         assertEquals(
@@ -328,6 +330,8 @@ class WebSlashCommandsTest {
                         false,
                         "showToolOutput",
                         "hidden",
+                        "diffViewMode",
+                        "simple",
                         "metricsPerTurn",
                         false,
                         "metricsSession",
@@ -337,6 +341,39 @@ class WebSlashCommandsTest {
                 events.getLast().data());
         ((WebShellFrontend) env.frontend()).clear();
         assertEquals("clear", events.getLast().data().get("command"));
+    }
+
+    @Test
+    void diffViewDefaultsToAutoAndSlashCommandsSynchronizeSessionAndFrontend() {
+        assertEquals("auto", WebSlashCommands.displaySettings(env.session()).get("diffViewMode"));
+        for (final var mode : DiffViewMode.values()) {
+            events.clear();
+            dispatch("/diff-view " + mode.value());
+            assertEquals(mode, env.session().diffViewMode());
+            assertTrue(events.stream()
+                    .anyMatch(event -> "settings".equals(event.type())
+                            && Map.of("diffViewMode", mode.value()).equals(event.data())));
+            assertEquals(mode.value(), events.getLast().data().get("diffViewMode"));
+        }
+        events.clear();
+        dispatch("/diff-view invalid");
+        assertEquals(DiffViewMode.SIMPLE, env.session().diffViewMode());
+        assertEquals("simple", events.getLast().data().get("diffViewMode"));
+        final var completion = new CompletionEngine(commands.registry(), new ArgCompletion.Env() {});
+        assertEquals(
+                List.of("auto", "side-by-side", "simple"),
+                completion.suggest("/diff-view ", 11).items());
+    }
+
+    @Test
+    void frontendDiffViewEventsUseWireValuesAndNullDefaultsToAuto() {
+        for (final var mode : DiffViewMode.values()) {
+            env.frontend().diffViewMode(mode);
+            assertEquals("settings", events.getLast().type());
+            assertEquals(Map.of("diffViewMode", mode.value()), events.getLast().data());
+        }
+        env.frontend().diffViewMode(null);
+        assertEquals(Map.of("diffViewMode", "auto"), events.getLast().data());
     }
 
     @Test

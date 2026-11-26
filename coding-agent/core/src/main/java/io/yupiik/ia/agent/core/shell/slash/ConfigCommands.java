@@ -34,6 +34,7 @@ import io.yupiik.ia.agent.core.llm.CodexLoginService;
 import io.yupiik.ia.agent.core.security.SecretRedactor;
 import io.yupiik.ia.agent.core.security.SecretSessionModes;
 import io.yupiik.ia.agent.core.session.AgentSessionService;
+import io.yupiik.ia.agent.core.shell.DiffViewMode;
 import io.yupiik.ia.agent.core.shell.MetricsFormat;
 import io.yupiik.ia.agent.core.shell.ShellEnv;
 import io.yupiik.ia.agent.core.shell.ShellOutcome;
@@ -175,6 +176,14 @@ public class ConfigCommands implements SlashCommandSet {
                                 SlashGroup.CONFIG),
                         List.of("show", "collapse", "hide"),
                         SlashAction.sync(ConfigCommands::toolOutput)),
+                SlashCommand.of(
+                        new SlashCommandSpec(
+                                "/diff-view",
+                                "[auto|side-by-side|simple]",
+                                "show or select the diff layout",
+                                SlashGroup.CONFIG),
+                        List.of("auto", "side-by-side", "simple"),
+                        SlashAction.sync(ConfigCommands::diffView)),
                 SlashCommand.of(
                         new SlashCommandSpec(
                                 "/metrics",
@@ -706,6 +715,17 @@ public class ConfigCommands implements SlashCommandSet {
         env.session().showToolOutput(value);
         env.frontend().showToolOutput(value);
         return ShellOutcome.status("tool output " + value.name().toLowerCase(Locale.ROOT));
+    }
+
+    private static ShellOutcome diffView(final String arg, final ShellEnv env) {
+        final var mode = DiffViewMode.parse(arg);
+        if (mode == null) {
+            return ShellOutcome.status("diff view: "
+                    + env.session().diffViewMode().value() + " - usage: /diff-view auto|side-by-side|simple");
+        }
+        env.session().diffViewMode(mode);
+        env.frontend().diffViewMode(mode);
+        return ShellOutcome.status("diff view: " + mode.value());
     }
 
     private static ShellOutcome toggle(

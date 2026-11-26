@@ -43,6 +43,9 @@ public interface ShellFrontend {
     /** Reflects the "tool output visibility" toggle of {@link ShellSession}. */
     void showToolOutput(ToolOutputVisibility value);
 
+    /** Reflects the diff layout selection, independently of tool-output visibility. */
+    default void diffViewMode(final DiffViewMode value) {}
+
     /**
      * Shows a busy/busy-with-label indicator (spinner, status line, ...).
      * Default: no-op, frontends without an activity indicator ignore it.

@@ -43,6 +43,7 @@ import io.yupiik.ia.agent.core.llm.ModelsResponse;
 import io.yupiik.ia.agent.core.session.AgentSessionService;
 import io.yupiik.ia.agent.core.session.FileSessionStore;
 import io.yupiik.ia.agent.core.session.SessionStore;
+import io.yupiik.ia.agent.core.shell.DiffViewMode;
 import io.yupiik.ia.agent.core.shell.SessionLifecycle;
 import io.yupiik.ia.agent.core.shell.SessionRuntimeFactory;
 import io.yupiik.ia.agent.core.shell.ShellEnv;
@@ -773,6 +774,15 @@ class WebSessionManagerPromptTest {
     @Test
     void reconnectSnapshotRestoresDisplaySettings() {
         final var session = manager.attach("s1").env().session();
+        assertEquals(
+                "auto",
+                manager.snapshotFor("s1").stream()
+                        .filter(event -> "settings".equals(event.type()))
+                        .findFirst()
+                        .orElseThrow()
+                        .data()
+                        .get("diffViewMode"));
+        session.diffViewMode(DiffViewMode.SIDE_BY_SIDE);
         session.showThinking(false).showToolOutput(ToolOutputVisibility.HIDDEN);
         final var settings = manager.snapshotFor("s1").stream()
                 .filter(event -> "settings".equals(event.type()))
@@ -781,6 +791,7 @@ class WebSessionManagerPromptTest {
                 .data();
         assertEquals(false, settings.get("showThinking"));
         assertEquals("hidden", settings.get("showToolOutput"));
+        assertEquals("side-by-side", settings.get("diffViewMode"));
         assertEquals(true, settings.get("metricsPerTurn"));
         assertEquals("compact", settings.get("metricsMode"));
     }

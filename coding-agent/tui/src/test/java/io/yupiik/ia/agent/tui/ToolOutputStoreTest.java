@@ -22,9 +22,79 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import io.yupiik.ia.agent.core.tools.FileMutation;
+import java.nio.file.Path;
+import java.util.List;
+import java.util.function.UnaryOperator;
+import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
 class ToolOutputStoreTest {
+    @Test
+    void captureDisplayPolicyFailuresNeverExposeContentOrInterruptToolCompletion() {
+        final var store = new ToolOutputStore(2, 256, 0);
+        store.record(1, new ToolOutputStore.Entry("edit_file", "{}", "", false, -1));
+        final var file = new FileMutation(
+                Path.of("/private/file.txt"),
+                FileMutation.Kind.UPDATE,
+                new FileMutation.Content("private old", "private new"));
+        store.recordFiles(1, List.of(file), text -> {
+            throw new IllegalStateException("private error");
+        });
+        final var captured = store.files(1).getFirst();
+        assertNull(captured.content());
+        assertFalse(captured.path().toString().contains("private"));
+        store.record(1, new ToolOutputStore.Entry("edit_file", "{}", "done", false, 1));
+        assertEquals("done", store.get(1).output());
+        assertEquals(captured.path().toString().length() + 4, store.totalChars());
+    }
+
+    @Test
+    void capturesAreExactDisplaySafeBoundedAndShareFifoLifetime() {
+        final var store = new ToolOutputStore(2, 256, 0);
+        final var path = Path.of("/tmp/captured.txt");
+        final var file = new FileMutation(path, FileMutation.Kind.UPDATE, new FileMutation.Content("before", "after"));
+        store.record(1, new ToolOutputStore.Entry("edit_file", "{}", "", false, -1));
+        final var revision = store.revision();
+        store.recordFiles(1, List.of(file), UnaryOperator.identity());
+        assertEquals(List.of(file), store.files(1));
+        store.recordFiles(1, List.of(file), text -> text.equals(path.toString()) ? "masked-path" : text);
+        assertEquals(store.files(1).getFirst().path().toString().length() + "beforeafter".length(), store.totalChars());
+        store.recordFiles(1, List.of(file), UnaryOperator.identity());
+        Assertions.assertTrue(store.revision() > revision);
+        store.record(1, new ToolOutputStore.Entry("edit_file", "{}", "done", false, 1));
+        assertEquals(List.of(file), store.files(1));
+        store.recordFiles(1, List.of(file), text -> text.equals("before") ? "masked" : text);
+        Assertions.assertNull(store.files(1).getFirst().content());
+        store.recordFiles(
+                1,
+                List.of(new FileMutation(
+                        path, FileMutation.Kind.CREATE, new FileMutation.Content(null, "x".repeat(300)))),
+                UnaryOperator.identity());
+        Assertions.assertNull(store.files(1).getFirst().content());
+        store.record(2, new ToolOutputStore.Entry("read", "{}", "", false, 1));
+        store.record(3, new ToolOutputStore.Entry("read", "{}", "", false, 1));
+        Assertions.assertTrue(store.files(1).isEmpty());
+        store.clear();
+        assertEquals(0, store.totalChars());
+    }
+
+    @Test
+    void captureCharactersParticipateInTotalBudget() {
+        final var store = new ToolOutputStore(4, 256, 80);
+        store.record(1, new ToolOutputStore.Entry("edit_file", "{}", "", false, 1));
+        store.recordFiles(
+                1,
+                List.of(new FileMutation(
+                        Path.of("/tmp/a"),
+                        FileMutation.Kind.UPDATE,
+                        new FileMutation.Content("x".repeat(40), "y".repeat(40)))),
+                UnaryOperator.identity());
+        Assertions.assertNull(store.get(1));
+        Assertions.assertTrue(store.files(1).isEmpty());
+        assertEquals(0, store.totalChars());
+    }
+
     private static final String TRUNCATED = "\n... older output truncated";
 
     @Test

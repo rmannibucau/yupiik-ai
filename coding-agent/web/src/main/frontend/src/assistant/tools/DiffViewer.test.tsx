@@ -9,8 +9,17 @@ import { DiffViewer } from './DiffViewer';
 
 let host: HTMLDivElement;
 let root: Root;
+let resize: (width: number) => void;
 beforeEach(() => {
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true);
+  vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue({ width: 1024 } as DOMRect);
+  vi.stubGlobal('ResizeObserver', class {
+    constructor(callback: ResizeObserverCallback) {
+      resize = width => callback([{ contentRect: { width } } as ResizeObserverEntry], this as unknown as ResizeObserver);
+    }
+    observe() {}
+    disconnect() {}
+  });
   host = document.createElement('div');
   document.body.append(host);
   root = createRoot(host);
@@ -19,13 +28,14 @@ afterEach(() => {
   act(() => root.unmount());
   host.remove();
   vi.unstubAllGlobals();
+  vi.restoreAllMocks();
 });
 
 async function render(props: React.ComponentProps<typeof DiffViewer>) {
   await act(async () => {
     root.render(<DiffViewer {...props} />);
     // Keep the real lazy chunk's resolution inside act (no renderer mock).
-    if (props.mode === 'auto' || props.mode === 'side-by-side') {
+    if (props.mode !== 'simple') {
       await import('./SplitDiff');
     }
   });
@@ -40,7 +50,8 @@ async function split() {
 const patch = 'diff --git a/file b/file\n--- a/file\n+++ b/file\n@@ -1 +1 @@\n-old\n+new\n';
 
 describe('DiffViewer modes and literal fallback', () => {
-  it.each([undefined, 'simple'] as const)('defaults to the literal simple renderer (mode %s)', async (mode) => {
+  it('honors the literal simple renderer', async () => {
+    const mode = 'simple';
     await render({ text: patch, mode, 'aria-label': 'Captured diff', className: 'custom' });
     const pre = host.querySelector('pre')!;
     expect(pre.textContent).toBe(patch);
@@ -51,7 +62,7 @@ describe('DiffViewer modes and literal fallback', () => {
     expect([...pre.querySelectorAll('[data-type="del"]')].some((line) => line.textContent === '-old\n')).toBe(true);
   });
 
-  it.each(['auto', 'side-by-side'] as const)('renders actual split cells and line numbers in %s mode', async (mode) => {
+  it.each([undefined, 'auto', 'side-by-side'] as const)('renders actual split cells and line numbers in %s mode', async (mode) => {
     await render({ text: patch, mode, 'aria-label': 'Captured diff', className: 'custom' });
     const view = await split();
     expect(view.getAttribute('aria-label')).toBe('Captured diff');
@@ -61,6 +72,16 @@ describe('DiffViewer modes and literal fallback', () => {
     expect(view.querySelector('.diff-gutter-delete')?.textContent).toBe('1');
     expect(view.querySelector('.diff-gutter-insert')?.textContent).toBe('1');
     expect(host.querySelector('pre')).toBeNull();
+  });
+
+  it.each([undefined, 'auto', 'side-by-side'] as const)('responds to container width and safely falls back when narrow (mode %s)', async (mode) => {
+    await render({ text: patch, mode });
+    await split();
+    act(() => resize(500));
+    expect(host.querySelector('table')).toBeNull();
+    expect(host.querySelector('pre')?.textContent).toBe(patch);
+    act(() => resize(1024));
+    await split();
   });
 
   it.each([
@@ -229,6 +250,42 @@ describe('ToolCard captured diff integration', () => {
     expect(host.querySelector('table')).toBeNull();
   });
 
+  it.each(['simple', 'side-by-side'] as const)('reveals only applied diffs with collapsed details in %s mode', async (diffMode) => {
+    await act(async () => {
+      root.render(<ToolCard block={block} collapsed onToggle={() => {}} diffMode={diffMode} />);
+      await import('./SplitDiff');
+    });
+    if (diffMode === 'side-by-side') {
+      await split();
+    }
+    expect(host.querySelector('[aria-label="Applied file changes"]')).not.toBeNull();
+    expect(host.textContent).toContain('class Before');
+    expect(host.textContent).toContain('class After');
+    expect(host.querySelector('[aria-label="Tool request"], [aria-label="Tool result"], details')).toBeNull();
+    expect(host.textContent).not.toContain('class Requested');
+    expect(host.textContent).not.toContain('written');
+    expect(host.querySelector('button[aria-expanded]')?.getAttribute('aria-expanded')).toBe('false');
+  });
+
+  it.each(['auto', 'simple', 'side-by-side'] as const)('keeps replacement intent separate from results in collapsed %s mode', async (diffMode) => {
+    await act(async () => {
+      root.render(<ToolCard block={{
+        kind: 'tool', name: 'edit_file', state: 'done', content: '', output: 'PRIVATE_RESULT', success: false,
+        args: JSON.stringify({ path: 'Example.java', oldString: '\told  \n', newString: '\tnew  ', replaceAll: true }),
+      }} collapsed onToggle={() => {}} diffMode={diffMode} />);
+    });
+    const preview = host.querySelector('[aria-label="Requested replacement"]');
+    if (diffMode === 'auto') {
+      expect(preview).toBeNull();
+    } else {
+      expect(preview?.textContent).toContain('all occurrences');
+      expect(preview?.textContent).toContain('not applied file changes or file line numbers');
+      expect(preview?.textContent).toContain('-\told  \n+\tnew  \n\\ No newline at end of string');
+    }
+    expect(host.textContent).not.toContain('PRIVATE_RESULT');
+    expect(host.querySelector('[aria-label="Tool request"], [aria-label="Tool result"], details')).toBeNull();
+  });
+
   it('renders metadata-only and hostile paths as text without inventing an empty-file diff', async () => {
     const path = '../../<img src=x onerror=alert(1)>\n+++ b/forged';
     await act(async () => {
@@ -254,5 +311,16 @@ describe('ToolCard captured diff integration', () => {
     expect(changes.querySelector('table')).toBeNull();
     expect(host.textContent).toContain('Tool failed');
     expect(changes.textContent).toContain('Partial changes can remain even if the tool failed');
+  });
+
+  it('keeps non-diff captured text collapsed when the diff preview is unavailable', async () => {
+    const files = [{ path: 'large.txt', kind: 'update' as const, oldText: 'PRIVATE_BEFORE' + 'a'.repeat(100_001), newText: 'PRIVATE_AFTER' }];
+    await act(async () => {
+      root.render(<ToolCard block={{ ...block, files }} collapsed onToggle={() => {}} diffMode="simple" />);
+    });
+    expect(host.querySelector('[aria-label="Applied file changes"]')?.textContent).toContain('Expand tool details');
+    expect(host.textContent).not.toContain('PRIVATE_BEFORE');
+    expect(host.textContent).not.toContain('PRIVATE_AFTER');
+    expect(host.querySelector('[aria-label="Captured before"], [aria-label="Captured after"]')).toBeNull();
   });
 });

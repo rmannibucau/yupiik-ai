@@ -46,12 +46,13 @@ async function settle() { await act(async () => { await new Promise((resolve) =>
 beforeEach(() => {
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true);
   vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} });
+  vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue({ width: 1024 } as DOMRect);
   Element.prototype.scrollIntoView = vi.fn();
   rpc.mockClear(); state.events = []; state.busy = false; state.bootstrapped = true; state.queued = []; state.todos = [];
   state.metadata = {};
   host = document.createElement('div'); document.body.append(host); root = createRoot(host);
 });
-afterEach(() => { act(() => root.unmount()); host.remove(); vi.unstubAllGlobals(); });
+afterEach(() => { act(() => root.unmount()); host.remove(); vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 
 describe('mounted external-store chat integration', () => {
   it('keeps applied diff layout independent of tool visibility without inferring changes from arguments', async () => {
@@ -72,6 +73,11 @@ describe('mounted external-store chat integration', () => {
     const select = host.querySelector<HTMLSelectElement>('[aria-label="Diff mode"]')!;
     expect(select.value).toBe('auto');
     act(() => { select.value = 'simple'; select.dispatchEvent(new Event('change', { bubbles: true })); });
+    expect(rpc).toHaveBeenCalledWith('session.slash', { id: 'test', text: '/diff-view simple' });
+    // The backend settings event is authoritative, just like a slash command typed in the composer.
+    state.events = [...state.events, event('settings', '', { diffViewMode: 'simple' })];
+    render(); await settle();
+    expect(select.value).toBe('simple');
     expect(host.querySelector('.diff-split')).toBeNull();
     expect(host.querySelector('pre[aria-label="Applied diff for Demo.java"]')?.textContent).toContain('-class Before {}\n+class After {}');
     state.events = [...state.events, event('settings', '', { showToolOutput: 'hidden' })];
@@ -79,10 +85,72 @@ describe('mounted external-store chat integration', () => {
     expect(host.querySelector('.yca-tool-card')).toBeNull();
     act(() => { select.value = 'side-by-side'; select.dispatchEvent(new Event('change', { bubbles: true })); });
     expect(host.querySelector('.diff-split')).toBeNull();
-    state.events = [...state.events, event('settings', '', { showToolOutput: 'shown' })];
+    expect(rpc).toHaveBeenCalledWith('session.slash', { id: 'test', text: '/diff-view side-by-side' });
+    state.events = [...state.events, event('settings', '', { showToolOutput: 'shown', diffViewMode: 'side-by-side' })];
     render(); await settle();
     expect(host.querySelector('.diff-code-insert')?.textContent).toBe('class After {}');
     expect(host.querySelector('[aria-label="Applied file changes"]')?.textContent).not.toContain('requested');
+  });
+
+  it.each(['auto', 'side-by-side', 'simple'] as const)('gates requested, output and applied diffs by tool visibility in %s mode', async (diffViewMode) => {
+    const patch = '--- a/file\n+++ b/file\n@@ -1 +1 @@\n-old\n+new\n';
+    state.events = [
+      event('tool-started', 'apply_patch', { ordinal: 1, args: JSON.stringify({ patch, other: 'PRIVATE_ARGUMENT' }) }),
+      event('tool-files-changed', 'apply_patch', { ordinal: 1, files: [{ path: 'file', kind: 'update', oldText: 'old\n', newText: 'new\n' }] }),
+      event('tool-finished', 'apply_patch', { ordinal: 1, output: 'PRIVATE_RESULT', success: false }),
+      event('tool-started', 'external', { ordinal: 2, args: '{"secret":"PRIVATE_EXTERNAL"}' }),
+      event('tool-finished', 'external', { ordinal: 2, output: patch, success: true }),
+      event('settings', '', { diffViewMode, showToolOutput: 'collapsed' }),
+    ];
+    render(); await settle();
+    await act(async () => { await import('../assistant/tools/SplitDiff'); });
+    await settle();
+    expect(host.querySelector<HTMLSelectElement>('[aria-label="Diff mode"]')?.value).toBe(diffViewMode);
+    expect(host.querySelector('[aria-label="Tool request"], [aria-label="Tool result"], details')).toBeNull();
+    expect(host.textContent).not.toContain('PRIVATE_RESULT');
+    expect(host.textContent).not.toContain('PRIVATE_EXTERNAL');
+    expect(host.querySelector('[data-slot="diff-viewer"]') !== null).toBe(diffViewMode !== 'auto');
+    if (diffViewMode !== 'auto') {
+      expect(host.querySelector('[aria-label="Requested patch"]')).not.toBeNull();
+      expect(host.querySelector('[aria-label="Applied file changes"]')).not.toBeNull();
+      expect(host.querySelector('[aria-label="External tool output"]')).not.toBeNull();
+    }
+    state.events = [...state.events, event('settings', '', { showToolOutput: 'hidden' })];
+    render(); await settle();
+    expect(host.querySelector('.yca-tool-card, [data-slot="diff-viewer"]')).toBeNull();
+    state.events = [...state.events, event('settings', '', { showToolOutput: 'shown' })];
+    render(); await settle();
+    expect(host.querySelector('[aria-label="Tool request"]')).not.toBeNull();
+    expect(host.querySelector('[aria-label="Tool result"]')).not.toBeNull();
+    expect(host.textContent).toContain('PRIVATE_RESULT');
+    expect(host.querySelector('[data-slot="diff-viewer"]')).not.toBeNull();
+  });
+
+  it('initializes each mounted session to auto and restores its mode from settings', async () => {
+    render(); await settle();
+    const select = () => host.querySelector<HTMLSelectElement>('[aria-label="Diff mode"]')!;
+    expect(select().value).toBe('auto');
+    state.events = [event('settings', '', { diffViewMode: 'simple' })];
+    render(); await settle();
+    expect(select().value).toBe('simple');
+    state.events = [...state.events, event('settings', '', { diffViewMode: 'invalid' })];
+    render(); await settle();
+    expect(select().value).toBe('simple');
+    state.events = [];
+    act(() => root.render(<MemoryRouter><ChatPage key="new-session" activeSession="new-session" openSession={() => {}} /></MemoryRouter>));
+    await settle();
+    expect(select().value).toBe('auto');
+  });
+
+  it('synchronizes a composer slash command back to the selector via settings', async () => {
+    render(); await settle();
+    type('/diff-view simple');
+    await act(async () => button('Send').click());
+    await settle();
+    expect(rpc).toHaveBeenCalledWith('session.input', { id: 'test', text: '/diff-view simple' });
+    state.events = [...state.events, event('settings', '', { diffViewMode: 'simple' })];
+    render(); await settle();
+    expect(host.querySelector<HTMLSelectElement>('[aria-label="Diff mode"]')?.value).toBe('simple');
   });
 
   it('carries sandbox metadata to the permission warning and reloads it after selecting full_yolo', async () => {

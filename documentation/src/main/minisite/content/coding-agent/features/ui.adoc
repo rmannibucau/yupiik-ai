@@ -41,7 +41,7 @@ Requests remain useful when a tool is still running or fails before producing ou
 |===
 |Frontend |Presentation
 |`web` |Expand a tool card to inspect its request and result, with raw arguments and output available separately and controls to reveal more of long content.
-|`tui` |Open the full-output modal with `Ctrl+O` to inspect request details and the result; the inline transcript remains compact.
+|`tui` |Inspect inline file diffs or open the independent full-output modal with `Ctrl+O` for request details, captured changes and the result.
 |`cli` |An append-only activity transcript uses tool names and explicit states, with bounded request previews when output is shown.
 |`run` |Tool lifecycle and optional details use the logging channel, leaving stdout for the answer; no interactive cards or cursor controls are added.
 |===
@@ -69,6 +69,35 @@ Failures remain diagnostics, and a pending tool result is not a failure.
 For `cli`, verbosity further selects compact, verbose or raw presentation.
 For `run`, the same visibility policy applies to both streamed and final tool output.
 Presentation truncation is separate from the xref:output.adoc[output optimization] performed before results enter the model context.
+
+== File diff views
+
+The CLI, TUI and web interface default to `auto` diff mode.
+Use `/diff-view auto`, `/diff-view side-by-side` or `/diff-view simple` to select a mode for the current session; `/diff-view` reports the current mode.
+The web Diff selector controls the same session setting.
+
+`auto` follows tool disclosure and selects a side-by-side old/new layout when enough width is available, otherwise a simple unified layout.
+`side-by-side` requests the split layout but still falls back safely in narrow views or for unsupported patches.
+`simple` keeps the unified layout.
+Terminal split views require at least 110 content columns, excluding surrounding card borders and indentation.
+The TUI reflows diffs on resize; the CLI remains append-only and uses the available width when printing each diff.
+
+[options="header"]
+|===
+|Tool visibility |`auto` |`side-by-side` or `simple`
+|Hidden |No inline diff |No inline diff
+|Collapsed |Diff deferred until the tool is opened |Diff visible; ordinary request and result bodies remain collapsed
+|Shown |Diff visible, responsive layout |Diff visible, selected layout
+|===
+
+The TUI `Ctrl+O` viewer is independent of inline disclosure and uses the selected diff mode.
+Supported source languages use the existing syntax theme, with subtle success/error tints for added and removed lines rather than a forced background on unchanged lines.
+Monochrome terminal output keeps change markers without color.
+
+Applied-file sections come only from execution-time before/after captures, including completed writes from partially failed tools.
+Requests remain labeled as requested changes and never prove a successful write.
+Unavailable or redacted captures do not imply an empty old file, and no interface rereads the filesystem to fill them in.
+Captures are live presentation data, not model context or persisted historical diffs.
 
 == Token metrics
 

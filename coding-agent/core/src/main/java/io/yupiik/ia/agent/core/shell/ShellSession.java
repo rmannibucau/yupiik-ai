@@ -18,6 +18,7 @@ package io.yupiik.ia.agent.core.shell;
 import io.yupiik.ia.agent.core.configuration.MetricsConfiguration;
 import io.yupiik.ia.agent.core.configuration.MetricsDisplayMode;
 import io.yupiik.ia.agent.core.llm.ChatSettings;
+import java.util.Objects;
 
 /**
  * Mutable per-run state shared by all shells: the session coordinates and
@@ -30,6 +31,7 @@ public class ShellSession {
     private String activeAgent;
     private volatile boolean showThinking = true;
     private volatile ToolOutputVisibility showToolOutput = ToolOutputVisibility.COLLAPSED;
+    private volatile DiffViewMode diffViewMode = DiffViewMode.AUTO;
     private volatile boolean busy;
     private volatile String pendingMode;
     private MetricsConfiguration metrics = new MetricsConfiguration(true, true, MetricsDisplayMode.COMPACT);
@@ -122,6 +124,15 @@ public class ShellSession {
 
     public MetricsConfiguration metrics() {
         return metrics;
+    }
+
+    public DiffViewMode diffViewMode() {
+        return diffViewMode;
+    }
+
+    public ShellSession diffViewMode(final DiffViewMode value) {
+        this.diffViewMode = Objects.requireNonNull(value, "diffViewMode");
+        return this;
     }
 
     public ShellSession metrics(final MetricsConfiguration metrics) {

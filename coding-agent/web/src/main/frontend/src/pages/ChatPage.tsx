@@ -206,6 +206,9 @@ export function ChatPage({
         if (data.showToolOutput === 'shown' || data.showToolOutput === 'collapsed' || data.showToolOutput === 'hidden') {
           setToolVisibility(data.showToolOutput);
         }
+        if (data.diffViewMode === 'auto' || data.diffViewMode === 'side-by-side' || data.diffViewMode === 'simple') {
+          setDiffMode(data.diffViewMode);
+        }
         if (typeof data.metricsPerTurn === 'boolean' && typeof data.metricsSession === 'boolean') {
           setMetrics({ perTurn: data.metricsPerTurn, session: data.metricsSession, full: data.metricsMode === 'full' });
         }
@@ -884,7 +887,9 @@ export function ChatPage({
           void call('session.slash', { id: sessionId, text: `/tool-output ${command}` }).catch(() => undefined);
         }} />
         <label className="flex items-center gap-1">Diff
-          <select aria-label="Diff mode" value={diffMode} onChange={(event) => setDiffMode(event.target.value as DiffMode)}
+          <select aria-label="Diff mode" value={diffMode} onChange={(event) => {
+            void call('session.slash', { id: sessionId, text: `/diff-view ${event.target.value}` }).catch(() => undefined);
+          }}
             style={{ background: 'var(--yca-panel)', color: 'var(--yca-text)' }}>
             <option value="auto">Auto</option>
             <option value="side-by-side">Side-by-side</option>
@@ -1801,11 +1806,11 @@ const BlockView = memo(function BlockView({ block, globalCollapsed }: { block: B
   const [userOverride, setUserOverride] = useState<'expanded' | 'collapsed' | null>(() =>
     (block.id ? overrides?.get(block.id) as 'expanded' | 'collapsed' | undefined : undefined) ?? null);
   const running = block.kind === 'tool' && block.state === 'running';
-  // a running tool with live output auto-expands regardless of the global collapse posture so the
+  // In auto diff mode, a running tool with live output auto-expands regardless of the global collapse posture so the
   // streamed stdout is visible as it arrives (the user can still collapse it via the per-card
   // toggle, which pins an explicit override) - Issue #5.
   const runningAutoExpand =
-    running && ((block as { content?: string }).content?.length ?? 0) > 0;
+    diffMode === 'auto' && running && ((block as { content?: string }).content?.length ?? 0) > 0;
   const collapsed = block.kind === 'tool'
     ? userOverride !== null
       ? userOverride === 'collapsed'

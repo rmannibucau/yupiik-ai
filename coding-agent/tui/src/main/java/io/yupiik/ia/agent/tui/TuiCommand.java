@@ -80,10 +80,13 @@ import io.yupiik.ia.agent.core.permissions.ApprovalGate;
 import io.yupiik.ia.agent.core.question.FeedbackGate;
 import io.yupiik.ia.agent.core.question.Question;
 import io.yupiik.ia.agent.core.question.UserFeedbackService;
+import io.yupiik.ia.agent.core.security.SecretRedactor;
 import io.yupiik.ia.agent.core.session.AgentSessionService;
 import io.yupiik.ia.agent.core.session.SessionStore;
 import io.yupiik.ia.agent.core.shell.BusyLabels;
 import io.yupiik.ia.agent.core.shell.ConversationTranscript;
+import io.yupiik.ia.agent.core.shell.DiffLayout;
+import io.yupiik.ia.agent.core.shell.DiffViewMode;
 import io.yupiik.ia.agent.core.shell.DurationFormat;
 import io.yupiik.ia.agent.core.shell.InterruptCoordinator;
 import io.yupiik.ia.agent.core.shell.MetricsFormat;
@@ -105,6 +108,7 @@ import io.yupiik.ia.agent.core.shell.slash.ShellInputRouting;
 import io.yupiik.ia.agent.core.shell.slash.SlashRegistry;
 import io.yupiik.ia.agent.core.style.ModelStyleService;
 import io.yupiik.ia.agent.core.tools.EmbeddedTool;
+import io.yupiik.ia.agent.core.tools.FileMutation;
 import io.yupiik.ia.agent.core.util.OpenBrowser;
 import io.yupiik.ia.agent.core.wiring.AutoLogConfigurer;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
@@ -279,7 +283,13 @@ public class TuiCommand implements Runnable {
     private String renderSessionId;
     private ToolOverlayLayout toolOverlayLayout;
 
-    private record ToolOverlayLayout(ToolOutputStore.Entry entry, int width, boolean raw, Text text) {}
+    private record ToolOverlayLayout(
+            ToolOutputStore.Entry entry,
+            int width,
+            boolean raw,
+            DiffViewMode mode,
+            List<FileMutation> files,
+            Text text) {}
     // incremental live-thinking memo: the flushed part of the growing stream is
     // rendered once per stable prefix and the last (still open) line re-rendered
     private String lastLiveThoughtPrefix = "";
@@ -289,6 +299,7 @@ public class TuiCommand implements Runnable {
     private final CostEstimator costEstimator;
     private final boolean persistHistory;
     private final AskUserCardRenderer askUserCardRenderer;
+    private final SecretRedactor secretRedactor;
     private final DiffRenderer diffRenderer = new DiffRenderer();
     private final ToolArgsPreview toolArgsPreview;
     private final ToolOutputFormat toolOutputFormat;
@@ -344,7 +355,8 @@ public class TuiCommand implements Runnable {
             final SubagentRegistry subagentRegistry,
             final ScrollService scrollService,
             final ScheduledExecutorService scheduler,
-            final JsonMapper mapper) {
+            final JsonMapper mapper,
+            final SecretRedactor secretRedactor) {
         this(
                 conf,
                 tuiConfiguration,
@@ -376,7 +388,8 @@ public class TuiCommand implements Runnable {
                 scrollService,
                 scheduler,
                 mapper,
-                null);
+                null,
+                secretRedactor);
     }
 
     public TuiCommand(
@@ -410,7 +423,9 @@ public class TuiCommand implements Runnable {
             final ScrollService scrollService,
             final ScheduledExecutorService scheduler,
             final JsonMapper mapper,
-            final NotificationService notifications) {
+            final NotificationService notifications,
+            final SecretRedactor secretRedactor) {
+        this.secretRedactor = secretRedactor;
         this.notifications = notifications;
         this.conf = conf;
         this.tuiConfiguration = tuiConfiguration;
@@ -1594,6 +1609,13 @@ public class TuiCommand implements Runnable {
     }
 
     private void onEvent(final AgentEvent event, final UiState state) {
+        if (event instanceof AgentEvent.ToolFilesChanged changed) {
+            state.toolOutputs.recordFiles(
+                    changed.ordinal(),
+                    changed.files(),
+                    text -> secretRedactor == null ? text : secretRedactor.redact(text, state.sessionId));
+            return;
+        }
         if (event instanceof AgentEvent.ToolDiagnostic diagnostic) {
             // Keep private failure detail in the in-memory error modal only, not the transcript
             // or ToolOutputStore (which is populated from model-visible tool results).
@@ -3021,6 +3043,11 @@ public class TuiCommand implements Runnable {
             @Override
             public void showThinking(final boolean value) {
                 runLater(state, () -> state.showThinking = value);
+            }
+
+            @Override
+            public void diffViewMode(final DiffViewMode value) {
+                runLater(state, () -> state.diffViewMode = value);
             }
 
             @Override
@@ -4981,6 +5008,7 @@ public class TuiCommand implements Runnable {
             int width,
             boolean showThinking,
             ToolOutputVisibility showToolActions,
+            DiffViewMode diffViewMode,
             long toolOutputs,
             int collapsedToolsHash,
             int runStateHash,
@@ -5046,6 +5074,8 @@ public class TuiCommand implements Runnable {
             int width,
             Palette palette,
             ToolOutputVisibility visibility,
+            DiffViewMode mode,
+            long captureRevision,
             boolean collapsed,
             Set<Long> collapsedMembers) {}
 
@@ -5281,6 +5311,7 @@ public class TuiCommand implements Runnable {
                 width,
                 state.showThinking,
                 state.showToolActions,
+                state.diffViewMode,
                 state.toolOutputs.revision(),
                 state.collapsedTools.hashCode(),
                 state.runCollapsed.hashCode(),
@@ -5957,6 +5988,8 @@ public class TuiCommand implements Runnable {
                 width,
                 palette,
                 state.showToolActions,
+                state.diffViewMode,
+                state.toolOutputs.revision(),
                 state.runCollapsed.getOrDefault(run.id(), state.showToolActions == ToolOutputVisibility.COLLAPSED),
                 collapsed);
         state.contentLayout.liveTools.add(key);
@@ -6041,6 +6074,12 @@ public class TuiCommand implements Runnable {
                     toolTops.add(new UiState.ToolTop(card.ordinal(), y, true, false));
                 }
                 y++;
+                for (final var diffLine : toolDiffLines(card, state, Math.max(1, innerW - 2))) {
+                    final var indented = indentLine(diffLine, "  ");
+                    lines.add(indented);
+                    rows.add(plainText(indented));
+                    y++;
+                }
             }
         } else if (!collapsed && state.showToolActions == ToolOutputVisibility.SHOWN) {
             // SHOWN mode with an open run: the member cards render inside the box, as plain
@@ -6049,7 +6088,7 @@ public class TuiCommand implements Runnable {
             for (final var member : run.members()) {
                 final var card = member.card();
                 var first = true;
-                for (final var cardLine : toolRunCardLines(card, innerW)) {
+                for (final var cardLine : toolRunCardLines(card, Math.max(1, innerW - 2), state)) {
                     final var line = indentLine(cardLine, "  ");
                     lines.add(line);
                     rows.add(plainText(line));
@@ -6059,6 +6098,15 @@ public class TuiCommand implements Runnable {
                     }
                     first = false;
                     y++;
+                }
+            }
+        }
+        if (collapsed && state.diffViewMode != DiffViewMode.AUTO) {
+            for (final var member : run.members()) {
+                for (final var diffLine : toolDiffLines(member.card(), state, Math.max(1, innerW - 2))) {
+                    final var line = indentLine(diffLine, "  ");
+                    lines.add(line);
+                    rows.add(plainText(line));
                 }
             }
         }
@@ -6075,7 +6123,7 @@ public class TuiCommand implements Runnable {
      * keeps the compact card feel without nesting a second bordered box. No footer link here:
      * the whole card header is clickable and opens the full-output overlay.
      */
-    private List<Line> toolRunCardLines(final ToolCard card, final int innerW) {
+    private List<Line> toolRunCardLines(final ToolCard card, final int innerW, final UiState state) {
         final var statusColor =
                 palette.color(card.pending() ? palette.warning() : card.failed() ? palette.error() : palette.success());
         final var muted = Style.EMPTY.fg(Color.hex(palette.textMuted()));
@@ -6095,7 +6143,8 @@ public class TuiCommand implements Runnable {
             headerSpans.add(Span.styled((card.pending() || card.failed() ? "  " : " ") + card.args(), muted));
         }
         lines.add(Line.from(headerSpans.toArray(Span[]::new)));
-        if (!card.output().isBlank()) {
+        lines.addAll(toolDiffLines(card, state, innerW));
+        if (!card.output().isBlank() && !card.isDiff(diffRenderer)) {
             final var outputLines = toolBodyLines(
                     card.name(),
                     card.keyCommand(),
@@ -6103,7 +6152,8 @@ public class TuiCommand implements Runnable {
                     card.output(),
                     innerW,
                     card.isDiff(diffRenderer),
-                    MAX_INLINE_TOOL_LINES + 1);
+                    MAX_INLINE_TOOL_LINES + 1,
+                    state.diffViewMode);
             lines.addAll(new ArrayList<>(outputLines.subList(0, Math.min(outputLines.size(), MAX_INLINE_TOOL_LINES))));
         }
         return lines;
@@ -6210,8 +6260,16 @@ public class TuiCommand implements Runnable {
             toolTops.add(new UiState.ToolTop(card.ordinal(), top, false, false));
             final var line = hiddenToolLine(card);
             rows.add(plainText(line));
-            final var compact = new CompactText(List.of(line));
-            out.add(new RenderedChunk(1, skip -> compact.widget(0, null, null), null));
+            final var compactLines = new ArrayList<Line>();
+            compactLines.add(line);
+            if (state.diffViewMode != DiffViewMode.AUTO) {
+                compactLines.addAll(toolDiffLines(card, state, Math.max(1, width)));
+            }
+            final var compact = new CompactText(compactLines);
+            rows.addAll(compactLines.subList(1, compactLines.size()).stream()
+                    .map(TuiCommand::plainText)
+                    .toList());
+            out.add(new RenderedChunk(compactLines.size(), skip -> compact.widget(skip, null, null), null));
             return;
         }
         final var top = out.stream().mapToInt(RenderedChunk::height).sum();
@@ -6248,7 +6306,10 @@ public class TuiCommand implements Runnable {
         }
         lines.add(Line.from(headerSpans.toArray(Span[]::new)));
         final var full = card.ordinal() >= 0 ? state.toolOutputs.get(card.ordinal()) : null;
-        if (!card.output().isBlank()) {
+        final var diffs = toolDiffLines(card, state, innerW);
+        lines.addAll(diffs);
+        rows.addAll(diffs.stream().map(TuiCommand::plainText).toList());
+        if (!card.output().isBlank() && !card.isDiff(diffRenderer)) {
             lines.add(Line.empty());
             // a running bash card repeats the command in two places: its header carries it
             // as the card name (the "<command> running" header), and BashTool also streams
@@ -6267,7 +6328,8 @@ public class TuiCommand implements Runnable {
                     body,
                     innerW,
                     card.isDiff(diffRenderer),
-                    MAX_INLINE_TOOL_LINES + 1);
+                    MAX_INLINE_TOOL_LINES + 1,
+                    state.diffViewMode);
             // keep the card compact: a short inline preview, the rest lives behind
             // the "click to expand" footer / Ctrl+O overlay
             final var clipped = outputLines.size() > MAX_INLINE_TOOL_LINES;
@@ -6295,6 +6357,65 @@ public class TuiCommand implements Runnable {
         final var innerH = Math.max(text.rows().size(), 1);
         out.add(new RenderedChunk(
                 innerH + 2, skip -> text.widget(Math.min(innerH - 1, skip), block, null), BoxChrome.symmetric(block)));
+    }
+
+    private List<Line> toolDiffLines(final ToolCard card, final UiState state, final int width) {
+        final var files = state.toolOutputs.files(card.ordinal());
+        if (!files.isEmpty()) {
+            return appliedDiffLines(files, width, state.diffViewMode);
+        }
+        final var entry = state.toolOutputs.get(card.ordinal());
+        if (entry != null && ("edit_file".equals(entry.name()) || "apply_patch".equals(entry.name()))) {
+            final var preview =
+                    toolArgsPreview.diffPreview(entry.name(), entry.args(), width, palette, state.diffViewMode);
+            return preview == null ? List.of() : preview;
+        }
+        if (card.isDiff(diffRenderer)) {
+            final var lines = new ArrayList<Line>();
+            lines.add(Line.from(Span.styled("Result diff", palette.bold(palette.primary()))));
+            lines.addAll(diffRenderer.render(
+                    card.output(),
+                    width,
+                    palette,
+                    state.diffViewMode,
+                    syntaxHighlighter,
+                    diffLanguage(card.keyCommand())));
+            return lines;
+        }
+        return List.of();
+    }
+
+    private List<Line> appliedDiffLines(final List<FileMutation> files, final int width, final DiffViewMode mode) {
+        final var lines = new ArrayList<Line>();
+        lines.add(Line.from(Span.styled("Applied changes", palette.bold(palette.primary()))));
+        for (final var file : files) {
+            lines.add(Line.from(Span.styled(file.kind().name() + " " + file.path(), palette.muted())));
+            final var content = file.content();
+            if (content == null) {
+                lines.add(Line.from(Span.styled("Exact applied diff unavailable", palette.muted())));
+                continue;
+            }
+            final var before = content.oldText() == null ? "" : content.oldText();
+            final var after = content.newText();
+            final var patch = new StringBuilder("--- ")
+                    .append(file.kind() == FileMutation.Kind.CREATE ? "/dev/null" : "a/" + file.path())
+                    .append("\n+++ ")
+                    .append(file.kind() == FileMutation.Kind.DELETE ? "/dev/null" : "b/" + file.path())
+                    .append('\n')
+                    .append(String.join("\n", DiffLayout.between(before, after)));
+            lines.addAll(diffRenderer.render(
+                    patch.toString(),
+                    width,
+                    palette,
+                    mode,
+                    syntaxHighlighter,
+                    SyntaxHighlighter.guessLanguage(file.path().toString())));
+        }
+        return lines;
+    }
+
+    private static String diffLanguage(final String path) {
+        return path == null ? null : SyntaxHighlighter.guessLanguage(path);
     }
 
     private String blockTitle(final ToolCard card) {
@@ -7920,8 +8041,9 @@ public class TuiCommand implements Runnable {
             final String args,
             final String output,
             final int width,
-            final boolean isDiff) {
-        return toolBodyLines(name, command, args, output, width, isDiff, Integer.MAX_VALUE);
+            final boolean isDiff,
+            final DiffViewMode mode) {
+        return toolBodyLines(name, command, args, output, width, isDiff, Integer.MAX_VALUE, mode);
     }
 
     private List<Line> toolBodyLines(
@@ -7931,10 +8053,11 @@ public class TuiCommand implements Runnable {
             final String output,
             final int width,
             final boolean isDiff,
-            final int limit) {
-        final var key = new ToolBodyCache.Key(name, command, args, output, width, isDiff, limit);
+            final int limit,
+            final DiffViewMode mode) {
+        final var key = new ToolBodyCache.Key(name, command, args, output, width, isDiff, limit, mode);
         return new ArrayList<>(toolBodyCache.get(key, () -> {
-            final var lines = uncachedToolBodyLines(name, command, args, output, width, isDiff, limit);
+            final var lines = uncachedToolBodyLines(name, command, args, output, width, isDiff, limit, mode);
             return lines.size() > limit ? lines.subList(0, limit) : lines;
         }));
     }
@@ -7946,10 +8069,11 @@ public class TuiCommand implements Runnable {
             final String output,
             final int width,
             final boolean isDiff,
-            final int limit) {
+            final int limit,
+            final DiffViewMode mode) {
         final var body = output == null || (args == null ? output.isBlank() : output.isEmpty())
                 ? List.<Line>of()
-                : renderToolBody(name, command, output, width, isDiff, limit, args != null);
+                : renderToolBody(name, command, output, width, isDiff, limit, args != null, mode);
         if (args == null || args.isBlank()) {
             return new ArrayList<>(body);
         }
@@ -7957,7 +8081,7 @@ public class TuiCommand implements Runnable {
         // preview of the meaningful arguments (file content / diff / patch)
         final List<Line> preview;
         try {
-            preview = toolArgsPreview.preview(name, args, width, palette);
+            preview = toolArgsPreview.preview(name, args, width, palette, mode);
         } catch (final RuntimeException e) {
             final var fallback = new ArrayList<Line>();
             fallback.add(Line.from(Span.styled("Request", palette.bold(palette.primary()))));
@@ -7989,14 +8113,20 @@ public class TuiCommand implements Runnable {
             final int width,
             final boolean isDiff,
             final int limit,
-            final boolean fullOutput) {
+            final boolean fullOutput,
+            final DiffViewMode mode) {
         final var answers = "ask_user".equals(name) ? askUserCardRenderer.render(output, palette) : null;
         if (answers != null) {
             return answers;
         }
         try {
+            if (isDiff || diffRenderer.looksLikeDiff(output)) {
+                return diffRenderer.render(output, width, palette, mode, syntaxHighlighter, diffLanguage(command));
+            }
             if (!formatToolOutput) {
-                return isDiff && !fullOutput ? legacyBody(output, width, true) : plainToolPreview(output, width, limit);
+                return isDiff && !fullOutput
+                        ? diffRenderer.render(output, width, palette, mode, syntaxHighlighter, diffLanguage(command))
+                        : plainToolPreview(output, width, limit);
             }
             // read/read_symbol print files with a "%6d\t" line-number prefix: the file to
             // highlight is the path the tool read (card/overlay command) or, for read_symbol,
@@ -8010,10 +8140,7 @@ public class TuiCommand implements Runnable {
             final var language = ToolOutputLanguage.guess(output, command);
             return switch (toolOutputFormat.detect(output, language)) {
                 case DIFF ->
-                    fullOutput
-                            ? MarkdownLines.wrapCode(
-                                    diffRenderer.render(output, Integer.MAX_VALUE, palette), Math.max(1, width))
-                            : diffRenderer.render(output, width, palette);
+                    diffRenderer.render(output, width, palette, mode, syntaxHighlighter, diffLanguage(command));
                 case JSON ->
                     fullOutput
                             ? MarkdownLines.wrapCode(
@@ -8036,7 +8163,9 @@ public class TuiCommand implements Runnable {
                 case TEXT -> plainToolPreview(output, width, limit);
             };
         } catch (final RuntimeException e) {
-            return isDiff && !fullOutput ? legacyBody(output, width, true) : plainToolPreview(output, width, limit);
+            return isDiff && !fullOutput
+                    ? diffRenderer.render(output, width, palette, mode, syntaxHighlighter, diffLanguage(command))
+                    : plainToolPreview(output, width, limit);
         }
     }
 
@@ -8125,10 +8254,6 @@ public class TuiCommand implements Runnable {
             lines.add(Line.from(spans.toArray(Span[]::new)));
         }
         return MarkdownLines.wrapCode(lines, Math.max(1, width), limit);
-    }
-
-    private List<Line> legacyBody(final String output, final int width, final boolean isDiff) {
-        return isDiff ? diffRenderer.render(output, width, palette) : toolOutputLines(output, width, false);
     }
 
     /**
@@ -8243,7 +8368,12 @@ public class TuiCommand implements Runnable {
         final var splits = Layout.vertical()
                 .constraints(Constraint.fill(), Constraint.length(1))
                 .split(inner);
-        final var text = toolOverlayText(entry, inner.width(), state.toolOverlay.raw());
+        final var text = toolOverlayText(
+                entry,
+                inner.width(),
+                state.toolOverlay.raw(),
+                state.diffViewMode,
+                state.toolOutputs.files(state.toolOverlay.ordinal()));
         final var maxScroll =
                 Math.max(0, text.height() - Math.max(1, splits.getFirst().height()));
         final var overlay = state.toolOverlay;
@@ -8275,15 +8405,18 @@ public class TuiCommand implements Runnable {
                 footerRect);
     }
 
-    private Text toolOverlayText(final ToolOutputStore.Entry entry, final int width) {
-        return toolOverlayText(entry, width, false);
-    }
-
-    private Text toolOverlayText(final ToolOutputStore.Entry entry, final int width, final boolean raw) {
+    private Text toolOverlayText(
+            final ToolOutputStore.Entry entry,
+            final int width,
+            final boolean raw,
+            final DiffViewMode mode,
+            final List<FileMutation> files) {
         if (toolOverlayLayout != null
                 && toolOverlayLayout.entry() == entry
                 && toolOverlayLayout.width() == width
-                && toolOverlayLayout.raw() == raw) {
+                && toolOverlayLayout.raw() == raw
+                && toolOverlayLayout.mode() == mode
+                && toolOverlayLayout.files().equals(files)) {
             return toolOverlayLayout.text();
         }
         final var command = toolCommandOf(entry);
@@ -8296,7 +8429,11 @@ public class TuiCommand implements Runnable {
                     ? new ArrayList<>(plainToolPreview(entry.output(), width, Integer.MAX_VALUE))
                     : skillDocumentLines(entry.output(), width);
         } else {
-            body = toolBodyLines(entry.name(), command, entry.args(), output, width, false);
+            body = toolBodyLines(
+                    entry.name(), command, files.isEmpty() ? entry.args() : null, output, width, false, mode);
+        }
+        if (!files.isEmpty()) {
+            body.addAll(0, appliedDiffLines(files, width, mode));
         }
         if (command != null && !command.isBlank()) {
             body.addAll(0, toolCommandHeader(command, width));
@@ -8307,8 +8444,19 @@ public class TuiCommand implements Runnable {
         final var text = Text.from(body.toArray(Line[]::new));
         // The single overlay slot has the same source/layout budget as the body cache.
         long weight = 2L
-                * (entry.output().length()
-                        + (entry.args() == null ? 0L : entry.args().length()));
+                        * files.stream()
+                                .mapToLong(file -> file.content() == null
+                                        ? 0
+                                        : (file.content().oldText() == null
+                                                        ? 0L
+                                                        : file.content()
+                                                                .oldText()
+                                                                .length())
+                                                + file.content().newText().length())
+                                .sum()
+                + 2L
+                        * (entry.output().length()
+                                + (entry.args() == null ? 0L : entry.args().length()));
         for (final var line : body) {
             weight += 64;
             for (final var span : line.spans()) {
@@ -8316,7 +8464,8 @@ public class TuiCommand implements Runnable {
                         96L + 2L * (span.content() == null ? 0 : span.content().length());
             }
         }
-        toolOverlayLayout = weight <= 4L * 1024 * 1024 ? new ToolOverlayLayout(entry, width, raw, text) : null;
+        toolOverlayLayout =
+                weight <= 4L * 1024 * 1024 ? new ToolOverlayLayout(entry, width, raw, mode, files, text) : null;
         return text;
     }
 

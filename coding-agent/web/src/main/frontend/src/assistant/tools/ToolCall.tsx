@@ -6,7 +6,7 @@ import { useScrollLock } from '@assistant-ui/react';
 /** Controlled ToolCall Element with request/result slots instead of lossy strings.
  * Native controls replace Base UI; no runtime/thread provider is required.
  */
-export function ToolCall({ label, query, status, open, onOpenChange, request, result, children }: {
+export function ToolCall({ label, query, status, open, onOpenChange, request, result, preview, children }: {
   label: string;
   query?: string;
   status: 'working' | 'interrupted' | 'pending' | 'failed' | 'completed';
@@ -14,6 +14,7 @@ export function ToolCall({ label, query, status, open, onOpenChange, request, re
   onOpenChange: (open: boolean) => void;
   request: ReactNode;
   result: ReactNode;
+  preview?: ReactNode;
   children?: ReactNode;
 }) {
   const id = useId();
@@ -31,6 +32,7 @@ export function ToolCall({ label, query, status, open, onOpenChange, request, re
       <span className="yca-tool-name">{label}</span>
       {query && <span className="yca-tool-summary" title={query}>{query}</span>}
     </button>
+    {!open && preview && <div className="yca-tool-body" data-slot="tool-call-diff">{preview}</div>}
     <div id={id} hidden={!open} data-slot="tool-call-content">
       {open && <div className="yca-tool-body">
         <section aria-label="Tool request"><h4>Request</h4>{request}</section>

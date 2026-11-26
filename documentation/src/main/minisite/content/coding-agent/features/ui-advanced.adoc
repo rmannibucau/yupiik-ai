@@ -22,8 +22,10 @@ Markdown primitives retain YCA callouts, reference scrubbing, grammar aliases an
 Tool Elements are presentation, not execution: raw arguments/output, bounded paging and pending/interrupted/failed states remain available.
 Requested patches never imply applied changes, and `write_file` content never becomes a fabricated diff.
 `DiffViewer` is the app-owned boundary: `react-diff-view` provides side-by-side layout, while Simple retains the literal-line renderer.
-The Diff selector defaults to Auto, which follows tool disclosure and uses side-by-side layout for complete supported patches.
-Diff layout never overrides tool visibility: Hidden removes the tool card and Collapsed defers its contents until opened.
+The Diff selector defaults to Auto, follows the session's `/diff-view` setting and uses side-by-side layout for complete supported patches when the container is wide enough.
+Hidden always removes the tool card and its diffs.
+With Collapsed tools, Auto defers diffs until opened, while explicit Side-by-side or Simple reveals only diff sections without expanding ordinary request or result bodies.
+Narrow containers use the simple view even when Side-by-side is selected.
 Numbered unified requests remain explicitly labeled as requests; unnumbered OpenCode patches and unsupported or oversized previews retain the simple view.
 Live applied-file sections use only execution-time `ToolFilesChanged` captures, including partial changes from failed tools.
 No additional filesystem reads are performed to fill missing content, and missing captures never imply an empty previous file.

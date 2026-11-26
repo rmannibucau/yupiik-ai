@@ -20,6 +20,7 @@ import dev.tamboui.tui.TuiRunner;
 import dev.tamboui.widgets.input.TextAreaState;
 import dev.tamboui.widgets.spinner.SpinnerState;
 import dev.tamboui.widgets.spinner.SpinnerStyle;
+import io.yupiik.ia.agent.core.shell.DiffViewMode;
 import io.yupiik.ia.agent.core.shell.InterruptCoordinator;
 import io.yupiik.ia.agent.core.shell.SessionRuntime;
 import io.yupiik.ia.agent.core.shell.ShellSession;
@@ -97,6 +98,7 @@ final class UiState {
     volatile Wait wait;
     volatile String activeAgent = "";
     volatile boolean showThinking;
+    volatile DiffViewMode diffViewMode = DiffViewMode.AUTO;
     volatile ToolOutputVisibility showToolActions = ToolOutputVisibility.COLLAPSED;
     volatile boolean showTodos;
     volatile boolean showTodosCollapsed;

@@ -29,6 +29,7 @@ import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.PermissionMode;
 import io.yupiik.ia.agent.core.llm.ChatClient;
 import io.yupiik.ia.agent.core.mcp.McpManager;
+import io.yupiik.ia.agent.core.security.SecretRedactor;
 import io.yupiik.ia.agent.core.session.AgentSessionService;
 import io.yupiik.ia.agent.core.session.FileSessionStore;
 import io.yupiik.ia.agent.core.shell.AnsiShellFrontend;
@@ -184,7 +185,8 @@ public class CliCommand implements Runnable {
             final CodingAgentConfiguration configuration,
             final SpeakerLabels speakerLabels,
             final HackStdIo stdio,
-            final McpManager mcpManager) {
+            final McpManager mcpManager,
+            final SecretRedactor secretRedactor) {
         this.mcpManager = mcpManager;
         this.conf = conf;
         this.sessionLifecycle = sessionLifecycle;
@@ -214,6 +216,7 @@ public class CliCommand implements Runnable {
         this.externalOutput = prompt.externalOutput() == null ? PromptOutput.raw() : prompt.externalOutput();
         this.frontend = new AnsiShellFrontend(
                 colorizer,
+                secretRedactor,
                 symbols,
                 new ToolPresenter(mapper),
                 CliVerbosity.parse(conf.presentation()),

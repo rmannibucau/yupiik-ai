@@ -167,6 +167,7 @@ public class WebSlashCommands {
         return Map.of(
                 "showThinking", session.showThinking(),
                 "showToolOutput", session.showToolOutput().name().toLowerCase(Locale.ROOT),
+                "diffViewMode", session.diffViewMode().value(),
                 "metricsPerTurn", metrics.showPerTurn(),
                 "metricsSession", metrics.showSessionTotals(),
                 "metricsMode", metrics.displayMode().name().toLowerCase(Locale.ROOT));

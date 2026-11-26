@@ -960,7 +960,8 @@ class CliSessionSwitchTest {
                                 configuration,
                                 new SpeakerLabels(List.of(new FormatDatePromptHelper(clock)), configuration, chat),
                                 new HackStdIo(),
-                                mcp)
+                                mcp,
+                                null)
                         .run();
             }
         }

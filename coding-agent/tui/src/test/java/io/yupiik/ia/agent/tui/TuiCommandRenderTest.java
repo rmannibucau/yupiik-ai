@@ -75,6 +75,7 @@ import io.yupiik.ia.agent.core.session.AgentSessionService;
 import io.yupiik.ia.agent.core.session.SessionEntry;
 import io.yupiik.ia.agent.core.session.SessionStore;
 import io.yupiik.ia.agent.core.shell.ConversationTranscript;
+import io.yupiik.ia.agent.core.shell.DiffViewMode;
 import io.yupiik.ia.agent.core.shell.SessionLifecycle;
 import io.yupiik.ia.agent.core.shell.SessionRuntime;
 import io.yupiik.ia.agent.core.shell.SessionRuntimeFactory;
@@ -91,6 +92,7 @@ import io.yupiik.ia.agent.core.shell.slash.MaintainCommands;
 import io.yupiik.ia.agent.core.shell.slash.SlashRegistry;
 import io.yupiik.ia.agent.core.style.ModelStyleService;
 import io.yupiik.ia.agent.core.todo.TodoStore;
+import io.yupiik.ia.agent.core.tools.FileMutation;
 import io.yupiik.ia.agent.core.wiring.AutoLogConfigurer;
 import io.yupiik.ia.agent.core.wiring.HttpClientProducer;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
@@ -656,7 +658,8 @@ class TuiCommandRenderTest {
                 new ScrollService(tuiConfiguration),
                 null,
                 formatMapper,
-                notifications);
+                notifications,
+                null);
     }
 
     /** Waits until the cell at the coordinate is rendered in reverse video. */
@@ -1657,6 +1660,170 @@ class TuiCommandRenderTest {
         }
 
         @Test
+        void appliedCapturesFollowDisclosureMatrixAndInvalidateRunAndOverlayLayouts() throws Exception {
+            final var command = command(testRegistry(), stubAgentLoop());
+            final var state = new UiState(new ThinkTagSplitter(), Clock.systemUTC());
+            assertEquals(DiffViewMode.AUTO, state.diffViewMode);
+            final var onEvent = TuiCommand.class.getDeclaredMethod("onEvent", AgentEvent.class, UiState.class);
+            onEvent.setAccessible(true);
+            final var args = "{\"path\":\"file.java\",\"oldString\":\"requested-old\",\"newString\":\"requested-new\"}";
+            onEvent.invoke(
+                    command, new AgentEvent.ToolStarted("edit_file", args, 1, "", null, null, eventWorkdir), state);
+            final var files = List.of(new FileMutation(
+                    eventWorkdir.resolve("file.java"),
+                    FileMutation.Kind.UPDATE,
+                    new FileMutation.Content(
+                            "common-before\nactual-before\ncommon-after\n",
+                            "common-before\nactual-after\ncommon-after\n")));
+            onEvent.invoke(
+                    command,
+                    new AgentEvent.ToolFilesChanged("edit_file", files, 1, "", null, null, eventWorkdir),
+                    state);
+            onEvent.invoke(
+                    command,
+                    new AgentEvent.ToolFinished(
+                            "edit_file",
+                            "failure summary\nresult-details",
+                            false,
+                            false,
+                            1,
+                            "",
+                            null,
+                            null,
+                            eventWorkdir),
+                    state);
+            assertEquals(files, state.toolOutputs.files(1));
+            final var one = state.model.markdown("You", "Assistant");
+            onEvent.invoke(command, new AgentEvent.ToolStarted("read", "{}", 2, "", null, null, eventWorkdir), state);
+            onEvent.invoke(
+                    command,
+                    new AgentEvent.ToolFinished("read", "other-result", true, false, 2, "", null, null, eventWorkdir),
+                    state);
+            final var two = state.model.markdown("You", "Assistant");
+            for (final var source : List.of(one, two)) {
+                for (final var visibility : ToolOutputVisibility.values()) {
+                    for (final var mode : DiffViewMode.values()) {
+                        state.showToolActions = visibility;
+                        state.diffViewMode = mode;
+                        state.runCollapsed.clear();
+                        final var frame = renderTurnFrame(command, state, source, 120);
+                        final var text = String.join("\n", frame.rows());
+                        final var visible = visibility == ToolOutputVisibility.SHOWN
+                                || (visibility == ToolOutputVisibility.COLLAPSED && mode != DiffViewMode.AUTO);
+                        assertEquals(visible, text.contains("Applied changes"), visibility + "/" + mode + ": " + text);
+                        assertEquals(visible, text.contains("actual-before"), text);
+                        assertFalse(text.contains(" - common-before"), text);
+                        assertFalse(text.contains(" + common-before"), text);
+                        assertFalse(text.contains("requested-new"), text);
+                        if (visibility == ToolOutputVisibility.COLLAPSED) {
+                            assertFalse(text.contains("result-details"), text);
+                        }
+                        if (source.equals(two) && visibility == ToolOutputVisibility.COLLAPSED) {
+                            state.runCollapsed.put(frame.runHeaders().getFirst().id(), false);
+                            assertTrue(String.join(
+                                            "\n",
+                                            renderTurnFrame(command, state, source, 120)
+                                                    .rows())
+                                    .contains("actual-after"));
+                        }
+                    }
+                }
+            }
+            state.showToolActions = ToolOutputVisibility.SHOWN;
+            state.runCollapsed.clear();
+            state.diffViewMode = DiffViewMode.SIMPLE;
+            final var simple = renderTurnFrame(command, state, two, 120);
+            state.diffViewMode = DiffViewMode.SIDE_BY_SIDE;
+            final var split = renderTurnFrame(command, state, two, 120);
+            assertFalse(simple.rows().equals(split.rows()));
+            final var resized = renderTurnFrame(command, state, two, 60);
+            assertFalse(split.rows().equals(resized.rows()));
+            final var overlay = TuiCommand.class.getDeclaredMethod(
+                    "toolOverlayText",
+                    ToolOutputStore.Entry.class,
+                    int.class,
+                    boolean.class,
+                    DiffViewMode.class,
+                    List.class);
+            overlay.setAccessible(true);
+            state.showToolActions = ToolOutputVisibility.HIDDEN;
+            final var entry = state.toolOutputs.get(1);
+            final var first = (Text) overlay.invoke(command, entry, 120, false, DiffViewMode.SIMPLE, files);
+            Assertions.assertSame(first, overlay.invoke(command, entry, 120, false, DiffViewMode.SIMPLE, files));
+            Assertions.assertNotSame(
+                    first, overlay.invoke(command, entry, 120, false, DiffViewMode.SIDE_BY_SIDE, files));
+            Assertions.assertNotSame(first, overlay.invoke(command, entry, 60, false, DiffViewMode.SIMPLE, files));
+            assertTrue(first.lines().stream()
+                    .flatMap(line -> line.spans().stream())
+                    .anyMatch(span -> span.content().contains("actual-after")));
+            assertFalse(first.lines().stream()
+                    .flatMap(line -> line.spans().stream())
+                    .anyMatch(span -> span.content().contains("requested-new")));
+        }
+
+        @Test
+        void missingCapturesRemainRequestedAndUnavailableCapturesNeverInventAppliedContent() throws Exception {
+            final var command = command(testRegistry(), stubAgentLoop());
+            final var state = new UiState(new ThinkTagSplitter(), Clock.systemUTC());
+            state.showToolActions = ToolOutputVisibility.COLLAPSED;
+            state.diffViewMode = DiffViewMode.SIMPLE;
+            final var onEvent = TuiCommand.class.getDeclaredMethod("onEvent", AgentEvent.class, UiState.class);
+            onEvent.setAccessible(true);
+            final var args = "{\"path\":\"absent.txt\",\"oldString\":\"before\",\"newString\":\"requested-only\"}";
+            onEvent.invoke(
+                    command, new AgentEvent.ToolStarted("edit_file", args, 1, "", null, null, eventWorkdir), state);
+            onEvent.invoke(
+                    command,
+                    new AgentEvent.ToolFinished("edit_file", "done", true, false, 1, "", null, null, eventWorkdir),
+                    state);
+            final var source = state.model.markdown("You", "Assistant");
+            final var requested = String.join(
+                    "\n", renderTurnFrame(command, state, source, 100).rows());
+            assertTrue(requested.contains("Requested changes"), requested);
+            assertTrue(requested.contains("requested-only"), requested);
+            assertFalse(requested.contains("Applied changes"), requested);
+            final var unavailable =
+                    List.of(new FileMutation(eventWorkdir.resolve("absent.txt"), FileMutation.Kind.UPDATE, null));
+            onEvent.invoke(
+                    command,
+                    new AgentEvent.ToolFilesChanged("write_file", unavailable, 1, "", null, null, eventWorkdir),
+                    state);
+            final var applied = String.join(
+                    "\n", renderTurnFrame(command, state, source, 100).rows());
+            assertTrue(applied.contains("Exact applied diff unavailable"), applied);
+            assertFalse(applied.contains("requested-only"), applied);
+            final var overlay = TuiCommand.class.getDeclaredMethod(
+                    "toolOverlayText",
+                    ToolOutputStore.Entry.class,
+                    int.class,
+                    boolean.class,
+                    DiffViewMode.class,
+                    List.class);
+            overlay.setAccessible(true);
+            final var files = List.of(
+                    new FileMutation(
+                            eventWorkdir.resolve("created.txt"),
+                            FileMutation.Kind.CREATE,
+                            new FileMutation.Content(null, "created-content")),
+                    new FileMutation(
+                            eventWorkdir.resolve("deleted.txt"),
+                            FileMutation.Kind.DELETE,
+                            new FileMutation.Content("deleted-content", "")));
+            final var text =
+                    (Text) overlay.invoke(command, state.toolOutputs.get(1), 100, false, DiffViewMode.SIMPLE, files);
+            final var plain = text.lines().stream()
+                    .flatMap(line -> line.spans().stream())
+                    .map(span -> span.content())
+                    .reduce("", String::concat);
+            assertTrue(plain.contains("CREATE"), plain);
+            assertTrue(plain.contains("DELETE"), plain);
+            assertTrue(plain.contains("/dev/null"), plain);
+            assertTrue(plain.contains("created-content"), plain);
+            assertTrue(plain.contains("deleted-content"), plain);
+            assertFalse(plain.contains("requested-only"), plain);
+        }
+
+        @Test
         void toolPreviewMatchesFullBodyAndOverlayReusesLayout() throws Exception {
             final var command = command(testRegistry(), stubAgentLoop());
             final var body = TuiCommand.class.getDeclaredMethod(
@@ -1667,7 +1834,8 @@ class TuiCommandRenderTest {
                     String.class,
                     int.class,
                     boolean.class,
-                    int.class);
+                    int.class,
+                    DiffViewMode.class);
             body.setAccessible(true);
             for (final var fixture : List.of(
                     List.of("bash", "unknown-program", "a\n\n\n\nb"),
@@ -1677,34 +1845,60 @@ class TuiCommandRenderTest {
                     List.of("bash", "unknown-program", "{\"a\": [1, 2, 3], \"b\": true}"),
                     List.of("bash", "unknown-program", "# Heading\n\n```java\nint n = 1;\n```"))) {
                 final var full = (List<Line>) body.invoke(
-                        command, fixture.get(0), fixture.get(1), null, fixture.get(2), 15, false, Integer.MAX_VALUE);
-                final var preview = (List<Line>)
-                        body.invoke(command, fixture.get(0), fixture.get(1), null, fixture.get(2), 15, false, 4);
+                        command,
+                        fixture.get(0),
+                        fixture.get(1),
+                        null,
+                        fixture.get(2),
+                        15,
+                        false,
+                        Integer.MAX_VALUE,
+                        DiffViewMode.SIMPLE);
+                final var preview = (List<Line>) body.invoke(
+                        command,
+                        fixture.get(0),
+                        fixture.get(1),
+                        null,
+                        fixture.get(2),
+                        15,
+                        false,
+                        4,
+                        DiffViewMode.SIMPLE);
                 assertEquals(full.subList(0, Math.min(4, full.size())), preview, fixture.get(1));
             }
-            final var overlay =
-                    TuiCommand.class.getDeclaredMethod("toolOverlayText", ToolOutputStore.Entry.class, int.class);
+            final var overlay = TuiCommand.class.getDeclaredMethod(
+                    "toolOverlayText",
+                    ToolOutputStore.Entry.class,
+                    int.class,
+                    boolean.class,
+                    DiffViewMode.class,
+                    List.class);
             overlay.setAccessible(true);
             final var entry = new ToolOutputStore.Entry("bash", "{\"command\":\"echo hello\"}", "hello", false, 1);
-            final var first = overlay.invoke(command, entry, 60);
-            Assertions.assertSame(first, overlay.invoke(command, entry, 60));
-            Assertions.assertNotSame(first, overlay.invoke(command, entry, 30));
+            final var first = overlay.invoke(command, entry, 60, false, DiffViewMode.SIMPLE, List.of());
+            Assertions.assertSame(first, overlay.invoke(command, entry, 60, false, DiffViewMode.SIMPLE, List.of()));
+            Assertions.assertNotSame(first, overlay.invoke(command, entry, 30, false, DiffViewMode.SIMPLE, List.of()));
             final var clear = TuiCommand.class.getDeclaredMethod("clearRenderCaches");
             clear.setAccessible(true);
             clear.invoke(command);
-            Assertions.assertNotSame(first, overlay.invoke(command, entry, 60));
+            Assertions.assertNotSame(first, overlay.invoke(command, entry, 60, false, DiffViewMode.SIMPLE, List.of()));
         }
 
         @Test
         void skillDetailsRenderDocumentAndKeepRawSource() throws Exception {
             final var command = command(testRegistry(), stubAgentLoop());
             final var overlay = TuiCommand.class.getDeclaredMethod(
-                    "toolOverlayText", ToolOutputStore.Entry.class, int.class, boolean.class);
+                    "toolOverlayText",
+                    ToolOutputStore.Entry.class,
+                    int.class,
+                    boolean.class,
+                    DiffViewMode.class,
+                    List.class);
             overlay.setAccessible(true);
             for (final var prefix : List.of("", "---\nname: example\ndescription: Example skill\n---\n")) {
                 final var source = prefix + "# Instructions\n\nUse **careful changes** and `tests`.\n";
                 final var entry = new ToolOutputStore.Entry("skill", "{\"name\":\"example\"}", source, false, 1);
-                final var rendered = (Text) overlay.invoke(command, entry, 100, false);
+                final var rendered = (Text) overlay.invoke(command, entry, 100, false, DiffViewMode.SIMPLE, List.of());
                 final var text = rendered.lines().stream()
                         .flatMap(line -> line.spans().stream())
                         .map(span -> span.content())
@@ -1714,7 +1908,7 @@ class TuiCommandRenderTest {
                 assertFalse(text.contains("**careful changes**"), text);
                 assertFalse(text.contains("# Instructions"), text);
                 assertEquals(!prefix.isEmpty(), text.contains("Skill metadata"));
-                final var raw = (Text) overlay.invoke(command, entry, 100, true);
+                final var raw = (Text) overlay.invoke(command, entry, 100, true, DiffViewMode.SIMPLE, List.of());
                 final var rawText = raw.lines().stream()
                         .flatMap(line -> line.spans().stream())
                         .map(span -> span.content())
@@ -1722,14 +1916,16 @@ class TuiCommandRenderTest {
                 assertTrue(rawText.contains("# Instructions"), rawText);
                 assertTrue(rawText.contains("**careful changes**"), rawText);
                 assertEquals(source, entry.output());
-                Assertions.assertSame(raw, overlay.invoke(command, entry, 100, true));
-                Assertions.assertNotSame(raw, overlay.invoke(command, entry, 100, false));
+                Assertions.assertSame(raw, overlay.invoke(command, entry, 100, true, DiffViewMode.SIMPLE, List.of()));
+                Assertions.assertNotSame(
+                        raw, overlay.invoke(command, entry, 100, false, DiffViewMode.SIMPLE, List.of()));
             }
             for (final var unfinished : List.of(
                     new ToolOutputStore.Entry("skill", "{}", "Skill not found: **example**", true, 1),
                     new ToolOutputStore.Entry("skill", "{}", "Waiting for **example**", false, true, 1),
                     new ToolOutputStore.Entry("skill", "{}", "Loading **example**", false, -1))) {
-                final var diagnostic = (Text) overlay.invoke(command, unfinished, 100, false);
+                final var diagnostic =
+                        (Text) overlay.invoke(command, unfinished, 100, false, DiffViewMode.SIMPLE, List.of());
                 assertTrue(diagnostic.lines().stream()
                         .flatMap(line -> line.spans().stream())
                         .anyMatch(span -> span.content().contains("**example**")));
@@ -1840,7 +2036,8 @@ class TuiCommandRenderTest {
                     String.class,
                     int.class,
                     boolean.class,
-                    int.class);
+                    int.class,
+                    DiffViewMode.class);
             body.setAccessible(true);
             for (final var fixture : List.of(
                     List.of("write_file", "{\"path\":\"a.txt\",\"content\":\"pending payload\"}", ""),
@@ -1852,7 +2049,15 @@ class TuiCommandRenderTest {
                     List.of("bash", "malformed raw request", "execution failed"),
                     List.of("mcp_external", "{}", "   "))) {
                 final var full = (List<Line>) body.invoke(
-                        command, fixture.get(0), null, fixture.get(1), fixture.get(2), 100, false, Integer.MAX_VALUE);
+                        command,
+                        fixture.get(0),
+                        null,
+                        fixture.get(1),
+                        fixture.get(2),
+                        100,
+                        false,
+                        Integer.MAX_VALUE,
+                        DiffViewMode.SIMPLE);
                 final var text = full.stream()
                         .flatMap(line -> line.spans().stream())
                         .map(span -> span.content())
@@ -1863,8 +2068,8 @@ class TuiCommandRenderTest {
                     assertTrue(text.contains(fixture.get(2)), text);
                     assertTrue(text.indexOf("Request") < text.indexOf("Result"), text);
                 }
-                final var inline =
-                        (List<Line>) body.invoke(command, fixture.get(0), null, null, fixture.get(2), 100, false, 3);
+                final var inline = (List<Line>) body.invoke(
+                        command, fixture.get(0), null, null, fixture.get(2), 100, false, 3, DiffViewMode.SIMPLE);
                 final var inlineText = inline.stream()
                         .flatMap(line -> line.spans().stream())
                         .map(span -> span.content())
@@ -1929,12 +2134,22 @@ class TuiCommandRenderTest {
         @Test
         void runningEmptyOutputModalShowsRequestAndModalDiffsWrapWithoutInlineChanges() throws Exception {
             final var command = command(testRegistry(), stubAgentLoop());
-            final var overlay =
-                    TuiCommand.class.getDeclaredMethod("toolOverlayText", ToolOutputStore.Entry.class, int.class);
+            final var overlay = TuiCommand.class.getDeclaredMethod(
+                    "toolOverlayText",
+                    ToolOutputStore.Entry.class,
+                    int.class,
+                    boolean.class,
+                    DiffViewMode.class,
+                    List.class);
             overlay.setAccessible(true);
             final var args = "{\"path\":\"a.txt\",\"content\":\"draft body\"}";
-            final var running =
-                    (Text) overlay.invoke(command, new ToolOutputStore.Entry("write_file", args, "", false, -1), 80);
+            final var running = (Text) overlay.invoke(
+                    command,
+                    new ToolOutputStore.Entry("write_file", args, "", false, -1),
+                    80,
+                    false,
+                    DiffViewMode.SIMPLE,
+                    List.of());
             final var text = running.lines().stream()
                     .flatMap(line -> line.spans().stream())
                     .map(span -> span.content())
@@ -1948,12 +2163,15 @@ class TuiCommandRenderTest {
             final var full = (Text) overlay.invoke(
                     command,
                     new ToolOutputStore.Entry("apply_patch", "{\"patch\":\"not executed\"}", patch, true, 0),
-                    30);
+                    30,
+                    false,
+                    DiffViewMode.SIMPLE,
+                    List.of());
             final var fullText = full.lines().stream()
                     .flatMap(line -> line.spans().stream())
                     .map(span -> span.content())
                     .reduce("", String::concat);
-            assertTrue(fullText.contains(longLine), fullText);
+            assertTrue(fullText.replace(" ", "").contains(longLine), fullText);
             final var body = TuiCommand.class.getDeclaredMethod(
                     "toolBodyLines",
                     String.class,
@@ -1962,10 +2180,11 @@ class TuiCommandRenderTest {
                     String.class,
                     int.class,
                     boolean.class,
-                    int.class);
+                    int.class,
+                    DiffViewMode.class);
             body.setAccessible(true);
-            final var inline =
-                    (List<Line>) body.invoke(command, "apply_patch", null, null, patch, 30, true, Integer.MAX_VALUE);
+            final var inline = (List<Line>) body.invoke(
+                    command, "apply_patch", null, null, patch, 30, true, Integer.MAX_VALUE, DiffViewMode.SIMPLE);
             assertTrue(inline.stream()
                     .allMatch(line -> line.spans().stream()
                                     .map(span -> span.content())

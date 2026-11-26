@@ -1,6 +1,6 @@
 // Adapted from assistant-ui Elements DiffViewerLine (MIT).
 // See LICENSE.assistant-ui here and documentation/src/main/minisite/content/features/ui-advanced.adoc.
-import { lazy, Suspense, type HTMLAttributes } from 'react';
+import { lazy, Suspense, useLayoutEffect, useRef, useState, type HTMLAttributes } from 'react';
 import { canRenderDiff } from '../../lib/fileChanges';
 
 export type DiffMode = 'auto' | 'side-by-side' | 'simple';
@@ -14,15 +14,38 @@ type DiffViewerProps = HTMLAttributes<HTMLElement> & {
   oldSource?: string;
 };
 
-/** App-owned boundary. Auto follows tool disclosure and uses split layout when a complete patch is available. */
-export function DiffViewer({ mode = 'simple', path, oldSource, ...props }: DiffViewerProps) {
+/** App-owned boundary. Disclosure belongs to the caller; layout follows the available container. */
+export function DiffViewer({ mode = 'auto', path, oldSource, ...props }: DiffViewerProps) {
+  const container = useRef<HTMLDivElement>(null);
+  const [wide, setWide] = useState(false);
+  useLayoutEffect(() => {
+    const element = container.current;
+    if (!element) {
+      return;
+    }
+    // Match the split table's 48rem minimum, including when the sidebar is resized.
+    const measure = (width: number) => setWide(width >= 48 * (Number.parseFloat(getComputedStyle(document.documentElement).fontSize) || 16));
+    measure(element.getBoundingClientRect().width);
+    if (typeof ResizeObserver === 'undefined') {
+      const resize = () => measure(element.getBoundingClientRect().width);
+      window.addEventListener('resize', resize);
+      return () => window.removeEventListener('resize', resize);
+    }
+    const observer = new ResizeObserver(entries => {
+      for (const entry of entries) {
+        measure(entry.contentRect.width);
+      }
+    });
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
   const simple = <SimpleDiff {...props} />;
   const complete = props.startsAtLine !== false && canRenderDiff(props.text)
     && /^(?:diff --git [^\n]+\r?\n|--- [^\n]+\r?\n\+\+\+ )/.test(props.text);
-  if (mode === 'simple' || !complete) {
-    return simple;
-  }
-  return <Suspense fallback={simple}><SplitDiff {...props} path={path} oldSource={oldSource} fallback={simple} /></Suspense>;
+  return <div ref={container} style={{ minWidth: 0, width: '100%' }}>
+    {mode === 'simple' || !wide || !complete ? simple
+      : <Suspense fallback={simple}><SplitDiff {...props} path={path} oldSource={oldSource} fallback={simple} /></Suspense>}
+  </div>;
 }
 
 /** Literal patch lines, not a computed or reconstructed diff.

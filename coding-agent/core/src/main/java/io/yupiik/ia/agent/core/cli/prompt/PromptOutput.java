@@ -41,6 +41,15 @@ public interface PromptOutput {
      */
     boolean active();
 
+    /** Current terminal width; rich backends can override to reflect live resize events. */
+    default int columns() {
+        try {
+            return Math.max(1, Integer.parseInt(System.getenv("COLUMNS")));
+        } catch (final NumberFormatException ignored) {
+            return 80;
+        }
+    }
+
     /**
      * Prints text on {@code stdout}: above the live prompt and with the prompt
      * redrawn underneath when a read is in progress, raw otherwise.

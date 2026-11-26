@@ -51,6 +51,15 @@ public class MarkdownColorizer {
     private static final String CODE_TAG = "\u001b[38;5;167m"; // #e06c75
     private static final String CODE_ATTR = "\u001b[38;5;73m"; // #56b6c2
 
+    // CLI has no runtime theme: diff roles mirror Palette.DARK and CodeTheme.ONE_DARK.
+    // Keep these separate from the legacy markdown ANSI palette above.
+    private static final int DIFF_SUCCESS = 0x46f72f;
+    private static final int DIFF_ERROR = 0xf87171;
+    private static final int DIFF_PANEL = 0x12141a;
+    private static final int DIFF_TEXT = 0xeef0f3;
+    private static final String DIFF_ADD_BG = rgb(48, tint(DIFF_SUCCESS, DIFF_PANEL, 0.15));
+    private static final String DIFF_DEL_BG = rgb(48, tint(DIFF_ERROR, DIFF_PANEL, 0.15));
+
     private final boolean enabled;
     private boolean inFence;
     private String fenceLang;
@@ -61,6 +70,45 @@ public class MarkdownColorizer {
 
     public boolean isEnabled() {
         return enabled;
+    }
+
+    /** Syntax-colored diff cell using YCA dark roles, with only changed cells tinted. */
+    public String diffCell(final String language, final String text, final char change) {
+        if (!enabled) {
+            return text;
+        }
+        final var background =
+                switch (change) {
+                    case '+' -> DIFF_ADD_BG;
+                    case '-' -> DIFF_DEL_BG;
+                    default -> "";
+                };
+        final var marker = (change == '+' || change == '-') && text.startsWith(String.valueOf(change));
+        final var highlighted = (marker ? rgb(38, change == '+' ? DIFF_SUCCESS : DIFF_ERROR) + change + RESET : "")
+                + highlightCode(language, marker ? text.substring(1) : text)
+                        .replace(CODE_STR, rgb(38, 0x98c379))
+                        .replace(CODE_COM, rgb(38, 0x7f848e))
+                        .replace(CODE_NUM, rgb(38, 0xd19a66))
+                        .replace(CODE_KW, rgb(38, 0xc678dd))
+                        .replace(CODE_TY, rgb(38, 0x61afef))
+                        .replace(CODE_TAG, rgb(38, 0xe06c75))
+                        .replace(CODE_ATTR, rgb(38, 0x56b6c2))
+                        .replace(TEXT, rgb(38, DIFF_TEXT));
+        return background.isEmpty() ? highlighted : background + highlighted.replace(RESET, RESET + background) + RESET;
+    }
+
+    private static String rgb(final int role, final int color) {
+        return "\u001b[" + role + ";2;" + (color >> 16 & 255) + ";" + (color >> 8 & 255) + ";" + (color & 255) + "m";
+    }
+
+    private static int tint(final int foreground, final int background, final double opacity) {
+        var result = 0;
+        for (var shift = 0; shift <= 16; shift += 8) {
+            final var fg = foreground >> shift & 255;
+            final var bg = background >> shift & 255;
+            result |= (int) Math.round(bg + (fg - bg) * opacity) << shift;
+        }
+        return result;
     }
 
     public static boolean autoEnabled() {
