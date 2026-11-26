@@ -295,7 +295,7 @@ class SandboxToolEnforcementTest {
                 assertFalse(fetch.success());
                 assertTrue(fetch.output().contains("non-public"), fetch.output());
             }
-            assertEquals(4, sandbox.networkChecks);
+            assertEquals(2, sandbox.networkChecks);
             final var search = new WebSearchTool().execute(Map.of("query", "anything"), context);
             assertFalse(search.success());
             assertTrue(search.output().contains("disabled"), search.output());

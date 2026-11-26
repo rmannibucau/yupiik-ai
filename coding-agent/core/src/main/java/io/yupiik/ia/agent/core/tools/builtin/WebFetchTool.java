@@ -38,6 +38,7 @@ import java.nio.file.Path;
 import java.time.Duration;
 import java.util.Locale;
 import java.util.Map;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.regex.Pattern;
@@ -46,7 +47,7 @@ import java.util.regex.Pattern;
 public class WebFetchTool implements EmbeddedTool {
     private static final Pattern CONTENT_TYPE_CHARSET = Pattern.compile("(?i).*charset\\s*=\\s*[\"']?([^\"';\\s]+).*");
 
-    private static final int MAX_BYTES = 200_000;
+    private static final int MAX_BYTES = 10_000_000;
     private static final int MAX_OUTPUT = 60_000;
 
     private final ExtendedHttpClient client;
@@ -104,7 +105,6 @@ public class WebFetchTool implements EmbeddedTool {
         if (!"http".equalsIgnoreCase(uri.getScheme()) && !"https".equalsIgnoreCase(uri.getScheme())) {
             return ToolResult.error("Only http/https URLs are supported");
         }
-        context.sandbox().requireNetwork(uri);
         final var ssrf = context.sandbox().enabled() ? null : ssrfError(uri);
         if (ssrf != null) {
             return ToolResult.error(ssrf);
@@ -167,7 +167,8 @@ public class WebFetchTool implements EmbeddedTool {
             if (context.isCancelled() || Thread.currentThread().isInterrupted()) {
                 return ToolResult.error("Interrupted while fetching " + url);
             }
-            return ToolResult.error("Cannot fetch " + url + ": " + e.getMessage());
+            final var failure = e instanceof ExecutionException && e.getCause() != null ? e.getCause() : e;
+            return ToolResult.error("Cannot fetch " + url + ": " + failure.getMessage());
         }
     }
 

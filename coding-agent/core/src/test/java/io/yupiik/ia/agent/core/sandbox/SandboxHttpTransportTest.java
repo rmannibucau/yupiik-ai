@@ -27,10 +27,16 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
+import java.time.Duration;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Queue;
+import java.util.concurrent.CancellationException;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BooleanSupplier;
 import org.junit.jupiter.api.Test;
@@ -216,6 +222,25 @@ class SandboxHttpTransportTest {
     }
 
     @Test
+    void responseLimitFailuresExplainTheConfiguredLimitForEveryFraming() {
+        for (final var response : List.of(
+                "HTTP/1.1 200 OK\r\nContent-Length: 101\r\n\r\n" + "x".repeat(101),
+                "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n32\r\n" + "x".repeat(50) + "\r\n33\r\n"
+                        + "x".repeat(51) + "\r\n0\r\n\r\n",
+                "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n" + "x".repeat(101))) {
+            final var socket = new Wire(response);
+            try (final var transport =
+                    new Fixture(new Policy(root, List.of("first.test")), () -> false, 100, List.of(socket))) {
+                final var error = assertThrows(
+                        IOException.class,
+                        () -> transport.send(get("http://first.test/"), HttpResponse.BodyHandlers.ofByteArray()));
+                assertTrue(error.getMessage().contains("exceeds limit of 100 bytes"), error::getMessage);
+                assertTrue(socket.closed);
+            }
+        }
+    }
+
+    @Test
     void supportsStreamingBodiesWithBackpressure() throws Exception {
         final var content = "x".repeat(90_000);
         final var socket = new Wire("HTTP/1.1 200 OK\r\nContent-Length: 90000\r\n\r\n" + content);
@@ -239,6 +264,61 @@ class SandboxHttpTransportTest {
                     () -> transport.send(get("http://first.test/"), HttpResponse.BodyHandlers.ofString()));
             assertEquals(null, socket.destination);
             assertEquals("", socket.request());
+        }
+    }
+
+    @Test
+    void cancellationInterruptsBlockedNetworkPolicyBeforeConnect() throws Exception {
+        for (final var cancelFuture : List.of(true, false)) {
+            final var policy = new BlockingPolicy(root);
+            final var socket = new Wire("");
+            final var cancelled = new AtomicBoolean();
+            try (final var transport = new Fixture(policy, cancelled::get, 100, List.of(socket))) {
+                try {
+                    final var future =
+                            transport.sendAsync(get("http://first.test/"), HttpResponse.BodyHandlers.ofString());
+                    assertTrue(policy.entered.await(5, TimeUnit.SECONDS), "Network policy was not entered");
+                    if (cancelFuture) {
+                        assertTrue(future.cancel(true));
+                        assertThrows(CancellationException.class, () -> future.get(5, TimeUnit.SECONDS));
+                    } else {
+                        cancelled.set(true);
+                        final var error = assertThrows(ExecutionException.class, () -> future.get(5, TimeUnit.SECONDS));
+                        assertTrue(error.getCause() instanceof IOException);
+                    }
+                    assertTrue(
+                            policy.interrupted.await(5, TimeUnit.SECONDS),
+                            "Blocked network policy was not interrupted");
+                    assertEquals(null, socket.destination);
+                    assertEquals("", socket.request());
+                } finally {
+                    policy.release.countDown();
+                }
+            }
+        }
+    }
+
+    @Test
+    void timeoutInterruptsBlockedNetworkPolicyBeforeConnect() throws Exception {
+        final var policy = new BlockingPolicy(root);
+        final var socket = new Wire("");
+        try (final var transport = new Fixture(policy, () -> false, 100, List.of(socket))) {
+            try {
+                final var request = HttpRequest.newBuilder(URI.create("http://first.test/"))
+                        .timeout(Duration.ofSeconds(2))
+                        .GET()
+                        .build();
+                final var future = transport.sendAsync(request, HttpResponse.BodyHandlers.ofString());
+                assertTrue(policy.entered.await(5, TimeUnit.SECONDS), "Network policy was not entered");
+                final var error = assertThrows(ExecutionException.class, () -> future.get(5, TimeUnit.SECONDS));
+                assertTrue(error.getCause() instanceof IOException);
+                assertTrue(error.getCause().getMessage().contains("timed out"));
+                assertTrue(policy.interrupted.await(5, TimeUnit.SECONDS), "Blocked network policy was not interrupted");
+                assertEquals(null, socket.destination);
+                assertEquals("", socket.request());
+            } finally {
+                policy.release.countDown();
+            }
         }
     }
 
@@ -327,9 +407,19 @@ class SandboxHttpTransportTest {
         }
     }
 
-    private record Policy(Path tempDir, List<String> allowed, List<String> checks) implements Sandbox {
+    private static class Policy implements Sandbox {
+        private final Path tempDir;
+        private final List<String> allowed;
+        private final List<String> checks = new ArrayList<>();
+
         private Policy(final Path root, final List<String> allowed) {
-            this(root, allowed, new ArrayList<>());
+            this.tempDir = root;
+            this.allowed = allowed;
+        }
+
+        @Override
+        public Path tempDir() {
+            return tempDir;
         }
 
         @Override
@@ -378,6 +468,29 @@ class SandboxHttpTransportTest {
         @Override
         public void close() {
             /* no session resources */
+        }
+    }
+
+    private static final class BlockingPolicy extends Policy {
+        private final CountDownLatch entered = new CountDownLatch(1);
+        private final CountDownLatch interrupted = new CountDownLatch(1);
+        private final CountDownLatch release = new CountDownLatch(1);
+
+        private BlockingPolicy(final Path root) {
+            super(root, List.of("first.test"));
+        }
+
+        @Override
+        public void requireNetwork(final URI uri) {
+            super.requireNetwork(uri);
+            entered.countDown();
+            try {
+                release.await();
+            } catch (final InterruptedException error) {
+                interrupted.countDown();
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException("Network policy interrupted", error);
+            }
         }
     }
 }

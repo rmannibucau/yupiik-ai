@@ -30,10 +30,12 @@ import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
@@ -74,6 +76,100 @@ class SessionSandboxTest {
                 }
                 assertEquals(0, calls.get());
             }
+        }
+    }
+
+    @Test
+    void automaticNetworkApprovalsAreSharedScopedAndRevocable() throws Exception {
+        final var calls = new AtomicInteger();
+        final var decision = new AtomicReference<>(ApprovalGate.Result.ALLOW_ONCE);
+        final var permissions = permissions(request -> {
+            assertEquals(ApprovalGate.Origin.SANDBOX, request.origin());
+            assertEquals("network", request.args().get("kind"));
+            calls.incrementAndGet();
+            return decision.get();
+        });
+        final var destination = URI.create("https://8.8.8.8/path");
+        try (final var sandbox = sandbox(permissions, List.of())) {
+            sandbox.requireNetwork(destination);
+            sandbox.requireNetwork(destination);
+            assertEquals(2, calls.get());
+            decision.set(ApprovalGate.Result.ALLOW_SESSION);
+            final var view = sandbox.approvalView(permissions);
+            view.requireNetwork(destination);
+            decision.set(ApprovalGate.Result.DENY);
+            sandbox.requireNetwork(URI.create("https://8.8.8.8:443/other"));
+            sandbox.request("network", "8.8.8.8:443", false);
+            assertEquals(3, calls.get());
+            assertThrows(SecurityException.class, () -> view.requireNetwork(URI.create("http://8.8.8.8")));
+            assertEquals(4, calls.get());
+            sandbox.revoke();
+            assertThrows(SecurityException.class, () -> view.requireNetwork(destination));
+            assertEquals(5, calls.get());
+            for (final var target : List.of("https://127.0.0.1", "https://169.254.169.254", "https://10.0.0.1")) {
+                assertThrows(SecurityException.class, () -> sandbox.requireNetwork(URI.create(target)));
+            }
+            assertEquals(5, calls.get(), "Non-public destinations must never prompt");
+        }
+        try (final var sandbox = sandbox(permissions, List.of())) {
+            assertThrows(SecurityException.class, () -> sandbox.requireNetwork(destination));
+            assertEquals(6, calls.get(), "A new session must not inherit dynamic grants");
+        }
+    }
+
+    @Test
+    void explicitOnceNetworkGrantIsConsumedByOnlyOneOperation() throws Exception {
+        final var calls = new AtomicInteger();
+        final var permissions = permissions(request -> {
+            calls.incrementAndGet();
+            return calls.get() == 1 ? ApprovalGate.Result.ALLOW_ONCE : ApprovalGate.Result.DENY;
+        });
+        try (final var sandbox = sandbox(permissions, List.of())) {
+            sandbox.request("network", "8.8.8.8:443", false);
+            sandbox.requireNetwork(URI.create("https://8.8.8.8"));
+            assertEquals(1, calls.get());
+            assertThrows(SecurityException.class, () -> sandbox.requireNetwork(URI.create("https://8.8.8.8")));
+            assertEquals(2, calls.get());
+        }
+    }
+
+    @Test
+    void concurrentNetworkCallsShareOneSessionApproval() throws Exception {
+        final var entered = new CountDownLatch(1);
+        final var release = new CountDownLatch(1);
+        final var ready = new CountDownLatch(16);
+        final var calls = new AtomicInteger();
+        try (final var sandbox = sandbox(
+                        permissions(request -> {
+                            calls.incrementAndGet();
+                            entered.countDown();
+                            try {
+                                assertTrue(release.await(10, TimeUnit.SECONDS));
+                            } catch (final InterruptedException error) {
+                                Thread.currentThread().interrupt();
+                                throw new IllegalStateException(error);
+                            }
+                            return ApprovalGate.Result.ALLOW_SESSION;
+                        }),
+                        List.of());
+                final var executor = Executors.newVirtualThreadPerTaskExecutor()) {
+            final var tasks = new ArrayList<Future<?>>();
+            for (var i = 0; i < 16; i++) {
+                tasks.add(executor.submit(() -> {
+                    ready.countDown();
+                    sandbox.requireNetwork(URI.create("https://8.8.8.8"));
+                }));
+            }
+            try {
+                assertTrue(ready.await(10, TimeUnit.SECONDS));
+                assertTrue(entered.await(10, TimeUnit.SECONDS));
+            } finally {
+                release.countDown();
+            }
+            for (final var task : tasks) {
+                task.get(10, TimeUnit.SECONDS);
+            }
+            assertEquals(1, calls.get());
         }
     }
 
@@ -317,7 +413,7 @@ class SessionSandboxTest {
     @Test
     void revocationExpiresPendingOnceAndSessionApprovalsWithoutHoldingUiLock() throws Exception {
         for (final var result : List.of(ApprovalGate.Result.ALLOW_ONCE, ApprovalGate.Result.ALLOW_SESSION)) {
-            for (final var operation : List.of("read", "filesystem", "network", "launch")) {
+            for (final var operation : List.of("read", "filesystem", "network", "automatic-network", "launch")) {
                 final var entered = new CountDownLatch(1);
                 final var release = new CountDownLatch(1);
                 try (final var sandbox = sandbox(
@@ -340,6 +436,7 @@ class SessionSandboxTest {
                             case "launch" ->
                                 sandbox.launch(new ProcessBuilder("never-execute").directory(target.toFile()));
                             case "filesystem" -> sandbox.request(operation, target.toString(), true);
+                            case "automatic-network" -> sandbox.requireNetwork(URI.create("https://8.8.8.8"));
                             default -> sandbox.request(operation, "example.com:443", false);
                         }
                     }));

@@ -129,7 +129,7 @@ class SessionRuntimeTest {
                 for (final var next : List.of(AgentMode.BUILD, AgentMode.PLAN)) {
                     decision.set(ApprovalGate.Result.ALLOW_SESSION);
                     sandbox.request("filesystem", outside.toString(), true);
-                    sandbox.request("network", "8.8.8.8:443", false);
+                    sandbox.requireNetwork(destination);
                     decision.set(ApprovalGate.Result.DENY);
 
                     // Reasserting the effective modes preserves capabilities.
@@ -192,7 +192,7 @@ class SessionRuntimeTest {
 
     private void pendingSandboxApprovalsExpire(final boolean permissionModeChange) throws Exception {
         for (final var result : List.of(ApprovalGate.Result.ALLOW_ONCE, ApprovalGate.Result.ALLOW_SESSION)) {
-            for (final var operation : List.of("read", "filesystem", "network", "launch")) {
+            for (final var operation : List.of("read", "filesystem", "network", "automatic-network", "launch")) {
                 final var permissions = new PermissionService(configuration, storageHome);
                 final var entered = new CountDownLatch(1);
                 final var release = new CountDownLatch(1);
@@ -216,6 +216,7 @@ class SessionRuntimeTest {
                             case "read" -> sandbox.requireRead(target);
                             case "filesystem" -> sandbox.request(operation, target.toString(), true);
                             case "network" -> sandbox.request(operation, "8.8.8.8:443", false);
+                            case "automatic-network" -> sandbox.requireNetwork(URI.create("https://8.8.8.8"));
                             default -> sandbox.launch(new ProcessBuilder("never-execute").directory(target.toFile()));
                         }
                     }));

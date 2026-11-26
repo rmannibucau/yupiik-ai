@@ -8,7 +8,6 @@ package io.yupiik.ia.agent.core.tools.builtin;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.fusion.json.JsonMapper;
@@ -54,10 +53,10 @@ class SandboxWebTransportTest {
         @Test
         void webFetchPolicyDenialDoesNotUseAmbientClient() {
             final var sandbox = new Policy(root, false, new ArrayList<>());
-            assertThrows(
-                    SecurityException.class,
-                    () -> new WebFetchTool(null, null)
-                            .execute(Map.of("url", "http://127.0.0.1/"), ToolContext.empty(root, sandbox)));
+            final var result = new WebFetchTool(null, null)
+                    .execute(Map.of("url", "http://127.0.0.1/"), ToolContext.empty(root, sandbox));
+            assertFalse(result.success());
+            assertTrue(result.output().contains("Sandbox hard deny"), result.output());
             assertEquals(List.of(URI.create("http://127.0.0.1/")), sandbox.checks());
         }
     }
@@ -75,7 +74,7 @@ class SandboxWebTransportTest {
                     .execute(Map.of("url", "http://169.254.169.254/"), ToolContext.empty(root, sandbox));
             assertFalse(result.success());
             assertTrue(result.output().contains("non-public"), result.output());
-            assertEquals(2, sandbox.checks().size());
+            assertEquals(List.of(URI.create("http://169.254.169.254/")), sandbox.checks());
         }
     }
 

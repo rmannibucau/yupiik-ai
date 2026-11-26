@@ -107,6 +107,7 @@ public class SandboxHttpTransport extends HttpClient {
     public <T> CompletableFuture<HttpResponse<T>> sendAsync(
             final HttpRequest request, final HttpResponse.BodyHandler<T> handler) {
         final var result = new CompletableFuture<HttpResponse<T>>();
+        final var worker = new AtomicReference<Thread>();
         final var exchange = new Exchange();
         exchanges.add(exchange);
         final var timeout = request.timeout().orElse(Duration.ofSeconds(30));
@@ -128,11 +129,19 @@ public class SandboxHttpTransport extends HttpClient {
         result.whenComplete((value, error) -> {
             if (error != null) {
                 exchange.close();
+                final var thread = worker.get();
+                if (thread != null && thread != Thread.currentThread()) {
+                    thread.interrupt();
+                }
             }
         });
         workers.execute(() -> {
+            worker.set(Thread.currentThread());
             HttpResponse.BodySubscriber<T> subscriber = null;
             try {
+                if (result.isCompletedExceptionally()) {
+                    return;
+                }
                 check(exchange);
                 final var body = request.bodyPublisher().isPresent()
                         ? requestBody(request.bodyPublisher().orElseThrow())
@@ -275,6 +284,7 @@ public class SandboxHttpTransport extends HttpClient {
                 }
                 result.completeExceptionally(error);
             } finally {
+                worker.set(null);
                 exchange.close();
                 exchanges.remove(exchange);
                 watchdog.cancel(false);
@@ -438,7 +448,7 @@ public class SandboxHttpTransport extends HttpClient {
                     throw new IOException("Invalid HTTP chunk size", error);
                 }
                 if (count < 0 || count > maxBytes - total) {
-                    throw new IOException("Sandbox HTTP response body too large");
+                    throw new IOException("Sandbox HTTP response body exceeds limit of " + maxBytes + " bytes");
                 }
                 if (count == 0) {
                     while (!line(input, budget).isEmpty()) {
@@ -464,7 +474,7 @@ public class SandboxHttpTransport extends HttpClient {
                 throw new IOException("Invalid HTTP content length", error);
             }
             if (count < 0 || count > maxBytes) {
-                throw new IOException("Sandbox HTTP response body too large");
+                throw new IOException("Sandbox HTTP response body exceeds limit of " + maxBytes + " bytes");
             }
             copy(input, count, subscriber, exchange);
             return;
@@ -475,7 +485,7 @@ public class SandboxHttpTransport extends HttpClient {
             check(exchange);
             total += read;
             if (total > maxBytes) {
-                throw new IOException("Sandbox HTTP response body too large");
+                throw new IOException("Sandbox HTTP response body exceeds limit of " + maxBytes + " bytes");
             }
             emit(subscriber, exchange, buffer, read);
         }

@@ -22,6 +22,7 @@ import java.nio.file.attribute.PosixFilePermissions;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
@@ -29,6 +30,7 @@ import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.ReentrantLock;
 
 /** Session-owned policy, grants, process and egress lifetime; no ambient/thread-local policy. */
@@ -53,6 +55,8 @@ public final class SessionSandbox implements Sandbox {
     private final List<String> onceNetwork = new ArrayList<>();
     private final Set<Command> commands = ConcurrentHashMap.newKeySet();
     private final ReentrantLock lock = new ReentrantLock();
+    private final Condition networkApprovalCompleted = lock.newCondition();
+    private final Set<NetworkApproval> pendingNetworkApprovals = new HashSet<>();
     private LinuxSandbox linux;
     private boolean closed;
     private long generation;
@@ -172,19 +176,78 @@ public final class SessionSandbox implements Sandbox {
     }
 
     private void requireNetwork(final URI uri, final PermissionService approvalPermissions) {
+        final long requestedGeneration;
+        final String domain;
         lock.lock();
         try {
             ensureOpen();
             if (!enabled(approvalPermissions)) {
                 return;
             }
-            new SandboxDestinations(combinedDomains(false)).resolve(uri);
-        } catch (final IOException error) {
-            throw new SecurityException("Sandbox destination resolution failed", error);
+            requestedGeneration = generation;
+            domain = SandboxDestinations.host(uri) + ":" + SandboxDestinations.port(uri);
         } finally {
             lock.unlock();
         }
+        // DNS and user interaction must not hold the lock needed to revoke a session.
+        try {
+            new SandboxDestinations(List.of(domain)).resolve(uri);
+        } catch (final IOException error) {
+            throw new SecurityException("Sandbox destination resolution failed", error);
+        }
+        lock.lock();
+        try {
+            final var pending = new NetworkApproval(domain, requestedGeneration);
+            while (true) {
+                checkGeneration(requestedGeneration);
+                if (new SandboxDestinations(combinedDomains(false)).allows(uri)) {
+                    return;
+                }
+                final var rules = onceNetwork.iterator();
+                while (rules.hasNext()) {
+                    final var rule = rules.next();
+                    if (new SandboxDestinations(List.of(rule)).allows(uri)) {
+                        rules.remove();
+                        return;
+                    }
+                }
+                if (pendingNetworkApprovals.add(pending)) {
+                    break;
+                }
+                try {
+                    networkApprovalCompleted.await();
+                } catch (final InterruptedException error) {
+                    Thread.currentThread().interrupt();
+                    throw new SecurityException("Sandbox network approval interrupted", error);
+                }
+            }
+        } finally {
+            lock.unlock();
+        }
+        try {
+            final var result = approve("network", domain, false, approvalPermissions);
+            lock.lock();
+            try {
+                checkGeneration(requestedGeneration);
+                if (result == ApprovalGate.Result.ALLOW_SESSION) {
+                    network.add(domain);
+                }
+                // ALLOW_ONCE authorizes only this operation, not any waiting callers.
+            } finally {
+                lock.unlock();
+            }
+        } finally {
+            lock.lock();
+            try {
+                pendingNetworkApprovals.remove(new NetworkApproval(domain, requestedGeneration));
+                networkApprovalCompleted.signalAll();
+            } finally {
+                lock.unlock();
+            }
+        }
     }
+
+    private record NetworkApproval(String domain, long generation) {}
 
     @Override
     public void request(final String kind, final String target, final boolean write) {
@@ -492,6 +555,7 @@ public final class SessionSandbox implements Sandbox {
             onceReads.clear();
             onceWrites.clear();
             onceNetwork.clear();
+            networkApprovalCompleted.signalAll();
         } finally {
             lock.unlock();
         }
