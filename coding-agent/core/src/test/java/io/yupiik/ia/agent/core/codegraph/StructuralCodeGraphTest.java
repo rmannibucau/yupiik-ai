@@ -21,11 +21,13 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import io.yupiik.codegraph.index.CodeGraphIndexWriter;
 import io.yupiik.fusion.httpclient.core.ExtendedHttpClient;
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.fusion.testing.Fusion;
 import io.yupiik.fusion.testing.FusionSupport;
 import io.yupiik.ia.agent.core.codegraph.index.CodeGraphIndex;
+import io.yupiik.ia.agent.core.codegraph.index.GraphToIndex;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.ConfigurationTestModule;
 import io.yupiik.ia.agent.core.configuration.NativeProviderConfiguration;
@@ -55,6 +57,7 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
@@ -369,6 +372,7 @@ class StructuralCodeGraphTest {
 
             // a second, independent project the web may point another session at
             final var second = Files.createDirectory(temp.resolve("second"));
+            Files.writeString(second.resolve("pom.xml"), "<project/>");
             Files.writeString(second.resolve("Baz.java"), """
                 package other;
                 public class Baz {
@@ -450,6 +454,7 @@ class StructuralCodeGraphTest {
 
             final var work = Files.createDirectory(temp.resolve("work"));
             Files.writeString(work.resolve("Bar.java"), "package work;\npublic class Bar { public void run() {} }\n");
+            Files.writeString(work.resolve("pom.xml"), "<project/>");
 
             final var idx1 = graph.queryIndex(work);
             assertNotNull(idx1.resolve("work.Bar"));
@@ -640,7 +645,7 @@ class StructuralCodeGraphTest {
         @Test
         void skipsIndexingForUnrecognizedProjectDir(@Fusion final CodingAgentConfiguration configuration)
                 throws Exception {
-            // A directory with indexable sources but no project marker (pom.xml, .yca, README, ...)
+            // A directory with indexable sources but no project marker (pom.xml, local configuration, README, ...)
             // is not a recognized project: it must not be scanned/indexed.
             final var project = Files.createDirectory(temp.resolve("plain"));
             Files.writeString(
@@ -651,6 +656,69 @@ class StructuralCodeGraphTest {
             assertTrue(
                     graph.graph(config.resolveWorkingDir()).symbols().isEmpty(),
                     "a directory without a project marker must not be indexed into a structural code graph");
+        }
+
+        @Test
+        void metadataDoesNotOptParentWorkspaceIntoIndexing(@Fusion final CodingAgentConfiguration configuration)
+                throws Exception {
+            final var parent = Files.createDirectory(temp.resolve("workspace"));
+            final var metadata = Files.createDirectories(parent.resolve(".yca/memory"));
+            Files.writeString(metadata.resolve("notes.md"), "keep this memory");
+            Files.writeString(parent.resolve(".yca/java-location"), "probe result");
+            final var child = Files.createDirectory(parent.resolve("child"));
+            Files.writeString(child.resolve("pom.xml"), "<project/>");
+            Files.createDirectories(child.resolve(".yca"));
+            Files.writeString(child.resolve(".yca/configuration.json"), "{}");
+            final var source = Files.writeString(child.resolve("Foo.java"), "public class Foo {}\n");
+            final var parser = new CapturingBatchParser();
+            final var graph = newGraph(withProject(configuration, parent), mapper, List.of(parser));
+            graph.ensureReadyAsync(parent);
+            graph.ensureReady(parent);
+            graph.ensureRefreshedReady(parent);
+            graph.refreshFile(source);
+            graph.onToolExecuted(new AfterToolExecutionEvent(
+                    "write_file", true, "ok", "test", null, null, Map.of("path", "child/Foo.java"), parent));
+            graph.ensureRefreshedReady(parent);
+            assertTrue(graph.graph(parent).symbols().isEmpty());
+            assertEquals(0, graph.queryIndex(parent).symbolCount());
+            assertTrue(graph.resync(parent).startsWith("not a recognized project:"));
+            graph.flushPersist(parent);
+            graph.close();
+            assertTrue(parser.batchInputs.isEmpty());
+            assertFalse(Files.exists(parent.resolve(".yca/generated/graph")));
+            assertEquals("keep this memory", Files.readString(metadata.resolve("notes.md")));
+            assertEquals("probe result", Files.readString(parent.resolve(".yca/java-location")));
+
+            final var otherGraph = newGraph(withProject(configuration, child), mapper, List.of(parser));
+            assertEquals(0, otherGraph.queryIndex(parent).symbolCount());
+            assertTrue(otherGraph.resync(parent).startsWith("not a recognized project:"));
+            assertTrue(parser.batchInputs.isEmpty());
+            assertEquals(1, otherGraph.queryIndex(child).symbolCount());
+        }
+
+        @Test
+        void localConfigurationExplicitlyOptsIntoIndexing(@Fusion final CodingAgentConfiguration configuration)
+                throws Exception {
+            final var project = Files.createDirectory(temp.resolve("configured"));
+            Files.createDirectories(project.resolve(".yca/configuration.json"));
+            Files.writeString(project.resolve("Foo.java"), "public class Foo {}\n");
+            final var parser = new CapturingBatchParser();
+            final var graph = newGraph(withProject(configuration, project), mapper, List.of(parser));
+            assertEquals(0, graph.queryIndex(project).symbolCount(), "a configuration directory is not a marker");
+            Files.delete(project.resolve(".yca/configuration.json"));
+            Files.writeString(project.resolve(".yca/configuration.json"), "{}");
+            assertEquals(1, graph.queryIndex(project).symbolCount());
+            graph.flushPersist(project);
+            assertTrue(Files.isRegularFile(project.resolve(".yca/generated/graph/index.bin")));
+
+            final var otherGraph = newGraph(withProject(configuration, temp), mapper, List.of(parser));
+            assertEquals(1, otherGraph.queryIndex(project).symbolCount());
+        }
+
+        @Test
+        void cachedGraphDoesNotReplaceProjectMarker(@Fusion final CodingAgentConfiguration configuration)
+                throws Exception {
+            assertCacheRequiresProjectMarker(configuration);
         }
 
         @Test
@@ -929,6 +997,50 @@ class StructuralCodeGraphTest {
     public static class DefaultGraphModule extends ConfigurationTestModule {
         public DefaultGraphModule() {
             super(graphSettings(Map.of()));
+        }
+    }
+
+    private void assertCacheRequiresProjectMarker(final CodingAgentConfiguration configuration) throws Exception {
+        final var project = Files.createDirectory(temp.resolve("cached"));
+        Files.writeString(project.resolve("pom.xml"), "<project/>");
+        final var source = Files.writeString(project.resolve("Foo.java"), "public class Foo {}\n");
+        final var config = withProject(configuration, project);
+        final var original = newGraph(config, mapper);
+        assertNotNull(original.queryIndex(project).resolve("Foo"));
+        original.flushPersist(project);
+        original.close();
+        final var cache = project.resolve(".yca/generated/graph/index.bin");
+        if (config.structuralCodeGraph().noRefresh()) {
+            // noRefresh does not persist builds: seed an existing cache to exercise its load fast path.
+            Files.createDirectories(cache.getParent());
+            CodeGraphIndexWriter.write(GraphToIndex.toIndex(original.graph(project)), cache);
+        }
+        assertTrue(Files.isRegularFile(cache));
+        final var cachedBytes = Files.readAllBytes(cache);
+        Files.delete(project.resolve("pom.xml"));
+        final var reloaded = newGraph(config, mapper);
+        reloaded.ensureReady(project);
+        assertEquals(0, reloaded.queryIndex(project).symbolCount());
+        assertTrue(reloaded.graph(project).symbols().isEmpty());
+        assertTrue(reloaded.resync(project).startsWith("not a recognized project:"));
+        reloaded.refreshFile(source);
+        reloaded.close();
+        Assertions.assertArrayEquals(cachedBytes, Files.readAllBytes(cache));
+    }
+
+    @Nested
+    @FusionSupport(modules = NoRefreshGraphModule.class)
+    class NoRefreshGraph {
+        @Test
+        void cachedGraphDoesNotReplaceProjectMarker(@Fusion final CodingAgentConfiguration configuration)
+                throws Exception {
+            assertCacheRequiresProjectMarker(configuration);
+        }
+    }
+
+    public static class NoRefreshGraphModule extends ConfigurationTestModule {
+        public NoRefreshGraphModule() {
+            super(graphSettings(Map.of("yca.structuralCodeGraph.noRefresh", "true")));
         }
     }
 

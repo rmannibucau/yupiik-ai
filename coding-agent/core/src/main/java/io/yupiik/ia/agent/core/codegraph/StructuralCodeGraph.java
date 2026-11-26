@@ -101,8 +101,7 @@ public class StructuralCodeGraph implements AutoCloseable {
             "Cargo.toml",
             "go.mod",
             "README.md",
-            "README.adoc",
-            ".yca");
+            "README.adoc");
 
     private final CodingAgentConfiguration configuration;
     private final List<GraphParser> registeredParsers;
@@ -329,7 +328,7 @@ public class StructuralCodeGraph implements AutoCloseable {
     }
 
     private void startWatchService() {
-        if (!configuration.structuralCodeGraph().watch() || watching.get() || projectDir == null) {
+        if (!configuration.structuralCodeGraph().watch() || watching.get() || !isRecognizedProject(projectDir)) {
             return;
         }
         try {
@@ -462,7 +461,13 @@ public class StructuralCodeGraph implements AutoCloseable {
     private void preparePrimaryAsync() {
         readinessLock.lock();
         try {
-            if (!enabled() || index != null || indexFile == null || projectDir == null || readyStarted.get()) return;
+            if (!enabled()
+                    || index != null
+                    || indexFile == null
+                    || !isRecognizedProject(projectDir)
+                    || readyStarted.get()) {
+                return;
+            }
             final var future = new CompletableFuture<Void>();
             readyFuture = future;
             readyStarted.set(true);
@@ -501,13 +506,13 @@ public class StructuralCodeGraph implements AutoCloseable {
             return;
         }
         final var t0 = System.nanoTime();
-        if (indexFile == null || projectDir == null) {
+        if (indexFile == null || !isRecognizedProject(projectDir)) {
             return;
         }
         // Fast path: a current binary index exists -> memory-map/load it and serve queries directly off it,
         // avoiding any full-tree rescan or JSON materialisation on this session start. When noRefresh trusts the
         // on-disk index as authoritative, attempt this FIRST and skip the expensive hasIndexableContent() tree
-        // walk (the very existence of a current index.bin is proof the directory is code). For the default
+        // walk, but only after checking the root's project markers. For the default
         // noRefresh=false the tree walk still runs first to decide whether there is anything to index at all.
         if (configNoRefresh && loadIndex()) {
             LOGGER.info("CodeGraph ensureReady fast-path took " + (System.nanoTime() - t0) / 1_000_000L
@@ -555,7 +560,7 @@ public class StructuralCodeGraph implements AutoCloseable {
     }
 
     private GraphStore primaryGraph() {
-        if (!enabled()) {
+        if (!enabled() || !isRecognizedProject(projectDir)) {
             return GraphStore.empty();
         }
         preparePrimary();
@@ -575,6 +580,9 @@ public class StructuralCodeGraph implements AutoCloseable {
      * {@link #primaryGraph()} (which stays the transient ingest scratch), so no full graph is materialised at query time.
      */
     private CodeGraphIndex primaryIndex() {
+        if (configuration != null && !isRecognizedProject(projectDir)) {
+            return CodeGraphIndex.load(CodeGraphIndexWriter.toBytes(toIndexGraph(GraphStore.empty())));
+        }
         preparePrimary();
         var current = index;
         if (current == null) {
@@ -630,6 +638,10 @@ public class StructuralCodeGraph implements AutoCloseable {
         final var normalized = root;
         if (!Files.isDirectory(normalized)) {
             throw new IllegalArgumentException("workdir is not a directory: " + root);
+        }
+        if (!isRecognizedProject(normalized)) {
+            rootIndexes.remove(normalized);
+            return CodeGraphIndex.load(CodeGraphIndexWriter.toBytes(toIndexGraph(GraphStore.empty())));
         }
         var entry = rootIndexes.get(normalized);
         if (entry == null || isRootStale(normalized, entry)) {
@@ -888,6 +900,9 @@ public class StructuralCodeGraph implements AutoCloseable {
         if (!enabled()) {
             return "disabled (enable yca.structural-code-graph.enabled)";
         }
+        if (!isRecognizedProject(projectDir)) {
+            return "not a recognized project: " + projectDir;
+        }
         preparePrimary();
         final var loaded = load();
         final GraphStore rebuilt;
@@ -921,6 +936,10 @@ public class StructuralCodeGraph implements AutoCloseable {
         final var normalized = root;
         if (!Files.isDirectory(normalized)) {
             return "not a directory: " + normalized;
+        }
+        if (!isRecognizedProject(normalized)) {
+            rootIndexes.remove(normalized);
+            return "not a recognized project: " + normalized;
         }
         final var entry = indexRoot(normalized);
         rootIndexes.put(normalized, entry);
@@ -986,7 +1005,7 @@ public class StructuralCodeGraph implements AutoCloseable {
      * Same-path jobs coalesce; writes landed via write_file/edit_file never block the agent loop.
      */
     private void enqueueRefresh(final Path file) {
-        if (configNoRefresh || projectDir == null || ignoreRules == null) {
+        if (configNoRefresh || !isRecognizedProject(projectDir) || ignoreRules == null) {
             return;
         }
         final var absolute = file.toAbsolutePath().normalize();
@@ -1068,7 +1087,7 @@ public class StructuralCodeGraph implements AutoCloseable {
         refreshLock.lock();
         try {
             final var parser = javaParser();
-            if (parser == null) {
+            if (parser == null || !isRecognizedProject(projectDir)) {
                 refreshPending.addAndGet(-files.size());
                 return;
             }
@@ -1148,7 +1167,7 @@ public class StructuralCodeGraph implements AutoCloseable {
     }
 
     private void refreshFileNow(final Path absolute) {
-        if (!enabled() || absolute == null || projectDir == null) {
+        if (!enabled() || absolute == null || !isRecognizedProject(projectDir)) {
             return;
         }
         // only files inside the project dir (any depth) belong to the graph; writes
@@ -1545,10 +1564,9 @@ public class StructuralCodeGraph implements AutoCloseable {
     }
 
     private boolean hasIndexableContent() {
-        // Only index directories that look like an actual project (build file, manifest or a README
-        // marker, or an explicit .yca marker). Otherwise a random working directory (e.g. /tmp) must
-        // not trigger a full recursive scan of the filesystem.
-        if (!isRecognizedProject()) {
+        // Only index roots with a build file, manifest, README or explicit local YCA configuration.
+        // Incidental metadata in a random working directory must not authorize a recursive scan.
+        if (!isRecognizedProject(projectDir)) {
             return false;
         }
         for (final var file : candidateFiles()) {
@@ -1559,9 +1577,17 @@ public class StructuralCodeGraph implements AutoCloseable {
         return false;
     }
 
-    private boolean isRecognizedProject() {
+    private boolean isRecognizedProject(final Path root) {
+        if (root == null) {
+            return false;
+        }
+        // Probe, memory and graph caches also create .yca; only an explicit local configuration
+        // identifies a project without another marker. Never inspect descendants or global configuration.
+        if (Files.isRegularFile(root.resolve(".yca/configuration.json"))) {
+            return true;
+        }
         for (final var marker : PROJECT_MARKERS) {
-            if (Files.exists(projectDir.resolve(marker))) {
+            if (Files.exists(root.resolve(marker))) {
                 return true;
             }
         }
